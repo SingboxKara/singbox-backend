@@ -61,13 +61,24 @@ const transporter = mailEnabled
   ? nodemailer.createTransport({
       host: SMTP_HOST,
       port: SMTP_PORT,
-      secure: false,
+      secure: SMTP_PORT === 465, // true si port 465, sinon false
       auth: {
         user: SMTP_USER,
         pass: SMTP_PASS,
       },
     })
   : null;
+
+// Test de connexion SMTP au démarrage
+if (mailEnabled && transporter) {
+  transporter.verify((err, success) => {
+    if (err) {
+      console.error("❌ Erreur connexion SMTP :", err);
+    } else {
+      console.log("✅ Connexion SMTP OK, prêt à envoyer des mails");
+    }
+  });
+}
 
 const app = express();
 
@@ -145,34 +156,35 @@ async function sendReservationEmail(reservation) {
     return;
   }
 
-  // Génération QR code à partir de l'id de réservation
-  const qrText = reservation.id; // le lecteur Python lit cet id
-  const qrDataUrl = await QRCode.toDataURL(qrText);
-  const base64Data = qrDataUrl.split(",")[1];
-  const qrBuffer = Buffer.from(base64Data, "base64");
+  try {
+    // Génération QR code à partir de l'id de réservation
+    const qrText = reservation.id; // le lecteur Python lit cet id
+    const qrDataUrl = await QRCode.toDataURL(qrText);
+    const base64Data = qrDataUrl.split(",")[1];
+    const qrBuffer = Buffer.from(base64Data, "base64");
 
-  const start = reservation.start_time
-    ? new Date(reservation.start_time)
-    : null;
-  const end = reservation.end_time ? new Date(reservation.end_time) : null;
+    const start = reservation.start_time
+      ? new Date(reservation.start_time)
+      : null;
+    const end = reservation.end_time ? new Date(reservation.end_time) : null;
 
-  const fmt = (d) =>
-    d
-      ? d.toLocaleString("fr-FR", {
-          day: "2-digit",
-          month: "2-digit",
-          year: "numeric",
-          hour: "2-digit",
-          minute: "2-digit",
-        })
-      : "N/A";
+    const fmt = (d) =>
+      d
+        ? d.toLocaleString("fr-FR", {
+            day: "2-digit",
+            month: "2-digit",
+            year: "numeric",
+            hour: "2-digit",
+            minute: "2-digit",
+          })
+        : "N/A";
 
-  const startStr = fmt(start);
-  const endStr = fmt(end);
+    const startStr = fmt(start);
+    const endStr = fmt(end);
 
-  const subject = `Votre réservation Singbox - Box ${reservation.box_id}`;
+    const subject = `Votre réservation Singbox - Box ${reservation.box_id}`;
 
-  const textBody = `Bonjour,
+    const textBody = `Bonjour,
 
 Votre réservation Singbox a bien été enregistrée ✅
 
@@ -186,38 +198,52 @@ Votre QR code est en pièce jointe (à présenter à l'entrée).
 À très vite chez Singbox 🎤
 `;
 
-  const htmlBody = `
-    <p>Bonjour,</p>
-    <p>Votre réservation <strong>Singbox</strong> a bien été enregistrée ✅</p>
-    <p><strong>Détails de votre session :</strong></p>
-    <ul>
-      <li>Box : <strong>${reservation.box_id}</strong></li>
-      <li>Début : <strong>${startStr}</strong></li>
-      <li>Fin : <strong>${endStr}</strong></li>
-    </ul>
-    <p>Votre QR code est ci-dessous et en pièce jointe (à présenter à l'entrée) :</p>
-    <p><img src="cid:qrimage@singbox" alt="QR Code Singbox" /></p>
-    <p>À très vite chez Singbox 🎤</p>
-  `;
+    const htmlBody = `
+      <p>Bonjour,</p>
+      <p>Votre réservation <strong>Singbox</strong> a bien été enregistrée ✅</p>
+      <p><strong>Détails de votre session :</strong></p>
+      <ul>
+        <li>Box : <strong>${reservation.box_id}</strong></li>
+        <li>Début : <strong>${startStr}</strong></li>
+        <li>Fin : <strong>${endStr}</strong></li>
+      </ul>
+      <p>Votre QR code est ci-dessous et en pièce jointe (à présenter à l'entrée) :</p>
+      <p><img src="cid:qrimage@singbox" alt="QR Code Singbox" /></p>
+      <p>À très vite chez Singbox 🎤</p>
+    `;
 
-  const mailOptions = {
-    from: `"Singbox" <${SMTP_USER}>`,
-    to: toEmail,
-    subject,
-    text: textBody,
-    html: htmlBody,
-    attachments: [
-      {
-        filename: "qr-reservation.png",
-        content: qrBuffer,
-        contentType: "image/png",
-        cid: "qrimage@singbox",
-      },
-    ],
-  };
+    const mailOptions = {
+      from: `"Singbox" <${SMTP_USER}>`,
+      to: toEmail,
+      subject,
+      text: textBody,
+      html: htmlBody,
+      attachments: [
+        {
+          filename: "qr-reservation.png",
+          content: qrBuffer,
+          contentType: "image/png",
+          cid: "qrimage@singbox",
+        },
+      ],
+    };
 
-  await transporter.sendMail(mailOptions);
-  console.log("📧 Email envoyé à", toEmail, "pour réservation", reservation.id);
+    console.log(
+      "📧 Envoi de l'email à",
+      toEmail,
+      "pour réservation",
+      reservation.id
+    );
+    await transporter.sendMail(mailOptions);
+    console.log(
+      "✅ Email envoyé à",
+      toEmail,
+      "pour réservation",
+      reservation.id
+    );
+  } catch (err) {
+    console.error("❌ Erreur lors de l'envoi de l'email :", err);
+  }
 }
 
 // ------------------------------------------------------
@@ -250,7 +276,6 @@ app.post(
 
     console.log("📩 Webhook Stripe reçu :", event.type);
 
-    // Ici on gère les événements qui nous intéressent
     switch (event.type) {
       case "payment_intent.succeeded": {
         const paymentIntent = event.data.object;
@@ -262,8 +287,6 @@ app.post(
           "client",
           paymentIntent.metadata?.customer_email
         );
-        // Pour l'instant on ne touche pas à Supabase ici,
-        // ta logique de réservation reste dans /api/confirm-reservation
         break;
       }
       case "payment_intent.payment_failed": {
