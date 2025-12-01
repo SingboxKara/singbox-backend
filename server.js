@@ -87,6 +87,7 @@ function buildTimesFromSlot(slot) {
   }
 
   const date = slot.date; // "YYYY-MM-DD"
+
   // hour peut être "15", 15, "15h - 16h", etc. -> on garde uniquement le nombre
   let hourNum = 0;
   if (typeof slot.hour === "number") {
@@ -98,12 +99,21 @@ function buildTimesFromSlot(slot) {
     hourNum = 0;
   }
 
-  const hourStr = String(hourNum).padStart(2, "0") + ":00";
-  const startLocal = new Date(`${date}T${hourStr}:00`);
-  const endLocal = new Date(startLocal.getTime() + 60 * 60000); // +60 min
+  // 🕒 offset de fuseau envoyé par le front (en minutes)
+  // ex : Paris hiver = -60, été = -120
+  const tzOffsetMinutes = Number(slot.tzOffsetMinutes ?? 0);
 
-  const startIso = startLocal.toISOString();
-  const endIso = endLocal.toISOString();
+  // On décompose la date
+  const [year, month, day] = date.split("-").map((x) => parseInt(x, 10));
+
+  // On construit l'instant en UTC à partir de la date locale + offset
+  // Local → UTC : on enlève l'offset (qui est négatif en Europe/Paris)
+  const localUtcMillis = Date.UTC(year, month - 1, day, hourNum, 0, 0);
+  const startUtc = new Date(localUtcMillis - tzOffsetMinutes * 60000);
+  const endUtc = new Date(startUtc.getTime() + 60 * 60000);
+
+  const startIso = startUtc.toISOString();
+  const endIso = endUtc.toISOString();
 
   return {
     start_time: startIso,
