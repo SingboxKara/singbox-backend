@@ -161,6 +161,7 @@ async function sendReservationEmail(reservation) {
     const fmt = (d) =>
       d
         ? d.toLocaleString("fr-FR", {
+            timeZone: "Europe/Paris",
             day: "2-digit",
             month: "2-digit",
             year: "numeric",
