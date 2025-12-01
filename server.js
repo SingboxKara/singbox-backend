@@ -99,15 +99,23 @@ function buildTimesFromSlot(slot) {
     hourNum = 0;
   }
 
-  // 🕒 On suppose que hourNum est en heure FR (UTC+1)
-  // On convertit en UTC en retirant 1h
-  const utcHour = hourNum - 1; // ⬅⬅ décalage d'1h pour l'hiver
+  // Décalage envoyé par le front (minutes) : getTimezoneOffset()
+  // ex : Paris hiver => -60, été => -120
+  const tzOffsetMinutes = Number(slot.tzOffsetMinutes ?? 0);
 
+  // On décompose la date
   const [year, month, day] = date.split("-").map((x) => parseInt(x, 10));
 
-  // On construit la date/heure directement en UTC
-  const startUtc = new Date(Date.UTC(year, month - 1, day, utcHour, 0, 0));
-  const endUtc = new Date(startUtc.getTime() + 60 * 60000); // +60 min
+  // On construit le temps "local" (heure choisie dans ton planning)
+  // comme si c'était une horloge murale : 2025-12-01 16:00
+  const localMillis = Date.UTC(year, month - 1, day, hourNum, 0, 0);
+
+  // getTimezoneOffset() = (UTC - local)
+  // donc UTC = local + offset
+  const utcMillis = localMillis + tzOffsetMinutes * 60000;
+
+  const startUtc = new Date(utcMillis);
+  const endUtc = new Date(utcMillis + 60 * 60000); // + 60 minutes
 
   const startIso = startUtc.toISOString();
   const endIso = endUtc.toISOString();
