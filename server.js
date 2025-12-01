@@ -6,7 +6,7 @@ import bodyParser from "body-parser";
 import Stripe from "stripe";
 import { createClient } from "@supabase/supabase-js";
 import dotenv from "dotenv";
-import nodemailer from "nodemailer";
+import { Resend } from "resend";
 import QRCode from "qrcode";
 
 dotenv.config(); // lit le fichier .env en local
@@ -18,10 +18,7 @@ const STRIPE_WEBHOOK_SECRET = process.env.STRIPE_WEBHOOK_SECRET;
 const SUPABASE_URL = process.env.SUPABASE_URL;
 const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
 
-const SMTP_HOST = process.env.SMTP_HOST;
-const SMTP_PORT = Number(process.env.SMTP_PORT || 587);
-const SMTP_USER = process.env.SMTP_USER;
-const SMTP_PASS = process.env.SMTP_PASS;
+const RESEND_API_KEY = process.env.RESEND_API_KEY;
 
 if (!STRIPE_SECRET_KEY) {
   console.error("❌ STRIPE_SECRET_KEY manquante dans .env");
@@ -31,9 +28,9 @@ if (!SUPABASE_URL || !SUPABASE_SERVICE_ROLE_KEY) {
     "⚠️ SUPABASE_URL ou SUPABASE_SERVICE_ROLE_KEY manquantes dans .env (réservations non actives)"
   );
 }
-if (!SMTP_HOST || !SMTP_USER || !SMTP_PASS) {
+if (!RESEND_API_KEY) {
   console.warn(
-    "⚠️ SMTP_HOST / SMTP_USER / SMTP_PASS manquants : l'envoi d'email sera désactivé"
+    "⚠️ RESEND_API_KEY manquante : l'envoi d'email sera désactivé (pas de mails de confirmation)"
   );
 }
 if (!STRIPE_WEBHOOK_SECRET) {
@@ -54,31 +51,9 @@ const supabase =
     ? createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY)
     : null;
 
-// Transport mail (si configuré)
-const mailEnabled = !!(SMTP_HOST && SMTP_USER && SMTP_PASS);
-
-const transporter = mailEnabled
-  ? nodemailer.createTransport({
-      host: SMTP_HOST,
-      port: SMTP_PORT,
-      secure: SMTP_PORT === 465, // true si port 465, sinon false
-      auth: {
-        user: SMTP_USER,
-        pass: SMTP_PASS,
-      },
-    })
-  : null;
-
-// Test de connexion SMTP au démarrage
-if (mailEnabled && transporter) {
-  transporter.verify((err, success) => {
-    if (err) {
-      console.error("❌ Erreur connexion SMTP :", err);
-    } else {
-      console.log("✅ Connexion SMTP OK, prêt à envoyer des mails");
-    }
-  });
-}
+// Mail via Resend
+const mailEnabled = !!RESEND_API_KEY;
+const resend = mailEnabled ? new Resend(RESEND_API_KEY) : null;
 
 const app = express();
 
@@ -138,11 +113,11 @@ function buildTimesFromSlot(slot) {
   };
 }
 
-// Envoi d'email avec QR code pour une réservation
+// Envoi d'email avec QR code pour une réservation (via Resend)
 async function sendReservationEmail(reservation) {
-  if (!mailEnabled || !transporter) {
+  if (!mailEnabled || !resend) {
     console.warn(
-      "📧 Envoi mail désactivé (config SMTP manquante) – email non envoyé."
+      "📧 Envoi mail désactivé (RESEND_API_KEY manquante) – email non envoyé."
     );
     return;
   }
@@ -160,8 +135,7 @@ async function sendReservationEmail(reservation) {
     // Génération QR code à partir de l'id de réservation
     const qrText = reservation.id; // le lecteur Python lit cet id
     const qrDataUrl = await QRCode.toDataURL(qrText);
-    const base64Data = qrDataUrl.split(",")[1];
-    const qrBuffer = Buffer.from(base64Data, "base64");
+    const base64Data = qrDataUrl.split(",")[1]; // on ne garde que les données base64
 
     const start = reservation.start_time
       ? new Date(reservation.start_time)
@@ -184,20 +158,6 @@ async function sendReservationEmail(reservation) {
 
     const subject = `Votre réservation Singbox - Box ${reservation.box_id}`;
 
-    const textBody = `Bonjour,
-
-Votre réservation Singbox a bien été enregistrée ✅
-
-Détails de votre session :
-- Box : ${reservation.box_id}
-- Début : ${startStr}
-- Fin : ${endStr}
-
-Votre QR code est en pièce jointe (à présenter à l'entrée).
-
-À très vite chez Singbox 🎤
-`;
-
     const htmlBody = `
       <p>Bonjour,</p>
       <p>Votre réservation <strong>Singbox</strong> a bien été enregistrée ✅</p>
@@ -207,42 +167,33 @@ Votre QR code est en pièce jointe (à présenter à l'entrée).
         <li>Début : <strong>${startStr}</strong></li>
         <li>Fin : <strong>${endStr}</strong></li>
       </ul>
-      <p>Votre QR code est ci-dessous et en pièce jointe (à présenter à l'entrée) :</p>
-      <p><img src="cid:qrimage@singbox" alt="QR Code Singbox" /></p>
+      <p>Voici votre QR code (à présenter à l'entrée) :</p>
+      <p><img src="data:image/png;base64,${base64Data}" alt="QR Code Singbox" /></p>
       <p>À très vite chez Singbox 🎤</p>
     `;
 
-    const mailOptions = {
-      from: `"Singbox" <${SMTP_USER}>`,
-      to: toEmail,
-      subject,
-      text: textBody,
-      html: htmlBody,
-      attachments: [
-        {
-          filename: "qr-reservation.png",
-          content: qrBuffer,
-          contentType: "image/png",
-          cid: "qrimage@singbox",
-        },
-      ],
-    };
-
     console.log(
-      "📧 Envoi de l'email à",
+      "📧 Envoi de l'email (Resend) à",
       toEmail,
       "pour réservation",
       reservation.id
     );
-    await transporter.sendMail(mailOptions);
+
+    await resend.emails.send({
+      from: "Singbox <onboarding@resend.dev>", // pour les tests ; plus tard tu pourras mettre ton propre domaine
+      to: toEmail,
+      subject,
+      html: htmlBody,
+    });
+
     console.log(
-      "✅ Email envoyé à",
+      "✅ Email envoyé via Resend à",
       toEmail,
       "pour réservation",
       reservation.id
     );
   } catch (err) {
-    console.error("❌ Erreur lors de l'envoi de l'email :", err);
+    console.error("❌ Erreur lors de l'envoi de l'email via Resend :", err);
   }
 }
 
