@@ -9,7 +9,7 @@ import dotenv from "dotenv";
 import nodemailer from "nodemailer";
 import QRCode from "qrcode";
 
-dotenv.config(); // lit le fichier .env
+dotenv.config(); // lit le fichier .env en local
 
 // ---------- CONFIG ENV ----------
 const STRIPE_SECRET_KEY = process.env.STRIPE_SECRET_KEY;
@@ -70,7 +70,13 @@ const transporter = mailEnabled
   : null;
 
 const app = express();
-app.use(cors());
+
+// CORS : tu peux mettre l’URL exacte de ton front à la place de "*"
+app.use(
+  cors({
+    origin: "*",
+  })
+);
 
 console.log("🌍 CORS autorise l'origine : *");
 
