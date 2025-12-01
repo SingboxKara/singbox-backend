@@ -132,11 +132,12 @@ async function sendReservationEmail(reservation) {
   }
 
   try {
-    // Génération QR code à partir de l'id de réservation
-    const qrText = reservation.id; // le lecteur Python lit cet id
+    // 1) Génération du QR code (PNG en base64)
+    const qrText = reservation.id; // le lecteur lit cet id
     const qrDataUrl = await QRCode.toDataURL(qrText);
-    const base64Data = qrDataUrl.split(",")[1]; // on ne garde que les données base64
+    const base64Data = qrDataUrl.split(",")[1]; // on enlève le "data:image/png;base64,"
 
+    // 2) Formatage des dates
     const start = reservation.start_time
       ? new Date(reservation.start_time)
       : null;
@@ -158,6 +159,7 @@ async function sendReservationEmail(reservation) {
 
     const subject = `Votre réservation Singbox - Box ${reservation.box_id}`;
 
+    // 3) HTML avec image inline via CID
     const htmlBody = `
       <p>Bonjour,</p>
       <p>Votre réservation <strong>Singbox</strong> a bien été enregistrée ✅</p>
@@ -168,7 +170,7 @@ async function sendReservationEmail(reservation) {
         <li>Fin : <strong>${endStr}</strong></li>
       </ul>
       <p>Voici votre QR code (à présenter à l'entrée) :</p>
-      <p><img src="data:image/png;base64,${base64Data}" alt="QR Code Singbox" /></p>
+      <p><img src="cid:qrimage-singbox" alt="QR Code Singbox" /></p>
       <p>À très vite chez Singbox 🎤</p>
     `;
 
@@ -179,11 +181,20 @@ async function sendReservationEmail(reservation) {
       reservation.id
     );
 
+    // 4) Envoi via Resend avec pièce jointe inline (CID)
     await resend.emails.send({
-      from: "Singbox <onboarding@resend.dev>", // pour les tests ; plus tard tu pourras mettre ton propre domaine
+      from: "Singbox <onboarding@resend.dev>", // pour les tests ; plus tard ton propre domaine
       to: toEmail,
       subject,
       html: htmlBody,
+      attachments: [
+        {
+          filename: "qr-reservation.png",
+          content: base64Data, // base64 du PNG
+          contentType: "image/png",
+          content_id: "qrimage-singbox", // utilisé dans src="cid:qrimage-singbox"
+        },
+      ],
     });
 
     console.log(
