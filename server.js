@@ -13,6 +13,8 @@ dotenv.config(); // lit le fichier .env
 
 // ---------- CONFIG ENV ----------
 const STRIPE_SECRET_KEY = process.env.STRIPE_SECRET_KEY;
+const STRIPE_WEBHOOK_SECRET = process.env.STRIPE_WEBHOOK_SECRET;
+
 const SUPABASE_URL = process.env.SUPABASE_URL;
 const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
 
@@ -32,6 +34,11 @@ if (!SUPABASE_URL || !SUPABASE_SERVICE_ROLE_KEY) {
 if (!SMTP_HOST || !SMTP_USER || !SMTP_PASS) {
   console.warn(
     "⚠️ SMTP_HOST / SMTP_USER / SMTP_PASS manquants : l'envoi d'email sera désactivé"
+  );
+}
+if (!STRIPE_WEBHOOK_SECRET) {
+  console.warn(
+    "⚠️ STRIPE_WEBHOOK_SECRET manquant : les webhooks Stripe ne seront pas vérifiés"
   );
 }
 
@@ -64,7 +71,6 @@ const transporter = mailEnabled
 
 const app = express();
 app.use(cors());
-app.use(bodyParser.json());
 
 console.log("🌍 CORS autorise l'origine : *");
 
@@ -207,6 +213,74 @@ Votre QR code est en pièce jointe (à présenter à l'entrée).
   await transporter.sendMail(mailOptions);
   console.log("📧 Email envoyé à", toEmail, "pour réservation", reservation.id);
 }
+
+// ------------------------------------------------------
+// WEBHOOK STRIPE (⚠️ doit utiliser raw body)
+// ------------------------------------------------------
+app.post(
+  "/api/webhook",
+  bodyParser.raw({ type: "application/json" }),
+  async (req, res) => {
+    if (!stripe || !STRIPE_WEBHOOK_SECRET) {
+      console.error(
+        "❌ Webhook Stripe reçu mais STRIPE ou STRIPE_WEBHOOK_SECRET non configurés"
+      );
+      return res.status(500).send("Webhook non configuré");
+    }
+
+    const sig = req.headers["stripe-signature"];
+
+    let event;
+    try {
+      event = stripe.webhooks.constructEvent(
+        req.body,
+        sig,
+        STRIPE_WEBHOOK_SECRET
+      );
+    } catch (err) {
+      console.error("❌ Erreur vérification signature webhook :", err.message);
+      return res.status(400).send(`Webhook Error: ${err.message}`);
+    }
+
+    console.log("📩 Webhook Stripe reçu :", event.type);
+
+    // Ici on gère les événements qui nous intéressent
+    switch (event.type) {
+      case "payment_intent.succeeded": {
+        const paymentIntent = event.data.object;
+        console.log(
+          "✅ payment_intent.succeeded :",
+          paymentIntent.id,
+          "montant",
+          paymentIntent.amount,
+          "client",
+          paymentIntent.metadata?.customer_email
+        );
+        // Pour l'instant on ne touche pas à Supabase ici,
+        // ta logique de réservation reste dans /api/confirm-reservation
+        break;
+      }
+      case "payment_intent.payment_failed": {
+        const paymentIntent = event.data.object;
+        console.warn(
+          "⚠️ payment_intent.payment_failed :",
+          paymentIntent.id,
+          paymentIntent.last_payment_error?.message
+        );
+        break;
+      }
+      default:
+        console.log(`ℹ️ Événement Stripe non géré : ${event.type}`);
+    }
+
+    res.json({ received: true });
+  }
+);
+
+// ⚠️ IMPORTANT : après le webhook, on remet JSON pour le reste
+app.use(bodyParser.json());
+
+console.log("🌍 CORS + JSON configurés");
 
 // ------------------------------------------------------
 // 0) Petite route de test
