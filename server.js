@@ -8,6 +8,8 @@ import { createClient } from "@supabase/supabase-js";
 import dotenv from "dotenv";
 import { Resend } from "resend";
 import QRCode from "qrcode";
+import bcrypt from "bcrypt";          // <-- AJOUT
+import jwt from "jsonwebtoken";       // <-- AJOUT
 
 dotenv.config(); // lit le fichier .env en local
 
@@ -225,6 +227,29 @@ async function sendReservationEmail(reservation) {
 }
 
 // ------------------------------------------------------
+// Middleware d'authentification JWT (AJOUT)
+// ------------------------------------------------------
+function authMiddleware(req, res, next) {
+  const authHeader = req.headers.authorization;
+  const token = authHeader?.startsWith("Bearer ")
+    ? authHeader.split(" ")[1]
+    : null;
+
+  if (!token) {
+    return res.status(401).json({ error: "Token manquant" });
+  }
+
+  try {
+    const decoded = jwt.verify(token, process.env.JWT_SECRET);
+    req.userId = decoded.userId;
+    next();
+  } catch (err) {
+    console.error("JWT erreur :", err);
+    return res.status(401).json({ error: "Token invalide" });
+  }
+}
+
+// ------------------------------------------------------
 // WEBHOOK STRIPE (⚠️ doit utiliser raw body)
 // ------------------------------------------------------
 app.post(
@@ -288,6 +313,136 @@ app.post(
 app.use(bodyParser.json());
 
 console.log("🌍 CORS + JSON configurés");
+
+// ------------------------------------------------------
+// AUTH - INSCRIPTION (AJOUT)
+// ------------------------------------------------------
+app.post("/api/register", async (req, res) => {
+  try {
+    const { email, password } = req.body;
+
+    if (!email || !password)
+      return res.status(400).json({ error: "Email et mot de passe requis" });
+
+    if (!supabase) {
+      return res.status(500).json({ error: "Supabase non configuré" });
+    }
+
+    const hash = await bcrypt.hash(password, 10);
+
+    const { error } = await supabase
+      .from("users")
+      .insert({ email, password_hash: hash });
+
+    if (error) {
+      console.error(error);
+      return res.status(400).json({ error: error.message });
+    }
+
+    res.json({ message: "Compte créé" });
+  } catch (err) {
+    console.error("Erreur register :", err);
+    res.status(500).json({ error: "Erreur serveur" });
+  }
+});
+
+// ------------------------------------------------------
+// AUTH - LOGIN (AJOUT)
+// ------------------------------------------------------
+app.post("/api/login", async (req, res) => {
+  try {
+    const { email, password } = req.body;
+
+    if (!email || !password)
+      return res.status(400).json({ error: "Email et mot de passe requis" });
+
+    if (!supabase) {
+      return res.status(500).json({ error: "Supabase non configuré" });
+    }
+
+    const { data: users, error } = await supabase
+      .from("users")
+      .select("*")
+      .eq("email", email)
+      .limit(1);
+
+    if (error) return res.status(400).json({ error: error.message });
+
+    const user = users && users[0];
+    if (!user) return res.status(400).json({ error: "Email inconnu" });
+
+    const ok = await bcrypt.compare(password, user.password_hash);
+    if (!ok) return res.status(400).json({ error: "Mot de passe incorrect" });
+
+    const token = jwt.sign({ userId: user.id }, process.env.JWT_SECRET, {
+      expiresIn: "7d",
+    });
+
+    res.json({ token });
+  } catch (err) {
+    console.error("Erreur login :", err);
+    res.status(500).json({ error: "Erreur serveur" });
+  }
+});
+
+// ------------------------------------------------------
+// PROFIL UTILISATEUR (AJOUT)
+// ------------------------------------------------------
+app.get("/api/me", authMiddleware, async (req, res) => {
+  try {
+    const userId = req.userId;
+
+    if (!supabase) {
+      return res.status(500).json({ error: "Supabase non configuré" });
+    }
+
+    const { data, error } = await supabase
+      .from("users")
+      .select("email, points")
+      .eq("id", userId)
+      .single();
+
+    if (error) return res.status(400).json({ error: error.message });
+
+    res.json(data);
+  } catch (err) {
+    console.error("Erreur me :", err);
+    res.status(500).json({ error: "Erreur serveur" });
+  }
+});
+
+// ------------------------------------------------------
+// AJOUT DE POINTS FIDÉLITÉ (AJOUT)
+// ------------------------------------------------------
+app.post("/api/add-points", authMiddleware, async (req, res) => {
+  try {
+    const userId = req.userId; // vient du token
+    const { points } = req.body;
+
+    if (!points) {
+      return res.status(400).json({ error: "Nombre de points manquant" });
+    }
+
+    if (!supabase) {
+      return res.status(500).json({ error: "Supabase non configuré" });
+    }
+
+    const { error } = await supabase.rpc("increment_points", {
+      user_id: userId,
+      points_to_add: points,
+    });
+
+    if (error) {
+      console.error(error);
+      return res.status(400).json({ error: error.message });
+    }
+
+    res.json({ message: "Points ajoutés !" });
+  } catch (err) {
+    console.error("Erreur add-points :", err);
+    res.status(500).json({ error: "Erreur serveur" });
+  }
+});
 
 // ------------------------------------------------------
 // 0) Petite route de test
