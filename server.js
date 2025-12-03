@@ -9,7 +9,7 @@ import dotenv from "dotenv";
 import { Resend } from "resend";
 import QRCode from "qrcode";
 import bcrypt from "bcryptjs";          // <-- AJOUT
-import jwt from "jsonwebtoken";       // <-- AJOUT
+import jwt from "jsonwebtoken";         // <-- AJOUT
 
 dotenv.config(); // lit le fichier .env en local
 
@@ -412,7 +412,7 @@ app.get("/api/me", authMiddleware, async (req, res) => {
 });
 
 // ------------------------------------------------------
-// AJOUT DE POINTS FIDÉLITÉ (AJOUT)
+// AJOUT DE POINTS FIDÉLITÉ (AJOUT manuel via API)
 // ------------------------------------------------------
 app.post("/api/add-points", authMiddleware, async (req, res) => {
   try {
@@ -612,6 +612,37 @@ app.post("/api/confirm-reservation", async (req, res) => {
       await Promise.allSettled(data.map((row) => sendReservationEmail(row)));
     } catch (mailErr) {
       console.error("Erreur globale envoi mails :", mailErr);
+    }
+
+    // 5) Ajouter automatiquement les points fidélité si l'utilisateur est connecté
+    try {
+      const authHeader = req.headers.authorization;
+      const token = authHeader?.startsWith("Bearer ")
+        ? authHeader.split(" ")[1]
+        : null;
+
+      if (token) {
+        const decoded = jwt.verify(token, process.env.JWT_SECRET);
+        const userId = decoded.userId;
+
+        // 10 points par créneau payé
+        const pointsToAdd = panier.length * 10;
+
+        const { error: pointsError } = await supabase.rpc("increment_points", {
+          user_id: userId,
+          points_to_add: pointsToAdd,
+        });
+
+        if (pointsError) {
+          console.error("Erreur ajout points fidélité :", pointsError);
+        } else {
+          console.log(`⭐ ${pointsToAdd} points ajoutés à l'utilisateur ${userId}`);
+        }
+      } else {
+        console.log("Aucun token fourni, pas d'ajout automatique de points.");
+      }
+    } catch (pointsErr) {
+      console.error("Erreur lors de l'ajout automatique des points :", pointsErr);
     }
 
     return res.json({ status: "ok", reservations: data });
