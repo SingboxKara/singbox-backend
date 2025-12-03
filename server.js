@@ -8,7 +8,7 @@ import { createClient } from "@supabase/supabase-js";
 import dotenv from "dotenv";
 import { Resend } from "resend";
 import QRCode from "qrcode";
-import bcrypt from "bcrypt";          // <-- AJOUT
+import bcrypt from "bcryptjs";          // <-- AJOUT
 import jwt from "jsonwebtoken";       // <-- AJOUT
 
 dotenv.config(); // lit le fichier .env en local
