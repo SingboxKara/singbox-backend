@@ -8,8 +8,8 @@ import { createClient } from "@supabase/supabase-js";
 import dotenv from "dotenv";
 import { Resend } from "resend";
 import QRCode from "qrcode";
-import bcrypt from "bcryptjs";          // <-- AJOUT
-import jwt from "jsonwebtoken";         // <-- AJOUT
+import bcrypt from "bcryptjs";
+import jwt from "jsonwebtoken";
 
 dotenv.config(); // lit le fichier .env en local
 
@@ -68,16 +68,91 @@ app.use(
 
 console.log("🌍 CORS autorise l'origine : *");
 
-// Prix par créneau (en €) -> à adapter à tes tarifs
+// Prix par créneau de secours (si jamais le slot n'a pas de price)
 const PRICE_PER_SLOT_EUR = 10;
 
 // ------------------------------------------------------
 // Helpers
 // ------------------------------------------------------
 
+// total du panier en € (en priorité slot.price)
+function computeCartTotalEur(panier) {
+  return panier.reduce((sum, item) => {
+    const price =
+      typeof item.price === "number" && !Number.isNaN(item.price)
+        ? item.price
+        : PRICE_PER_SLOT_EUR;
+    return sum + price;
+  }, 0);
+}
+
+// Valide un code promo + calcule la remise
+async function validatePromoCode(code, totalAmountEur) {
+  if (!supabase) {
+    return { ok: false, reason: "Supabase non configuré" };
+  }
+  if (!code) {
+    return { ok: false, reason: "Code vide" };
+  }
+
+  const upperCode = String(code).trim().toUpperCase();
+
+  const { data: promo, error } = await supabase
+    .from("promo_codes")
+    .select("*")
+    .eq("code", upperCode)
+    .single();
+
+  if (error || !promo) {
+    console.warn("Promo introuvable :", error);
+    return { ok: false, reason: "Code introuvable" };
+  }
+
+  // is_active (bool) si tu l'as créé
+  if (promo.is_active === false) {
+    return { ok: false, reason: "Code inactif" };
+  }
+
+  const today = new Date().toISOString().slice(0, 10); // YYYY-MM-DD
+
+  if (promo.valid_from && today < promo.valid_from) {
+    return { ok: false, reason: "Code pas encore valable" };
+  }
+  if (promo.valid_to && today > promo.valid_to) {
+    return { ok: false, reason: "Code expiré" };
+  }
+
+  if (promo.max_uses && promo.used_count >= promo.max_uses) {
+    return { ok: false, reason: "Nombre d'utilisations atteint" };
+  }
+
+  let discountAmount = 0;
+  const type = promo.type; // "percent" | "fixed" | "free"
+  const value = Number(promo.value) || 0;
+
+  if (type === "percent") {
+    discountAmount = Math.round(totalAmountEur * (value / 100));
+  } else if (type === "fixed") {
+    discountAmount = Math.min(totalAmountEur, value);
+  } else if (type === "free") {
+    discountAmount = totalAmountEur;
+  } else {
+    // type inconnu -> pas de remise
+    discountAmount = 0;
+  }
+
+  const newTotal = Math.max(0, totalAmountEur - discountAmount);
+
+  return {
+    ok: true,
+    newTotal,
+    discountAmount,
+    promo,
+  };
+}
+
 // Construit start_time / end_time à partir du slot ou de date+hour
 function buildTimesFromSlot(slot) {
-  // Si le slot a déjà start_time / end_time, on les réutilise tels quels
   if (slot.start_time && slot.end_time) {
     const dateFromStart = slot.date || String(slot.start_time).slice(0, 10);
     return {
@@ -90,7 +165,6 @@ function buildTimesFromSlot(slot) {
 
   const date = slot.date; // "YYYY-MM-DD"
 
-  // hour peut être "15", 15, "15h - 16h", etc. -> on garde uniquement le nombre
   let hourNum = 0;
   if (typeof slot.hour === "number") {
     hourNum = slot.hour;
@@ -101,23 +175,15 @@ function buildTimesFromSlot(slot) {
     hourNum = 0;
   }
 
-  // Décalage envoyé par le front (minutes) : getTimezoneOffset()
-  // ex : Paris hiver => -60, été => -120
   const tzOffsetMinutes = Number(slot.tzOffsetMinutes ?? 0);
 
-  // On décompose la date
   const [year, month, day] = date.split("-").map((x) => parseInt(x, 10));
 
-  // On construit le temps "local" (heure choisie dans ton planning)
-  // comme si c'était une horloge murale : 2025-12-01 16:00
   const localMillis = Date.UTC(year, month - 1, day, hourNum, 0, 0);
-
-  // getTimezoneOffset() = (UTC - local)
-  // donc UTC = local + offset
   const utcMillis = localMillis + tzOffsetMinutes * 60000;
 
   const startUtc = new Date(utcMillis);
-  const endUtc = new Date(utcMillis + 60 * 60000); // + 60 minutes
+  const endUtc = new Date(utcMillis + 60 * 60000);
 
   const startIso = startUtc.toISOString();
   const endIso = endUtc.toISOString();
@@ -149,12 +215,10 @@ async function sendReservationEmail(reservation) {
   }
 
   try {
-    // 1) Génération du QR code (PNG en base64)
-    const qrText = reservation.id; // le lecteur lit cet id
+    const qrText = reservation.id;
     const qrDataUrl = await QRCode.toDataURL(qrText);
-    const base64Data = qrDataUrl.split(",")[1]; // on enlève le "data:image/png;base64,"
+    const base64Data = qrDataUrl.split(",")[1];
 
-    // 2) Formatage des dates
     const start = reservation.start_time
       ? new Date(reservation.start_time)
       : null;
@@ -177,7 +241,6 @@ async function sendReservationEmail(reservation) {
 
     const subject = `Votre réservation Singbox - Box ${reservation.box_id}`;
 
-    // 3) HTML avec image inline via CID
     const htmlBody = `
       <p>Bonjour,</p>
       <p>Votre réservation <strong>Singbox</strong> a bien été enregistrée ✅</p>
@@ -199,18 +262,17 @@ async function sendReservationEmail(reservation) {
       reservation.id
     );
 
-    // 4) Envoi via Resend avec pièce jointe inline (CID)
     await resend.emails.send({
-      from: "Singbox <onboarding@resend.dev>", // pour les tests ; plus tard ton propre domaine
+      from: "Singbox <onboarding@resend.dev>",
       to: toEmail,
       subject,
       html: htmlBody,
       attachments: [
         {
           filename: "qr-reservation.png",
-          content: base64Data, // base64 du PNG
+          content: base64Data,
           contentType: "image/png",
-          content_id: "qrimage-singbox", // utilisé dans src="cid:qrimage-singbox"
+          content_id: "qrimage-singbox",
         },
       ],
     });
@@ -227,7 +289,7 @@ async function sendReservationEmail(reservation) {
 }
 
 // ------------------------------------------------------
-// Middleware d'authentification JWT (AJOUT)
+// Middleware d'authentification JWT
 // ------------------------------------------------------
 function authMiddleware(req, res, next) {
   const authHeader = req.headers.authorization;
@@ -250,7 +312,7 @@ function authMiddleware(req, res, next) {
 }
 
 // ------------------------------------------------------
-// WEBHOOK STRIPE (⚠️ doit utiliser raw body)
+// WEBHOOK STRIPE
 // ------------------------------------------------------
 app.post(
   "/api/webhook",
@@ -309,13 +371,12 @@ app.post(
   }
 );
 
-// ⚠️ IMPORTANT : après le webhook, on remet JSON pour le reste
 app.use(bodyParser.json());
 
 console.log("🌍 CORS + JSON configurés");
 
 // ------------------------------------------------------
-// AUTH - INSCRIPTION (AJOUT)
+// AUTH - INSCRIPTION
 // ------------------------------------------------------
 app.post("/api/register", async (req, res) => {
   try {
@@ -347,7 +408,7 @@ app.post("/api/register", async (req, res) => {
 });
 
 // ------------------------------------------------------
-// AUTH - LOGIN (AJOUT)
+// AUTH - LOGIN
 // ------------------------------------------------------
 app.post("/api/login", async (req, res) => {
   try {
@@ -386,7 +447,7 @@ app.post("/api/login", async (req, res) => {
 });
 
 // ------------------------------------------------------
-// PROFIL UTILISATEUR (AJOUT)
+// PROFIL UTILISATEUR
 // ------------------------------------------------------
 app.get("/api/me", authMiddleware, async (req, res) => {
   try {
@@ -412,11 +473,11 @@ app.get("/api/me", authMiddleware, async (req, res) => {
 });
 
 // ------------------------------------------------------
-// AJOUT DE POINTS FIDÉLITÉ (AJOUT manuel via API)
+// AJOUT DE POINTS FIDÉLITÉ
 // ------------------------------------------------------
 app.post("/api/add-points", authMiddleware, async (req, res) => {
   try {
-    const userId = req.userId; // vient du token
+    const userId = req.userId;
     const { points } = req.body;
 
     if (!points) {
@@ -445,14 +506,14 @@ app.post("/api/add-points", authMiddleware, async (req, res) => {
 });
 
 // ------------------------------------------------------
-// 0) Petite route de test
+// 0) Route de test
 // ------------------------------------------------------
 app.get("/", (req, res) => {
   res.send("API Singbox OK");
 });
 
 // ------------------------------------------------------
-// 1) CRÉER UN PAYMENT INTENT STRIPE (mode test)
+// 1) CRÉER UN PAYMENT INTENT STRIPE
 // ------------------------------------------------------
 app.post("/api/create-payment-intent", async (req, res) => {
   try {
@@ -467,19 +528,29 @@ app.post("/api/create-payment-intent", async (req, res) => {
       return res.status(400).json({ error: "Panier vide" });
     }
 
-    // Montant simple : nombre d'items * prix unitaire
-    let totalAmountEur = panier.length * PRICE_PER_SLOT_EUR;
+    const totalBeforeDiscount = computeCartTotalEur(panier);
+    let totalAmountEur = totalBeforeDiscount;
+    let discountAmount = 0;
+    let promo = null;
 
-    // Exemple de remise simple : SINGBOX10 => -10%
-    if (promoCode === "SINGBOX10") {
-      totalAmountEur = totalAmountEur * 0.9;
+    if (promoCode) {
+      const result = await validatePromoCode(promoCode, totalAmountEur);
+      if (result.ok) {
+        totalAmountEur = result.newTotal;
+        discountAmount = result.discountAmount;
+        promo = result.promo;
+      } else {
+        console.warn("Code promo non appliqué :", result.reason);
+      }
     }
 
     const amountInCents = Math.round(totalAmountEur * 100);
     console.log(
       "Montant total calculé :",
       totalAmountEur,
-      "€ (" + amountInCents + " cents)"
+      "€ (" + amountInCents + " cents) après remise de",
+      discountAmount,
+      "€"
     );
 
     const paymentIntent = await stripe.paymentIntents.create({
@@ -490,10 +561,21 @@ app.post("/api/create-payment-intent", async (req, res) => {
         customer_email: customer?.email || "",
         customer_name:
           (customer?.prenom || "") + " " + (customer?.nom || ""),
+        promo_code: promoCode || "",
+        total_before_discount: String(totalBeforeDiscount),
+        discount_amount: String(discountAmount),
       },
     });
 
-    return res.json({ clientSecret: paymentIntent.client_secret });
+    return res.json({
+      clientSecret: paymentIntent.client_secret,
+      totalBeforeDiscount,
+      totalAfterDiscount: totalAmountEur,
+      discountAmount,
+      promo: promo
+        ? { id: promo.id, code: promo.code, type: promo.type, value: promo.value }
+        : null,
+    });
   } catch (err) {
     console.error("Erreur create-payment-intent :", err);
     return res.status(500).json({ error: "Erreur serveur Stripe" });
@@ -519,7 +601,6 @@ app.post("/api/confirm-reservation", async (req, res) => {
       return res.status(500).json({ error: "Stripe non configuré" });
     }
 
-    // 1) Vérifier le paiement chez Stripe
     const pi = await stripe.paymentIntents.retrieve(paymentIntentId);
     console.log("Statut PaymentIntent :", pi.status);
     if (pi.status !== "succeeded") {
@@ -538,15 +619,30 @@ app.post("/api/confirm-reservation", async (req, res) => {
       (customer?.prenom ? " " : "") +
       (customer?.nom || "");
 
-    // 2) Préparer les lignes de réservation pour Supabase
+    // Recalculer le total pour les stats promo
+    const totalBeforeDiscount = computeCartTotalEur(panier);
+    let discountAmount = 0;
+    let promo = null;
+
+    if (promoCode) {
+      const result = await validatePromoCode(promoCode, totalBeforeDiscount);
+      if (result.ok) {
+        discountAmount = result.discountAmount;
+        promo = result.promo;
+      } else {
+        console.warn(
+          "Code promo non appliqué lors de confirm-reservation :",
+          result.reason
+        );
+      }
+    }
+
     const rows = panier.map((slot) => {
       const times = buildTimesFromSlot(slot);
 
-      // Récupération "brute" de la box : "box1", 1, "2", "Box 3", etc.
       const rawBox =
         slot.boxId ?? slot.box_id ?? slot.box ?? slot.boxName ?? 1;
 
-      // On enlève tout sauf les chiffres, puis on parse en int
       let numericBoxId = parseInt(String(rawBox).replace(/[^0-9]/g, ""), 10);
       if (!Number.isFinite(numericBoxId)) {
         numericBoxId = 1;
@@ -566,7 +662,6 @@ app.post("/api/confirm-reservation", async (req, res) => {
 
     console.log("Lignes à insérer dans reservations :", rows);
 
-    // 2bis) Vérifier les conflits pour chaque créneau
     for (const row of rows) {
       const { data: conflicts, error: conflictError } = await supabase
         .from("reservations")
@@ -592,7 +687,6 @@ app.post("/api/confirm-reservation", async (req, res) => {
       }
     }
 
-    // 3) Insertion en base
     const { data, error } = await supabase
       .from("reservations")
       .insert(rows)
@@ -607,14 +701,13 @@ app.post("/api/confirm-reservation", async (req, res) => {
 
     console.log("✅ Réservations insérées :", data);
 
-    // 4) Envoi d'email (en arrière-plan)
     try {
       await Promise.allSettled(data.map((row) => sendReservationEmail(row)));
     } catch (mailErr) {
       console.error("Erreur globale envoi mails :", mailErr);
     }
 
-    // 5) Ajouter automatiquement les points fidélité si l'utilisateur est connecté
+    // Fidélité
     try {
       const authHeader = req.headers.authorization;
       const token = authHeader?.startsWith("Bearer ")
@@ -625,7 +718,6 @@ app.post("/api/confirm-reservation", async (req, res) => {
         const decoded = jwt.verify(token, process.env.JWT_SECRET);
         const userId = decoded.userId;
 
-        // 10 points par créneau payé
         const pointsToAdd = panier.length * 10;
 
         const { error: pointsError } = await supabase.rpc("increment_points", {
@@ -645,7 +737,50 @@ app.post("/api/confirm-reservation", async (req, res) => {
       console.error("Erreur lors de l'ajout automatique des points :", pointsErr);
     }
 
-    return res.json({ status: "ok", reservations: data });
+    // TRACE D’UTILISATION DU CODE PROMO
+    try {
+      if (promo && discountAmount > 0) {
+        const totalAfterDiscount = Math.max(
+          0,
+          totalBeforeDiscount - discountAmount
+        );
+
+        await supabase.from("promo_usages").insert({
+          promo_id: promo.id,
+          code: promo.code,
+          email: customer?.email || null,
+          payment_intent_id: paymentIntentId,
+          total_before: totalBeforeDiscount,
+          total_after: totalAfterDiscount,
+          discount_amount: discountAmount,
+        });
+
+        const currentUsed = Number(promo.used_count || 0);
+        await supabase
+          .from("promo_codes")
+          .update({ used_count: currentUsed + 1 })
+          .eq("id", promo.id);
+
+        console.log(
+          `📊 Promo ${promo.code} utilisée, remise=${discountAmount}€`
+        );
+      }
+    } catch (promoErr) {
+      console.error("Erreur en enregistrant l'utilisation du code promo :", promoErr);
+    }
+
+    return res.json({
+      status: "ok",
+      reservations: data,
+      promo: promo
+        ? {
+            code: promo.code,
+            discountAmount,
+            totalBefore: totalBeforeDiscount,
+            totalAfter: Math.max(0, totalBeforeDiscount - discountAmount),
+          }
+        : null,
+    });
   } catch (err) {
     console.error("Erreur confirm-reservation :", err);
     return res
@@ -655,14 +790,14 @@ app.post("/api/confirm-reservation", async (req, res) => {
 });
 
 // ------------------------------------------------------
-// 3) /api/slots : utilisé par ton planning (reservation.html)
+// 3) /api/slots : planning
 // ------------------------------------------------------
 app.get("/api/slots", async (req, res) => {
   if (!supabase) {
     return res.status(500).json({ error: "Supabase non configuré" });
   }
 
-  const date = req.query.date; // "YYYY-MM-DD"
+  const date = req.query.date;
   if (!date) {
     return res
       .status(400)
@@ -695,7 +830,7 @@ app.get("/api/slots", async (req, res) => {
 });
 
 // ------------------------------------------------------
-// 4) /api/check : utilisé par ton lecteur de QR
+// 4) /api/check : lecteur de QR
 // ------------------------------------------------------
 app.get("/api/check", async (req, res) => {
   if (!supabase) {
@@ -730,8 +865,8 @@ app.get("/api/check", async (req, res) => {
     const start = new Date(data.start_time);
     const end = new Date(data.end_time);
 
-    const marginBeforeMinutes = 5; // accès 5 min AVANT le début
-    const marginBeforeEndMinutes = 5; // stop 5 min AVANT la fin
+    const marginBeforeMinutes = 5;
+    const marginBeforeEndMinutes = 5;
 
     const startWithMargin = new Date(
       start.getTime() - marginBeforeMinutes * 60000
