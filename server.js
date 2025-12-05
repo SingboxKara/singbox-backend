@@ -151,7 +151,8 @@ async function validatePromoCode(code, totalAmountEur) {
   };
 }
 
-// Construit start_time / end_time à partir du slot ou de date+hour
+// Construit start_time / end_time à partir du slot
+// 👉 on suppose que le front envoie déjà start_time / end_time corrects
 function buildTimesFromSlot(slot) {
   if (!slot.start_time || !slot.end_time) {
     throw new Error("Slot incomplet : start_time / end_time manquants");
@@ -164,39 +165,6 @@ function buildTimesFromSlot(slot) {
     end_time: slot.end_time,
     date: dateFromStart,
     datetime: slot.start_time,
-  };
-}
-
-  const date = slot.date; // "YYYY-MM-DD"
-
-  let hourNum = 0;
-  if (typeof slot.hour === "number") {
-    hourNum = slot.hour;
-  } else if (slot.hour) {
-    const match = String(slot.hour).match(/\d{1,2}/);
-    hourNum = match ? parseInt(match[0], 10) : 0;
-  } else {
-    hourNum = 0;
-  }
-
-  const tzOffsetMinutes = Number(slot.tzOffsetMinutes ?? 0);
-
-  const [year, month, day] = date.split("-").map((x) => parseInt(x, 10));
-
-  const localMillis = Date.UTC(year, month - 1, day, hourNum, 0, 0);
-  const utcMillis = localMillis + tzOffsetMinutes * 60000;
-
-  const startUtc = new Date(utcMillis);
-  const endUtc = new Date(utcMillis + 60 * 60000);
-
-  const startIso = startUtc.toISOString();
-  const endIso = endUtc.toISOString();
-
-  return {
-    start_time: startIso,
-    end_time: endIso,
-    date: date,
-    datetime: startIso,
   };
 }
 
