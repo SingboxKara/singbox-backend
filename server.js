@@ -151,22 +151,19 @@ async function validatePromoCode(code, totalAmountEur) {
   };
 }
 
-// Construit start_time / end_time à partir du slot (date + hour)
+// Construit start_time / end_time à partir du slot ou de date+hour
 function buildTimesFromSlot(slot) {
-  const date = slot.date; // "YYYY-MM-DD"
-  const hour = Number(slot.hour) || 0; // ex : 21
+  if (!slot.start_time || !slot.end_time) {
+    throw new Error("Slot incomplet : start_time / end_time manquants");
+  }
 
-  // Date locale simple : "2025-12-05T21:00:00"
-  const startLocal = new Date(
-    `${date}T${String(hour).padStart(2, "0")}:00:00`
-  );
-  const endLocal = new Date(startLocal.getTime() + 60 * 60 * 1000); // +1h
+  const dateFromStart = slot.date || String(slot.start_time).slice(0, 10);
 
   return {
-    start_time: startLocal.toISOString(),
-    end_time: endLocal.toISOString(),
-    date,
-    datetime: startLocal.toISOString(),
+    start_time: slot.start_time,
+    end_time: slot.end_time,
+    date: dateFromStart,
+    datetime: slot.start_time,
   };
 }
 
