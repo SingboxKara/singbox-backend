@@ -151,20 +151,58 @@ async function validatePromoCode(code, totalAmountEur) {
   };
 }
 
-// Construit start_time / end_time à partir du slot
-// 👉 on suppose que le front envoie déjà start_time / end_time corrects
+/**
+ * Construit start_time / end_time à partir du slot.
+ *
+ * Cas 1 : le front envoie déjà start_time / end_time (ISO) → on les utilise tels quels.
+ * Cas 2 : le front envoie { date: "YYYY-MM-DD", hour: 21 } → on fabrique
+ *         "YYYY-MM-DDT21:00:00+01:00" / "YYYY-MM-DDT22:00:00+01:00"
+ *         (heure locale Paris, sans prise de tête).
+ */
 function buildTimesFromSlot(slot) {
-  if (!slot.start_time || !slot.end_time) {
-    throw new Error("Slot incomplet : start_time / end_time manquants");
+  // Cas 1 : start_time / end_time déjà fournis
+  if (slot.start_time && slot.end_time) {
+    const dateFromStart = slot.date || String(slot.start_time).slice(0, 10);
+    return {
+      start_time: slot.start_time,
+      end_time: slot.end_time,
+      date: dateFromStart,
+      datetime: slot.start_time,
+    };
   }
 
-  const dateFromStart = slot.date || String(slot.start_time).slice(0, 10);
+  // Cas 2 : on part de date + hour
+  const date = slot.date; // "YYYY-MM-DD"
+  const rawHour = slot.hour; // 21, "21", "21h-22h", ...
+
+  if (!date || rawHour === undefined || rawHour === null) {
+    throw new Error(
+      "Slot incomplet : date / hour ou start_time / end_time manquants"
+    );
+  }
+
+  let hourNum;
+  if (typeof rawHour === "number") {
+    hourNum = rawHour;
+  } else {
+    const match = String(rawHour).match(/\d{1,2}/);
+    hourNum = match ? parseInt(match[0], 10) : 0;
+  }
+
+  const hourStr = String(hourNum).padStart(2, "0");
+  const nextHourStr = String((hourNum + 1) % 24).padStart(2, "0");
+
+  // On fixe le fuseau de la box à Europe/Paris (UTC+1 "simple")
+  const OFFSET = "+01:00";
+
+  const startIso = `${date}T${hourStr}:00:00${OFFSET}`;
+  const endIso = `${date}T${nextHourStr}:00:00${OFFSET}`;
 
   return {
-    start_time: slot.start_time,
-    end_time: slot.end_time,
-    date: dateFromStart,
-    datetime: slot.start_time,
+    start_time: startIso,
+    end_time: endIso,
+    date,
+    datetime: startIso,
   };
 }
 
