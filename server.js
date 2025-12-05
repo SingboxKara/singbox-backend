@@ -151,17 +151,21 @@ async function validatePromoCode(code, totalAmountEur) {
   };
 }
 
-// Construit start_time / end_time à partir du slot ou de date+hour
 function buildTimesFromSlot(slot) {
-  if (slot.start_time && slot.end_time) {
-    const dateFromStart = slot.date || String(slot.start_time).slice(0, 10);
-    return {
-      start_time: slot.start_time,
-      end_time: slot.end_time,
-      date: dateFromStart,
-      datetime: slot.start_time,
-    };
-  }
+  const date = slot.date; // "YYYY-MM-DD"
+  const hour = Number(slot.hour);
+
+  // Construire un datetime local sans conversion UTC
+  const startLocal = new Date(`${date}T${String(hour).padStart(2, "0")}:00:00`);
+  const endLocal = new Date(`${date}T${String(hour + 1).padStart(2, "0")}:00:00`);
+
+  return {
+    start_time: startLocal.toISOString(),
+    end_time: endLocal.toISOString(),
+    date: date,
+    datetime: startLocal.toISOString(),
+  };
+}
 
   const date = slot.date; // "YYYY-MM-DD"
 
