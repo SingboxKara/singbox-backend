@@ -230,7 +230,10 @@ async function sendReservationEmail(reservation) {
 
   try {
     const qrText = reservation.id;
+
+    // 1) Génère une data URL directement utilisable dans <img src="...">
     const qrDataUrl = await QRCode.toDataURL(qrText);
+    // Pour l'attachement, on garde juste le base64
     const base64Data = qrDataUrl.split(",")[1];
 
     const start = reservation.start_time
@@ -264,6 +267,7 @@ async function sendReservationEmail(reservation) {
             <tr>
               <td style="vertical-align:middle;">
                 <div style="display:flex;align-items:center;gap:10px;">
+                  <!-- IMPORTANT : logo en HTTPS absolu -->
                   <img src="https://www.singbox.fr/logo.png" alt="Logo Singbox" width="72" height="72" style="border-radius:999px;display:block;box-shadow:0 0 20px rgba(201,76,53,0.65);" />
                   <div>
                     <div style="font-family:'League Spartan','Montserrat',system-ui,sans-serif;font-weight:700;letter-spacing:0.18em;text-transform:uppercase;font-size:18px;line-height:1.2;">Singbox</div>
@@ -318,7 +322,8 @@ async function sendReservationEmail(reservation) {
             <p style="margin:0 0 8px 0;font-size:13px;color:#9CA3AF;">
               Présentez ce QR code à votre arrivée pour accéder à votre box :
             </p>
-            <img src="cid:qrimage-singbox" alt="QR Code Singbox" style="max-width:220px;height:auto;border-radius:18px;box-shadow:0 14px 30px rgba(0,0,0,0.9);" />
+            <!-- On utilise directement la data URL ici -->
+            <img src="${qrDataUrl}" alt="QR Code Singbox" style="max-width:220px;height:auto;border-radius:18px;box-shadow:0 14px 30px rgba(0,0,0,0.9);" />
           </div>
 
           <!-- EMPREINTE BANCAIRE -->
@@ -399,16 +404,16 @@ async function sendReservationEmail(reservation) {
     );
 
     await resend.emails.send({
-      from: "Singbox <onboarding@resend.dev>", // à remplacer par ton futur domaine
+      from: "Singbox <onboarding@resend.dev>",
       to: toEmail,
       subject,
       html: htmlBody,
+      // on garde le QR aussi en pièce jointe si la personne veut le télécharger
       attachments: [
         {
           filename: "qr-reservation.png",
           content: base64Data,
           contentType: "image/png",
-          content_id: "qrimage-singbox",
         },
       ],
     });
