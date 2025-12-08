@@ -614,6 +614,50 @@ app.get("/api/me", authMiddleware, async (req, res) => {
 });
 
 // ------------------------------------------------------
+// MES RÉSERVATIONS (pour la page "Mon compte")
+// ------------------------------------------------------
+app.get("/api/my-reservations", authMiddleware, async (req, res) => {
+  try {
+    if (!supabase) {
+      return res.status(500).json({ error: "Supabase non configuré" });
+    }
+
+    const userId = req.userId;
+
+    // On récupère l'email de l'utilisateur
+    const { data: user, error: userError } = await supabase
+      .from("users")
+      .select("email")
+      .eq("id", userId)
+      .single();
+
+    if (userError || !user) {
+      console.error("Erreur lecture user pour my-reservations :", userError);
+      return res.status(400).json({ error: "Utilisateur introuvable" });
+    }
+
+    // On filtre les réservations par email (pas besoin de colonne user_id)
+    const { data: reservations, error } = await supabase
+      .from("reservations")
+      .select("*")
+      .eq("email", user.email)
+      .order("start_time", { ascending: false });
+
+    if (error) {
+      console.error("Erreur Supabase my-reservations :", error);
+      return res
+        .status(500)
+        .json({ error: "Erreur en chargeant les réservations" });
+    }
+
+    return res.json({ reservations: reservations || [] });
+  } catch (e) {
+    console.error("Erreur /api/my-reservations :", e);
+    return res.status(500).json({ error: "Erreur serveur" });
+  }
+});
+
+// ------------------------------------------------------
 // AJOUT DE POINTS FIDÉLITÉ
 // ------------------------------------------------------
 app.post("/api/add-points", authMiddleware, async (req, res) => {
@@ -872,6 +916,24 @@ app.post("/api/confirm-reservation", async (req, res) => {
       return res.json({ status: "ok (sans enregistrement Supabase)" });
     }
 
+    // On essaie de récupérer l'userId depuis le token (s'il existe) pour la fidélité
+    let userIdFromToken = null;
+    try {
+      const authHeader = req.headers.authorization;
+      const token = authHeader?.startsWith("Bearer ")
+        ? authHeader.split(" ")[1]
+        : null;
+      if (token) {
+        const decoded = jwt.verify(token, process.env.JWT_SECRET);
+        userIdFromToken = decoded.userId;
+      }
+    } catch (e) {
+      console.warn(
+        "⚠️ Token invalide sur /api/confirm-reservation :",
+        e.message
+      );
+    }
+
     const fullName =
       (customer?.prenom || "") +
       (customer?.prenom ? " " : "") +
@@ -965,43 +1027,39 @@ app.post("/api/confirm-reservation", async (req, res) => {
       console.error("Erreur globale envoi mails :", mailErr);
     }
 
-    // Fidélité
+    // Fidélité : ajouter des points si l'utilisateur est identifié + pas une résa gratuite
     try {
-      const authHeader = req.headers.authorization;
-      const token = authHeader?.startsWith("Bearer ")
-        ? authHeader.split(" ")[1]
-        : null;
+      if (!supabase) {
+        console.log("Supabase non configuré, pas de points fidélité.");
+      } else if (!userIdFromToken) {
+        console.log("Aucun token fourni, pas d'ajout automatique de points.");
+      } else if (!promo || promo.type !== "free") {
+        const pointsToAdd = panier.length * 10;
 
-      if (token) {
-        const decoded = jwt.verify(token, process.env.JWT_SECRET);
-        const userId = decoded.userId;
+        const { error: pointsError } = await supabase.rpc(
+          "increment_points",
+          {
+            user_id: userIdFromToken,
+            points_to_add: pointsToAdd,
+          }
+        );
 
-    // ⭐ Ajouter des points SEULEMENT si l'utilisateur a payé (pas gratuit)
-    if (!promo || promo.type !== "free") {
-      const pointsToAdd = panier.length * 10;
-
-      const { error: pointsError } = await supabase.rpc("increment_points", {
-        user_id: userId,
-        points_to_add: pointsToAdd,
-      });
-
-      if (pointsError) {
-        console.error("Erreur ajout points fidélité :", pointsError);
+        if (pointsError) {
+          console.error("Erreur ajout points fidélité :", pointsError);
+        } else {
+          console.log(
+            `⭐ ${pointsToAdd} points ajoutés à l'utilisateur ${userIdFromToken}`
+          );
+        }
       } else {
-        console.log(`⭐ ${pointsToAdd} points ajoutés à l'utilisateur ${userId}`);
+        console.log("🎁 Réservation gratuite → aucun point fidélité ajouté.");
       }
-
-    } else {
-      console.log("🎁 Réservation gratuite → aucun point fidélité ajouté.");
+    } catch (pointsErr) {
+      console.error(
+        "Erreur lors de l'ajout automatique des points :",
+        pointsErr
+      );
     }
-
-  } else {
-    console.log("Aucun token fourni, pas d'ajout automatique de points.");
-  }
-
-} catch (pointsErr) {
-  console.error("Erreur lors de l'ajout automatique des points :", pointsErr);
-}
 
     // TRACE D’UTILISATION DU CODE PROMO
     try {
@@ -1032,7 +1090,10 @@ app.post("/api/confirm-reservation", async (req, res) => {
         );
       }
     } catch (promoErr) {
-      console.error("Erreur en enregistrant l'utilisation du code promo :", promoErr);
+      console.error(
+        "Erreur en enregistrant l'utilisation du code promo :",
+        promoErr
+      );
     }
 
     return res.json({
