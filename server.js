@@ -71,6 +71,10 @@ console.log("🌍 CORS autorise l'origine : *");
 // Prix par créneau de secours (si jamais le slot n'a pas de price)
 const PRICE_PER_SLOT_EUR = 10;
 
+// Montant de la caution (empreinte bancaire) en euros
+// Tu peux changer la valeur ici si besoin
+const DEPOSIT_AMOUNT_EUR = 250;
+
 // ------------------------------------------------------
 // Helpers
 // ------------------------------------------------------
@@ -523,7 +527,7 @@ app.get("/", (req, res) => {
 });
 
 // ------------------------------------------------------
-// 1) CRÉER UN PAYMENT INTENT STRIPE
+// 1) CRÉER UN PAYMENT INTENT STRIPE (paiement de la session)
 // ------------------------------------------------------
 app.post("/api/create-payment-intent", async (req, res) => {
   try {
@@ -589,6 +593,81 @@ app.post("/api/create-payment-intent", async (req, res) => {
   } catch (err) {
     console.error("Erreur create-payment-intent :", err);
     return res.status(500).json({ error: "Erreur serveur Stripe" });
+  }
+});
+
+// ------------------------------------------------------
+// 1bis) CRÉER UNE EMPREINTE DE CAUTION (250€)
+// ------------------------------------------------------
+app.post("/api/create-deposit-intent", async (req, res) => {
+  try {
+    if (!stripe) {
+      return res.status(500).json({ error: "Stripe non configuré" });
+    }
+
+    const { reservationId, customer } = req.body;
+
+    const depositAmountEur = DEPOSIT_AMOUNT_EUR;
+    const amountInCents = Math.round(depositAmountEur * 100);
+
+    console.log(
+      "/api/create-deposit-intent - création empreinte",
+      depositAmountEur,
+      "€ pour réservation",
+      reservationId
+    );
+
+    const fullName =
+      (customer?.prenom || "") +
+      (customer?.prenom ? " " : "") +
+      (customer?.nom || "");
+
+    const paymentIntent = await stripe.paymentIntents.create({
+      amount: amountInCents,
+      currency: "eur",
+      capture_method: "manual", // ⚠️ empreinte bancaire
+      automatic_payment_methods: {
+        enabled: true,
+      },
+      metadata: {
+        type: "singbox_deposit",
+        reservation_id: reservationId || "",
+        customer_email: customer?.email || "",
+        customer_name: fullName,
+      },
+    });
+
+    // Optionnel : on tente d'enregistrer l'ID de l'empreinte dans la réservation.
+    // Si les colonnes n'existent pas encore dans Supabase, on log juste l'erreur
+    // sans casser la réponse API.
+    if (supabase && reservationId) {
+      try {
+        await supabase
+          .from("reservations")
+          .update({
+            deposit_payment_intent_id: paymentIntent.id,
+            deposit_amount_cents: amountInCents,
+            deposit_status: "authorized",
+          })
+          .eq("id", reservationId);
+      } catch (e) {
+        console.warn(
+          "⚠️ Impossible de mettre à jour les infos de caution en BDD (colonnes manquantes ?):",
+          e.message
+        );
+      }
+    }
+
+    return res.json({
+      clientSecret: paymentIntent.client_secret,
+      paymentIntentId: paymentIntent.id,
+      depositAmountEur,
+    });
+  } catch (err) {
+    console.error("Erreur create-deposit-intent :", err);
+    return res
+      .status(500)
+      .json({ error: "Erreur serveur Stripe (caution)" });
   }
 });
 
@@ -796,6 +875,124 @@ app.post("/api/confirm-reservation", async (req, res) => {
     return res
       .status(500)
       .json({ error: "Erreur serveur lors de la réservation" });
+  }
+});
+
+// ------------------------------------------------------
+// 2bis) CAPTURER LA CAUTION (EN CAS DE CASSE)
+// ------------------------------------------------------
+app.post("/api/capture-deposit", async (req, res) => {
+  try {
+    if (!stripe) {
+      return res.status(500).json({ error: "Stripe non configuré" });
+    }
+
+    const { paymentIntentId, amountToCaptureEur, reservationId } = req.body;
+
+    if (!paymentIntentId) {
+      return res
+        .status(400)
+        .json({ error: "paymentIntentId manquant pour la caution" });
+    }
+
+    let params = {};
+    if (amountToCaptureEur != null) {
+      const amountToCaptureCents = Math.round(
+        Number(amountToCaptureEur) * 100
+      );
+      params.amount_to_capture = amountToCaptureCents;
+    }
+
+    console.log(
+      "/api/capture-deposit - capture de la caution",
+      amountToCaptureEur,
+      "€ pour PaymentIntent",
+      paymentIntentId
+    );
+
+    const paymentIntent = await stripe.paymentIntents.capture(
+      paymentIntentId,
+      params
+    );
+
+    // Optionnel : on met à jour la BDD pour tracer que la caution a été prélevée
+    if (supabase && reservationId) {
+      try {
+        await supabase
+          .from("reservations")
+          .update({
+            deposit_status: "captured",
+          })
+          .eq("id", reservationId);
+      } catch (e) {
+        console.warn(
+          "⚠️ Impossible de mettre à jour deposit_status en BDD :",
+          e.message
+        );
+      }
+    }
+
+    return res.json({
+      status: "captured",
+      paymentIntent,
+    });
+  } catch (err) {
+    console.error("Erreur capture-deposit :", err);
+    return res
+      .status(500)
+      .json({ error: "Erreur serveur lors de la capture de la caution" });
+  }
+});
+
+// ------------------------------------------------------
+// 2ter) ANNULER / RELACHER LA CAUTION (PAS DE CASSE)
+// ------------------------------------------------------
+app.post("/api/cancel-deposit", async (req, res) => {
+  try {
+    if (!stripe) {
+      return res.status(500).json({ error: "Stripe non configuré" });
+    }
+
+    const { paymentIntentId, reservationId } = req.body;
+
+    if (!paymentIntentId) {
+      return res
+        .status(400)
+        .json({ error: "paymentIntentId manquant pour la caution" });
+    }
+
+    console.log(
+      "/api/cancel-deposit - annulation de la caution pour PaymentIntent",
+      paymentIntentId
+    );
+
+    const canceled = await stripe.paymentIntents.cancel(paymentIntentId);
+
+    if (supabase && reservationId) {
+      try {
+        await supabase
+          .from("reservations")
+          .update({
+            deposit_status: "canceled",
+          })
+          .eq("id", reservationId);
+      } catch (e) {
+        console.warn(
+          "⚠️ Impossible de mettre à jour deposit_status en BDD :",
+          e.message
+        );
+      }
+    }
+
+    return res.json({
+      status: "canceled",
+      paymentIntent: canceled,
+    });
+  } catch (err) {
+    console.error("Erreur cancel-deposit :", err);
+    return res
+      .status(500)
+      .json({ error: "Erreur serveur lors de l'annulation de la caution" });
   }
 });
 
