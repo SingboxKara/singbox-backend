@@ -272,16 +272,13 @@ async function sendReservationEmail(reservation) {
         </ul>
 
         <p style="margin-top: 0; margin-bottom: 12px;">
-          <strong>Merci d'arriver 10 minutes en avance</strong> afin de pouvoir vous installer tranquillement
+          <strong>Merci d'arriver 5 minutes en avance</strong> afin de pouvoir vous installer tranquillement
           et démarrer la session à l'heure prévue.
         </p>
 
         <h2 style="font-size: 17px; margin-top: 18px; margin-bottom: 6px;">📱 QR code d'accès</h2>
         <p style="margin-top: 0;">
-          Présentez ce QR code à votre arrivée (sur votre téléphone ou imprimé) :
-        </p>
-        <p style="text-align: center; margin: 12px 0 16px;">
-          <img src="cid:qrimage-singbox" alt="QR Code Singbox" style="max-width: 220px; height: auto;" />
+          Présentez le QR code en pièce jointe à votre arrivée (sur votre téléphone ou imprimé)
         </p>
 
         <h2 style="font-size: 17px; margin-top: 18px; margin-bottom: 6px;">💳 Empreinte bancaire de ${DEPOSIT_AMOUNT_EUR} €</h2>
