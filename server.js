@@ -976,26 +976,32 @@ app.post("/api/confirm-reservation", async (req, res) => {
         const decoded = jwt.verify(token, process.env.JWT_SECRET);
         const userId = decoded.userId;
 
-// ⭐ Ajouter des points SEULEMENT si l'utilisateur a payé (total > 0)
-if (!promo || promo.type !== "free") {
-  const pointsToAdd = panier.length * 10;
+    // ⭐ Ajouter des points SEULEMENT si l'utilisateur a payé (pas gratuit)
+    if (!promo || promo.type !== "free") {
+      const pointsToAdd = panier.length * 10;
 
-  const { error: pointsError } = await supabase.rpc("increment_points", {
-    user_id: userId,
-    points_to_add: pointsToAdd,
-  });
+      const { error: pointsError } = await supabase.rpc("increment_points", {
+        user_id: userId,
+        points_to_add: pointsToAdd,
+      });
 
-  if (pointsError) {
-    console.error("Erreur ajout points fidélité :", pointsError);
-  } else {
-    console.log(`⭐ ${pointsToAdd} points ajoutés à l'utilisateur ${userId}`);
-  }
-} else {
-  console.log("🎁 Réservation gratuite → aucun point fidélité ajouté.");
-}
-    } catch (pointsErr) {
-      console.error("Erreur lors de l'ajout automatique des points :", pointsErr);
+      if (pointsError) {
+        console.error("Erreur ajout points fidélité :", pointsError);
+      } else {
+        console.log(`⭐ ${pointsToAdd} points ajoutés à l'utilisateur ${userId}`);
+      }
+
+    } else {
+      console.log("🎁 Réservation gratuite → aucun point fidélité ajouté.");
     }
+
+  } else {
+    console.log("Aucun token fourni, pas d'ajout automatique de points.");
+  }
+
+} catch (pointsErr) {
+  console.error("Erreur lors de l'ajout automatique des points :", pointsErr);
+}
 
     // TRACE D’UTILISATION DU CODE PROMO
     try {
