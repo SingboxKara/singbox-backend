@@ -647,6 +647,48 @@ app.post("/api/add-points", authMiddleware, async (req, res) => {
 });
 
 // ------------------------------------------------------
+// UTILISER 100 POINTS FIDÉLITÉ → /api/use-loyalty
+// ------------------------------------------------------
+app.post("/api/use-loyalty", authMiddleware, async (req, res) => {
+  try {
+    const userId = req.userId;
+
+    if (!supabase) {
+      return res.status(500).json({ error: "Supabase non configuré" });
+    }
+
+    const { data: user, error } = await supabase
+      .from("users")
+      .select("points")
+      .eq("id", userId)
+      .single();
+
+    if (error || !user) {
+      return res.status(400).json({ error: "Utilisateur introuvable" });
+    }
+
+    if (user.points < 100) {
+      return res.status(400).json({ error: "Pas assez de points" });
+    }
+
+    const { error: updateErr } = await supabase
+      .from("users")
+      .update({ points: user.points - 100 })
+      .eq("id", userId);
+
+    if (updateErr) {
+      console.error(updateErr);
+      return res.status(500).json({ error: "Impossible de retirer les points" });
+    }
+
+    return res.json({ success: true, message: "100 points utilisés" });
+  } catch (e) {
+    console.error("Erreur /api/use-loyalty :", e);
+    return res.status(500).json({ error: "Erreur serveur" });
+  }
+});
+
+// ------------------------------------------------------
 // 0) Route de test
 // ------------------------------------------------------
 app.get("/", (req, res) => {
