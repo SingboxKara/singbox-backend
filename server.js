@@ -76,6 +76,26 @@ const PRICE_PER_SLOT_EUR = 10;
 const DEPOSIT_AMOUNT_EUR = 250;
 
 // ------------------------------------------------------
+// Vacances scolaires (Zone C : Toulouse) - à ajuster chaque année
+// ------------------------------------------------------
+// On travaille en dates ISO (YYYY-MM-DD) simples.
+// Si la date est dans une de ces périodes -> "vacances = true"
+const VACANCES_ZONE_C = [
+  // Année scolaire 2024-2025 (exemple, à adapter si besoin)
+  { start: "2024-10-19", end: "2024-11-03", label: "Toussaint 2024" },
+  { start: "2024-12-21", end: "2025-01-05", label: "Noël 2024" },
+  { start: "2025-02-22", end: "2025-03-09", label: "Hiver 2025" },
+  { start: "2025-04-19", end: "2025-05-04", label: "Printemps 2025" },
+  // Été : on considère juillet/août comme vacances scolaires
+  { start: "2025-07-05", end: "2025-09-01", label: "Été 2025" },
+];
+
+// Helper : savoir si une date ISO est dans [start, end] (inclus)
+function isDateInRange(isoDate, start, end) {
+  return isoDate >= start && isoDate <= end;
+}
+
+// ------------------------------------------------------
 // Helpers
 // ------------------------------------------------------
 
@@ -737,6 +757,33 @@ app.post("/api/use-loyalty", authMiddleware, async (req, res) => {
 // ------------------------------------------------------
 app.get("/", (req, res) => {
   res.send("API Singbox OK");
+});
+
+// ------------------------------------------------------
+// 0bis) /api/is-vacances : indique si la date est en vacances scolaires
+// ------------------------------------------------------
+app.get("/api/is-vacances", (req, res) => {
+  const date = req.query.date; // attendu: "YYYY-MM-DD" (ex: 2024-12-23)
+  if (!date) {
+    return res
+      .status(400)
+      .json({ error: "Paramètre 'date' manquant (YYYY-MM-DD)" });
+  }
+
+  // On vérifie si la date tombe dans une période de vacances connue
+  const matchingPeriods = VACANCES_ZONE_C.filter((p) =>
+    isDateInRange(date, p.start, p.end)
+  );
+  const isHoliday = matchingPeriods.length > 0;
+
+  // Réponse compatible avec ton front (checkDateContext)
+  return res.json({
+    vacances: isHoliday,
+    is_vacances: isHoliday, // alias si tu veux l'utiliser ailleurs
+    zone: "C",
+    date,
+    periods: matchingPeriods, // pour debug (facultatif)
+  });
 });
 
 // ------------------------------------------------------
