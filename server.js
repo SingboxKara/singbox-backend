@@ -82,12 +82,12 @@ const DEPOSIT_AMOUNT_EUR = 250;
 // Si la date est dans une de ces périodes -> "vacances = true"
 const VACANCES_ZONE_C = [
   // Année scolaire 2024-2025 (exemple, à adapter si besoin)
-  { start: "2024-10-19", end: "2024-11-03", label: "Toussaint 2024" },
-  { start: "2024-12-21", end: "2025-01-05", label: "Noël 2024" },
-  { start: "2025-02-22", end: "2025-03-09", label: "Hiver 2025" },
-  { start: "2025-04-19", end: "2025-05-04", label: "Printemps 2025" },
+  { start: "2025-10-19", end: "2025-11-03", label: "Toussaint 2024" },
+  { start: "2025-12-21", end: "2026-01-05", label: "Noël 2024" },
+  { start: "2026-02-22", end: "2026-03-09", label: "Hiver 2025" },
+  { start: "2026-04-19", end: "2026-05-04", label: "Printemps 2025" },
   // Été : on considère juillet/août comme vacances scolaires
-  { start: "2025-07-05", end: "2025-09-01", label: "Été 2025" },
+  { start: "2026-07-05", end: "2026-09-01", label: "Été 2025" },
 ];
 
 // Helper : savoir si une date ISO est dans [start, end] (inclus)
