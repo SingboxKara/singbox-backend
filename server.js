@@ -537,6 +537,88 @@ app.use(bodyParser.json());
 console.log("🌍 CORS + JSON configurés");
 
 // ------------------------------------------------------
+// Vérifier le panier avant paiement : /api/verify-cart
+// ------------------------------------------------------
+app.post("/api/verify-cart", async (req, res) => {
+  try {
+    if (!supabase) {
+      return res.status(500).send("Supabase non configuré");
+    }
+
+    const { items } = req.body;
+
+    if (!items || !Array.isArray(items) || items.length === 0) {
+      return res.status(400).send("Panier vide ou invalide");
+    }
+
+    const normalizedItems = [];
+
+    for (const slot of items) {
+      // 1) Reconstruire date / start_time / end_time
+      const times = buildTimesFromSlot(slot);
+
+      // 2) Identifier la box comme dans /api/confirm-reservation
+      const rawBox =
+        slot.boxId ?? slot.box_id ?? slot.box ?? slot.boxName ?? 1;
+
+      let numericBoxId = parseInt(String(rawBox).replace(/[^0-9]/g, ""), 10);
+      if (!Number.isFinite(numericBoxId)) {
+        numericBoxId = 1;
+      }
+
+      // 3) Vérifier s'il y a déjà une réservation qui chevauche ce créneau
+      const { data: conflicts, error: conflictError } = await supabase
+        .from("reservations")
+        .select("id")
+        .eq("box_id", numericBoxId)
+        .lt("start_time", times.end_time)
+        .gt("end_time", times.start_time);
+
+      if (conflictError) {
+        console.error(
+          "Erreur vérification conflits /api/verify-cart :",
+          conflictError
+        );
+        return res
+          .status(500)
+          .send("Erreur serveur lors de la vérification des créneaux");
+      }
+
+      if (conflicts && conflicts.length > 0) {
+        return res
+          .status(409)
+          .send(
+            `Le créneau ${times.date} pour la box ${numericBoxId} n'est plus disponible.`
+          );
+      }
+
+      // 4) Normaliser le prix (si manquant)
+      const price =
+        typeof slot.price === "number" && !Number.isNaN(slot.price)
+          ? slot.price
+          : PRICE_PER_SLOT_EUR;
+
+      normalizedItems.push({
+        ...slot,
+        price,
+        box_id: numericBoxId,
+        start_time: times.start_time,
+        end_time: times.end_time,
+        date: times.date,
+      });
+    }
+
+    // Tout est OK → renvoie le panier éventuellement corrigé
+    return res.json({ items: normalizedItems });
+  } catch (e) {
+    console.error("Erreur /api/verify-cart :", e);
+    return res
+      .status(500)
+      .send("Erreur serveur lors de la vérification du panier");
+  }
+});
+
+// ------------------------------------------------------
 // AUTH - INSCRIPTION
 // ------------------------------------------------------
 app.post("/api/register", async (req, res) => {
