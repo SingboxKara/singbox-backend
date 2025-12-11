@@ -752,6 +752,114 @@ app.get("/api/my-reservations", authMiddleware, async (req, res) => {
 });
 
 // ------------------------------------------------------
+// REMBOURSEMENT D'UNE RÉSERVATION (avant 24h)
+// ------------------------------------------------------
+app.post("/api/refund-reservation", authMiddleware, async (req, res) => {
+  try {
+    if (!stripe) {
+      return res.status(500).json({ error: "Stripe non configuré" });
+    }
+    if (!supabase) {
+      return res.status(500).json({ error: "Supabase non configuré" });
+    }
+
+    const { reservationId } = req.body;
+
+    if (!reservationId) {
+      return res.status(400).json({ error: "reservationId manquant" });
+    }
+
+    const userId = req.userId;
+
+    // On récupère l'email de l'utilisateur connecté
+    const { data: user, error: userError } = await supabase
+      .from("users")
+      .select("email")
+      .eq("id", userId)
+      .single();
+
+    if (userError || !user) {
+      return res.status(400).json({ error: "Utilisateur introuvable" });
+    }
+
+    // On charge la réservation
+    const { data: reservation, error } = await supabase
+      .from("reservations")
+      .select("*")
+      .eq("id", reservationId)
+      .single();
+
+    if (error || !reservation) {
+      return res.status(404).json({ error: "Réservation introuvable" });
+    }
+
+    // Vérifier que la résa appartient bien à cet email
+    if (reservation.email !== user.email) {
+      return res
+        .status(403)
+        .json({ error: "Cette réservation ne vous appartient pas." });
+    }
+
+    const statusRaw = (reservation.status || reservation.statut || "").toLowerCase();
+    if (!statusRaw || (!statusRaw.includes("confirm") && statusRaw !== "confirmed")) {
+      return res
+        .status(400)
+        .json({ error: "Réservation non remboursable (statut non confirmé)." });
+    }
+
+    const startIso = reservation.start_time || reservation.datetime;
+    if (!startIso) {
+      return res.status(400).json({ error: "Date de réservation invalide." });
+    }
+
+    const start = new Date(startIso);
+    if (isNaN(start.getTime())) {
+      return res.status(400).json({ error: "Date de réservation invalide." });
+    }
+
+    const now = new Date();
+    const diffMs = start.getTime() - now.getTime();
+    const hoursBefore = diffMs / (1000 * 60 * 60);
+
+    // Règle : remboursement possible uniquement si la séance est dans + de 24h
+    if (hoursBefore < 24) {
+      return res.status(400).json({
+        error: "Le remboursement n'est plus possible (moins de 24h avant la séance).",
+      });
+    }
+
+    if (!reservation.payment_intent_id) {
+      return res.status(400).json({
+        error:
+          "Impossible de rembourser cette réservation en ligne. Merci de contacter Singbox.",
+      });
+    }
+
+    // Remboursement Stripe (montant complet du PaymentIntent)
+    const refund = await stripe.refunds.create({
+      payment_intent: reservation.payment_intent_id,
+    });
+
+    // Mise à jour du statut en base
+    const { error: updateError } = await supabase
+      .from("reservations")
+      .update({ status: "cancelled" })
+      .eq("id", reservationId);
+
+    if (updateError) {
+      console.error("Erreur update réservation après remboursement :", updateError);
+    }
+
+    return res.json({ success: true, refundId: refund.id });
+  } catch (err) {
+    console.error("Erreur /api/refund-reservation :", err);
+    return res
+      .status(500)
+      .json({ error: "Erreur serveur lors du remboursement" });
+  }
+});
+
+// ------------------------------------------------------
 // AJOUT DE POINTS FIDÉLITÉ
 // ------------------------------------------------------
 app.post("/api/add-points", authMiddleware, async (req, res) => {
@@ -1152,7 +1260,7 @@ app.post("/api/confirm-reservation", async (req, res) => {
         numericBoxId = 1;
       }
 
-      return {
+      const row = {
         name: fullName || null,
         email: customer?.email || null,
         box_id: numericBoxId,
@@ -1162,6 +1270,13 @@ app.post("/api/confirm-reservation", async (req, res) => {
         datetime: times.datetime,
         status: "confirmed",
       };
+
+      // On enregistre l'ID du paiement pour pouvoir rembourser plus tard
+      if (paymentIntentId) {
+        row.payment_intent_id = paymentIntentId;
+      }
+
+      return row;
     });
 
     console.log("Lignes à insérer dans reservations :", rows);
