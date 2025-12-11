@@ -72,14 +72,11 @@ console.log("🌍 CORS autorise l'origine : *");
 const PRICE_PER_SLOT_EUR = 10;
 
 // Montant de la caution (empreinte bancaire) en euros
-// Tu peux changer la valeur ici si besoin
 const DEPOSIT_AMOUNT_EUR = 250;
 
 // ------------------------------------------------------
 // Vacances scolaires (Zone C : Toulouse) - à ajuster chaque année
 // ------------------------------------------------------
-// On travaille en dates ISO (YYYY-MM-DD) simples.
-// Si la date est dans une de ces périodes -> "vacances = true"
 const VACANCES_ZONE_C = [
   // Année scolaire 2024-2025 (exemple, à adapter si besoin)
   { start: "2025-10-19", end: "2025-11-03", label: "Toussaint 2024" },
@@ -177,11 +174,6 @@ async function validatePromoCode(code, totalAmountEur) {
 
 /**
  * Construit start_time / end_time à partir du slot.
- *
- * Cas 1 : le front envoie déjà start_time / end_time (ISO) → on les utilise tels quels.
- * Cas 2 : le front envoie { date: "YYYY-MM-DD", hour: 21 } → on fabrique
- *         "YYYY-MM-DDT21:00:00+01:00" / "YYYY-MM-DDT22:00:00+01:00"
- *         (heure locale Paris, sans prise de tête).
  */
 function buildTimesFromSlot(slot) {
   // Cas 1 : start_time / end_time déjà fournis
@@ -845,26 +837,24 @@ app.get("/", (req, res) => {
 // 0bis) /api/is-vacances : indique si la date est en vacances scolaires
 // ------------------------------------------------------
 app.get("/api/is-vacances", (req, res) => {
-  const date = req.query.date; // attendu: "YYYY-MM-DD" (ex: 2024-12-23)
+  const date = req.query.date; // attendu: "YYYY-MM-DD"
   if (!date) {
     return res
       .status(400)
       .json({ error: "Paramètre 'date' manquant (YYYY-MM-DD)" });
   }
 
-  // On vérifie si la date tombe dans une période de vacances connue
   const matchingPeriods = VACANCES_ZONE_C.filter((p) =>
     isDateInRange(date, p.start, p.end)
   );
   const isHoliday = matchingPeriods.length > 0;
 
-  // Réponse compatible avec ton front (checkDateContext)
   return res.json({
     vacances: isHoliday,
-    is_vacances: isHoliday, // alias si tu veux l'utiliser ailleurs
+    is_vacances: isHoliday,
     zone: "C",
     date,
-    periods: matchingPeriods, // pour debug (facultatif)
+    periods: matchingPeriods,
   });
 });
 
@@ -878,17 +868,20 @@ app.post("/api/create-payment-intent", async (req, res) => {
     }
 
     console.log("/api/create-payment-intent appelé");
-    const { panier, customer, promoCode } = req.body;
+    const { panier, customer, promoCode, finalAmountCents, loyaltyUsed } =
+      req.body || {};
 
     if (!panier || !Array.isArray(panier) || panier.length === 0) {
       return res.status(400).json({ error: "Panier vide" });
     }
 
+    // Base : total du panier
     const totalBeforeDiscount = computeCartTotalEur(panier);
     let totalAmountEur = totalBeforeDiscount;
     let discountAmount = 0;
     let promo = null;
 
+    // 1) Applique le code promo côté serveur (source de vérité)
     if (promoCode) {
       const result = await validatePromoCode(promoCode, totalAmountEur);
       if (result.ok) {
@@ -900,14 +893,60 @@ app.post("/api/create-payment-intent", async (req, res) => {
       }
     }
 
-    const amountInCents = Math.round(totalAmountEur * 100);
+    // 2) Si la fidélité a été utilisée, on considère la séance comme 100 % gratuite
+    if (loyaltyUsed) {
+      console.log("⭐ Fidélité utilisée : séance gratuite côté backend.");
+      discountAmount = totalBeforeDiscount;
+      totalAmountEur = 0;
+    }
+
+    // 3) Si le front a envoyé finalAmountCents, on peut vérifier l'écart pour debug
+    if (
+      typeof finalAmountCents === "number" &&
+      finalAmountCents >= 0 &&
+      Number.isFinite(finalAmountCents)
+    ) {
+      const frontTotal = finalAmountCents / 100;
+      if (Math.abs(frontTotal - totalAmountEur) > 0.01) {
+        console.warn(
+          "⚠️ Écart entre total front et back :",
+          "front=",
+          frontTotal,
+          "back=",
+          totalAmountEur
+        );
+      }
+    }
+
     console.log(
-      "Montant total calculé :",
+      "Montant total calculé (après remise / fidélité) :",
       totalAmountEur,
-      "€ (" + amountInCents + " cents) après remise de",
+      "€ ; remise=",
       discountAmount,
       "€"
     );
+
+    // 4) Cas séance 100 % gratuite → on ne crée PAS de PaymentIntent Stripe
+    if (totalAmountEur <= 0) {
+      console.log("🟢 Séance gratuite : aucun PaymentIntent Stripe créé.");
+      return res.json({
+        isFree: true,
+        totalBeforeDiscount,
+        totalAfterDiscount: 0,
+        discountAmount: totalBeforeDiscount,
+        promo: promo
+          ? {
+              id: promo.id,
+              code: promo.code,
+              type: promo.type,
+              value: promo.value,
+            }
+          : null,
+      });
+    }
+
+    // 5) Paiement normal Stripe
+    const amountInCents = Math.round(totalAmountEur * 100);
 
     const paymentIntent = await stripe.paymentIntents.create({
       amount: amountInCents,
@@ -920,11 +959,13 @@ app.post("/api/create-payment-intent", async (req, res) => {
         promo_code: promoCode || "",
         total_before_discount: String(totalBeforeDiscount),
         discount_amount: String(discountAmount),
+        loyalty_used: loyaltyUsed ? "true" : "false",
       },
     });
 
     return res.json({
       clientSecret: paymentIntent.client_secret,
+      isFree: false,
       totalBeforeDiscount,
       totalAfterDiscount: totalAmountEur,
       discountAmount,
@@ -980,8 +1021,6 @@ app.post("/api/create-deposit-intent", async (req, res) => {
     });
 
     // Optionnel : on tente d'enregistrer l'ID de l'empreinte dans la réservation.
-    // Si les colonnes n'existent pas encore dans Supabase, on log juste l'erreur
-    // sans casser la réponse API.
     if (supabase && reservationId) {
       try {
         await supabase
@@ -1019,23 +1058,39 @@ app.post("/api/create-deposit-intent", async (req, res) => {
 app.post("/api/confirm-reservation", async (req, res) => {
   try {
     console.log("/api/confirm-reservation appelé");
-    const { panier, customer, promoCode, paymentIntentId } = req.body;
+    const {
+      panier,
+      customer,
+      promoCode,
+      paymentIntentId,
+      loyaltyUsed,
+      isFree,
+    } = req.body || {};
 
-    if (!paymentIntentId) {
-      return res.status(400).json({ error: "paymentIntentId manquant" });
-    }
+    const isFreeReservationFlag = !!isFree || !!loyaltyUsed;
+
     if (!panier || !Array.isArray(panier) || panier.length === 0) {
       return res.status(400).json({ error: "Panier vide" });
     }
 
-    if (!stripe) {
-      return res.status(500).json({ error: "Stripe non configuré" });
-    }
+    // Si ce n'est PAS une séance gratuite, on vérifie le PaymentIntent Stripe
+    if (!isFreeReservationFlag) {
+      if (!paymentIntentId) {
+        return res.status(400).json({ error: "paymentIntentId manquant" });
+      }
+      if (!stripe) {
+        return res.status(500).json({ error: "Stripe non configuré" });
+      }
 
-    const pi = await stripe.paymentIntents.retrieve(paymentIntentId);
-    console.log("Statut PaymentIntent :", pi.status);
-    if (pi.status !== "succeeded") {
-      return res.status(400).json({ error: "Paiement non validé par Stripe" });
+      const pi = await stripe.paymentIntents.retrieve(paymentIntentId);
+      console.log("Statut PaymentIntent :", pi.status);
+      if (pi.status !== "succeeded") {
+        return res
+          .status(400)
+          .json({ error: "Paiement non validé par Stripe" });
+      }
+    } else {
+      console.log("✅ Réservation confirmée en mode gratuit (isFree / fidélité).");
     }
 
     if (!supabase) {
@@ -1156,13 +1211,19 @@ app.post("/api/confirm-reservation", async (req, res) => {
       console.error("Erreur globale envoi mails :", mailErr);
     }
 
-    // Fidélité : ajouter des points si l'utilisateur est identifié + pas une résa gratuite
+    // Fidélité : ajouter des points si l'utilisateur est identifié
+    // et que la réservation n'est PAS gratuite (ni promo.free, ni fidélité, ni isFree)
     try {
+      const isFreeReservationFinal =
+        isFreeReservationFlag || (promo && promo.type === "free");
+
       if (!supabase) {
         console.log("Supabase non configuré, pas de points fidélité.");
       } else if (!userIdFromToken) {
         console.log("Aucun token fourni, pas d'ajout automatique de points.");
-      } else if (!promo || promo.type !== "free") {
+      } else if (isFreeReservationFinal) {
+        console.log("🎁 Réservation gratuite → aucun point fidélité ajouté.");
+      } else {
         const pointsToAdd = panier.length * 10;
 
         const { error: pointsError } = await supabase.rpc(
@@ -1180,8 +1241,6 @@ app.post("/api/confirm-reservation", async (req, res) => {
             `⭐ ${pointsToAdd} points ajoutés à l'utilisateur ${userIdFromToken}`
           );
         }
-      } else {
-        console.log("🎁 Réservation gratuite → aucun point fidélité ajouté.");
       }
     } catch (pointsErr) {
       console.error(
@@ -1202,7 +1261,7 @@ app.post("/api/confirm-reservation", async (req, res) => {
           promo_id: promo.id,
           code: promo.code,
           email: customer?.email || null,
-          payment_intent_id: paymentIntentId,
+          payment_intent_id: paymentIntentId || null,
           total_before: totalBeforeDiscount,
           total_after: totalAfterDiscount,
           discount_amount: discountAmount,
@@ -1282,7 +1341,6 @@ app.post("/api/capture-deposit", async (req, res) => {
       params
     );
 
-    // Optionnel : on met à jour la BDD pour tracer que la caution a été prélevée
     if (supabase && reservationId) {
       try {
         await supabase
