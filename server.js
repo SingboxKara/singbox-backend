@@ -74,6 +74,9 @@ const PRICE_PER_SLOT_EUR = 10;
 // Montant de la caution (empreinte bancaire) en euros
 const DEPOSIT_AMOUNT_EUR = 250;
 
+// Durée d’un créneau en minutes (1h30)
+const SLOT_DURATION_MINUTES = 90;
+
 // ------------------------------------------------------
 // Vacances scolaires (Zone C : Toulouse) - à ajuster chaque année
 // ------------------------------------------------------
@@ -172,8 +175,20 @@ async function validatePromoCode(code, totalAmountEur) {
   };
 }
 
+// Ajoute des jours à une date ISO (YYYY-MM-DD)
+function addDaysToDateString(dateStr, daysToAdd) {
+  const [y, m, d] = dateStr.split("-").map((x) => parseInt(x, 10));
+  const base = new Date(Date.UTC(y, m - 1, d));
+  base.setUTCDate(base.getUTCDate() + daysToAdd);
+  const ny = base.getUTCFullYear();
+  const nm = String(base.getUTCMonth() + 1).padStart(2, "0");
+  const nd = String(base.getUTCDate()).padStart(2, "0");
+  return `${ny}-${nm}-${nd}`;
+}
+
 /**
  * Construit start_time / end_time à partir du slot.
+ * Désormais : durée par défaut = SLOT_DURATION_MINUTES (1h30).
  */
 function buildTimesFromSlot(slot) {
   // Cas 1 : start_time / end_time déjà fournis
@@ -189,7 +204,7 @@ function buildTimesFromSlot(slot) {
 
   // Cas 2 : on part de date + hour
   const date = slot.date; // "YYYY-MM-DD"
-  const rawHour = slot.hour; // 21, "21", "21h-22h", ...
+  const rawHour = slot.hour; // 21, "21", "21h-22h", "18h30", ...
 
   if (!date || rawHour === undefined || rawHour === null) {
     throw new Error(
@@ -197,22 +212,47 @@ function buildTimesFromSlot(slot) {
     );
   }
 
-  let hourNum;
+  let hourNum = 0;
+  let minuteNum = 0;
+
   if (typeof rawHour === "number") {
-    hourNum = rawHour;
+    // 18      -> 18h00
+    // 18.5    -> 18h30 (si un jour tu l'utilises)
+    hourNum = Math.floor(rawHour);
+    minuteNum = Math.round((rawHour - hourNum) * 60);
   } else {
-    const match = String(rawHour).match(/\d{1,2}/);
-    hourNum = match ? parseInt(match[0], 10) : 0;
+    // gère "18h", "18:00", "18h30", "18h-19h30" → on prend l'heure de début
+    const m = String(rawHour).match(/(\d{1,2})[h:]?(\d{2})?/);
+    if (m) {
+      hourNum = parseInt(m[1], 10);
+      minuteNum = m[2] ? parseInt(m[2], 10) : 0;
+    }
   }
 
-  const hourStr = String(hourNum).padStart(2, "0");
-  const nextHourStr = String((hourNum + 1) % 24).padStart(2, "0");
-
-  // On fixe le fuseau de la box à Europe/Paris (UTC+1 "simple")
+  // Fuseau (simple) : à adapter si tu veux gérer l'heure d'été/ hiver dynamiquement
   const OFFSET = "+01:00";
 
-  const startIso = `${date}T${hourStr}:00:00${OFFSET}`;
-  const endIso = `${date}T${nextHourStr}:00:00${OFFSET}`;
+  // start
+  const startHourStr = String(hourNum).padStart(2, "0");
+  const startMinStr = String(minuteNum).padStart(2, "0");
+  const startIso = `${date}T${startHourStr}:${startMinStr}:00${OFFSET}`;
+
+  // end = start + SLOT_DURATION_MINUTES (90 min)
+  const totalStartMinutes = hourNum * 60 + minuteNum + SLOT_DURATION_MINUTES;
+  const minutesPerDay = 24 * 60;
+
+  const endDayOffset = Math.floor(totalStartMinutes / minutesPerDay);
+  const minutesOfDay = totalStartMinutes % minutesPerDay;
+
+  const endHour = Math.floor(minutesOfDay / 60);
+  const endMinute = minutesOfDay % 60;
+
+  const endDateStr =
+    endDayOffset === 0 ? date : addDaysToDateString(date, endDayOffset);
+
+  const endHourStr = String(endHour).padStart(2, "0");
+  const endMinStr = String(endMinute).padStart(2, "0");
+  const endIso = `${endDateStr}T${endHourStr}:${endMinStr}:00${OFFSET}`;
 
   return {
     start_time: startIso,
@@ -752,114 +792,6 @@ app.get("/api/my-reservations", authMiddleware, async (req, res) => {
 });
 
 // ------------------------------------------------------
-// REMBOURSEMENT D'UNE RÉSERVATION (avant 24h)
-// ------------------------------------------------------
-app.post("/api/refund-reservation", authMiddleware, async (req, res) => {
-  try {
-    if (!stripe) {
-      return res.status(500).json({ error: "Stripe non configuré" });
-    }
-    if (!supabase) {
-      return res.status(500).json({ error: "Supabase non configuré" });
-    }
-
-    const { reservationId } = req.body;
-
-    if (!reservationId) {
-      return res.status(400).json({ error: "reservationId manquant" });
-    }
-
-    const userId = req.userId;
-
-    // On récupère l'email de l'utilisateur connecté
-    const { data: user, error: userError } = await supabase
-      .from("users")
-      .select("email")
-      .eq("id", userId)
-      .single();
-
-    if (userError || !user) {
-      return res.status(400).json({ error: "Utilisateur introuvable" });
-    }
-
-    // On charge la réservation
-    const { data: reservation, error } = await supabase
-      .from("reservations")
-      .select("*")
-      .eq("id", reservationId)
-      .single();
-
-    if (error || !reservation) {
-      return res.status(404).json({ error: "Réservation introuvable" });
-    }
-
-    // Vérifier que la résa appartient bien à cet email
-    if (reservation.email !== user.email) {
-      return res
-        .status(403)
-        .json({ error: "Cette réservation ne vous appartient pas." });
-    }
-
-    const statusRaw = (reservation.status || reservation.statut || "").toLowerCase();
-    if (!statusRaw || (!statusRaw.includes("confirm") && statusRaw !== "confirmed")) {
-      return res
-        .status(400)
-        .json({ error: "Réservation non remboursable (statut non confirmé)." });
-    }
-
-    const startIso = reservation.start_time || reservation.datetime;
-    if (!startIso) {
-      return res.status(400).json({ error: "Date de réservation invalide." });
-    }
-
-    const start = new Date(startIso);
-    if (isNaN(start.getTime())) {
-      return res.status(400).json({ error: "Date de réservation invalide." });
-    }
-
-    const now = new Date();
-    const diffMs = start.getTime() - now.getTime();
-    const hoursBefore = diffMs / (1000 * 60 * 60);
-
-    // Règle : remboursement possible uniquement si la séance est dans + de 24h
-    if (hoursBefore < 24) {
-      return res.status(400).json({
-        error: "Le remboursement n'est plus possible (moins de 24h avant la séance).",
-      });
-    }
-
-    if (!reservation.payment_intent_id) {
-      return res.status(400).json({
-        error:
-          "Impossible de rembourser cette réservation en ligne. Merci de contacter Singbox.",
-      });
-    }
-
-    // Remboursement Stripe (montant complet du PaymentIntent)
-    const refund = await stripe.refunds.create({
-      payment_intent: reservation.payment_intent_id,
-    });
-
-    // Mise à jour du statut en base
-    const { error: updateError } = await supabase
-      .from("reservations")
-      .update({ status: "cancelled" })
-      .eq("id", reservationId);
-
-    if (updateError) {
-      console.error("Erreur update réservation après remboursement :", updateError);
-    }
-
-    return res.json({ success: true, refundId: refund.id });
-  } catch (err) {
-    console.error("Erreur /api/refund-reservation :", err);
-    return res
-      .status(500)
-      .json({ error: "Erreur serveur lors du remboursement" });
-  }
-});
-
-// ------------------------------------------------------
 // AJOUT DE POINTS FIDÉLITÉ
 // ------------------------------------------------------
 app.post("/api/add-points", authMiddleware, async (req, res) => {
@@ -1260,7 +1192,7 @@ app.post("/api/confirm-reservation", async (req, res) => {
         numericBoxId = 1;
       }
 
-      const row = {
+      return {
         name: fullName || null,
         email: customer?.email || null,
         box_id: numericBoxId,
@@ -1270,13 +1202,6 @@ app.post("/api/confirm-reservation", async (req, res) => {
         datetime: times.datetime,
         status: "confirmed",
       };
-
-      // On enregistre l'ID du paiement pour pouvoir rembourser plus tard
-      if (paymentIntentId) {
-        row.payment_intent_id = paymentIntentId;
-      }
-
-      return row;
     });
 
     console.log("Lignes à insérer dans reservations :", rows);
