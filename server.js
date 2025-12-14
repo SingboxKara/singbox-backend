@@ -324,7 +324,7 @@ async function sendReservationEmail(reservation) {
   }
 
   try {
-    const qrText = reservation.id;
+    const qrText = `https://singbox-backend.onrender.com/api/check?id=${encodeURIComponent(reservation.id)}`;
 
     // 1) Génère une data URL directement utilisable dans <img src="...">
     const qrDataUrl = await QRCode.toDataURL(qrText);
