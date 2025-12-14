@@ -155,19 +155,17 @@ async function validatePromoCode(code, totalAmountEur) {
   const value = Number(promo.value) || 0;
 
   if (type === "percent") {
-    // totalAmountEur est en € → remise en €
-    discountAmount = totalAmountEur * (value / 100);
+    discountAmount = Math.round(totalAmountEur * (value / 100));
   } else if (type === "fixed") {
     discountAmount = Math.min(totalAmountEur, value);
   } else if (type === "free") {
     discountAmount = totalAmountEur;
   } else {
+    // type inconnu -> pas de remise
     discountAmount = 0;
   }
 
-  // arrondi à 2 décimales
-  discountAmount = Number(discountAmount.toFixed(2));
-  const newTotal = Math.max(0, Number((totalAmountEur - discountAmount).toFixed(2)));
+  const newTotal = Math.max(0, totalAmountEur - discountAmount);
 
   return {
     ok: true,
@@ -236,7 +234,7 @@ function buildTimesFromSlot(slot) {
   const startMinStr = String(minuteNum).padStart(2, "0");
   const startIso = `${date}T${startHourStr}:${startMinStr}:00${OFFSET}`;
 
-  // end = start + SLOT_DURATION_MINUTES
+  // end = start + SLOT_DURATION_MINUTES (90 min)
   const totalStartMinutes = hourNum * 60 + minuteNum + SLOT_DURATION_MINUTES;
   const minutesPerDay = 24 * 60;
 
@@ -259,6 +257,50 @@ function buildTimesFromSlot(slot) {
     date,
     datetime: startIso,
   };
+}
+
+// ------------------------------------------------------
+// ✅ FIX LOGO EMAIL (CID INLINE) — cache en mémoire
+// ------------------------------------------------------
+const LOGO_URL = "https://www.singbox.fr/logo.png";
+const LOGO_CID = "singbox-logo";
+let cachedLogoBase64 = null;
+
+async function getLogoInlineAttachment() {
+  // Si déjà en cache, on renvoie direct
+  if (cachedLogoBase64) {
+    return {
+      filename: "singbox-logo.png",
+      content: cachedLogoBase64,
+      contentType: "image/png",
+      content_id: LOGO_CID, // 👈 Resend: CID
+    };
+  }
+
+  try {
+    // Node 18+ : fetch global
+    const res = await fetch(LOGO_URL, { redirect: "follow" });
+    if (!res.ok) {
+      console.warn("⚠️ Logo non récupéré (HTTP)", res.status, LOGO_URL);
+      return null;
+    }
+
+    const arrayBuffer = await res.arrayBuffer();
+    const buffer = Buffer.from(arrayBuffer);
+    const base64 = buffer.toString("base64");
+
+    cachedLogoBase64 = base64;
+
+    return {
+      filename: "singbox-logo.png",
+      content: base64, // base64 string
+      contentType: "image/png",
+      content_id: LOGO_CID,
+    };
+  } catch (e) {
+    console.warn("⚠️ Erreur récupération logo pour email :", e.message);
+    return null;
+  }
 }
 
 // Envoi d'email avec QR code pour une réservation (via Resend)
@@ -309,9 +351,8 @@ async function sendReservationEmail(reservation) {
 
     const subject = `🎤 Confirmation de votre réservation Singbox - Box ${reservation.box_id}`;
 
-    // ✅ LOGO INLINE CID (plus fiable que URL externe)
-    // On met <img src="cid:singbox-logo"> et on attache le fichier avec content_id: "singbox-logo"
-    // Resend supporte ça officiellement. :contentReference[oaicite:1]{index=1}
+    // ✅ récup logo inline (CID)
+    const logoAttachment = await getLogoInlineAttachment();
 
     const htmlBody = `
       <div style="margin:0;padding:24px 0;background-color:#050814;">
@@ -322,8 +363,8 @@ async function sendReservationEmail(reservation) {
             <tr>
               <td style="vertical-align:middle;">
                 <div style="display:flex;align-items:center;gap:10px;">
-                  <!-- ✅ Logo en inline CID -->
-                  <img src="cid:singbox-logo" alt="Logo Singbox" width="72" height="72" style="border-radius:999px;display:block;box-shadow:0 0 20px rgba(201,76,53,0.65);" />
+                  <!-- ✅ Logo INLINE via CID (plus fiable que URL externe) -->
+                  <img src="cid:${LOGO_CID}" alt="Logo Singbox" width="72" height="72" style="border-radius:999px;display:block;box-shadow:0 0 20px rgba(201,76,53,0.65);" />
                   <div>
                     <div style="font-family:'League Spartan','Montserrat',system-ui,sans-serif;font-weight:700;letter-spacing:0.18em;text-transform:uppercase;font-size:18px;line-height:1.2;">Singbox</div>
                     <div style="font-size:12px;color:#9CA3AF;margin-top:2px;">Karaoké box privatives · Toulouse</div>
@@ -457,26 +498,24 @@ async function sendReservationEmail(reservation) {
       reservation.id
     );
 
+    const attachments = [
+      // QR en pièce jointe “classique”
+      {
+        filename: "qr-reservation.png",
+        content: base64Data,
+        contentType: "image/png",
+      },
+    ];
+
+    // ✅ Ajout logo inline si récup OK
+    if (logoAttachment) attachments.unshift(logoAttachment);
+
     await resend.emails.send({
-      // ⚠️ idéalement : utiliser un domaine vérifié (ex: "Singbox <resa@singbox.fr>")
       from: "Singbox <onboarding@resend.dev>",
       to: toEmail,
       subject,
       html: htmlBody,
-      attachments: [
-        // ✅ Logo inline CID (remote)
-        {
-          filename: "logo.png",
-          path: "https://www.singbox.fr/logo.png",
-          content_id: "singbox-logo", // <-- doit matcher cid:singbox-logo dans le HTML
-        },
-        // QR en pièce jointe (optionnel)
-        {
-          filename: "qr-reservation.png",
-          content: base64Data,
-          contentType: "image/png",
-        },
-      ],
+      attachments,
     });
 
     console.log(
@@ -595,8 +634,10 @@ app.post("/api/verify-cart", async (req, res) => {
     const normalizedItems = [];
 
     for (const slot of items) {
+      // 1) Reconstruire date / start_time / end_time
       const times = buildTimesFromSlot(slot);
 
+      // 2) Identifier la box comme dans /api/confirm-reservation
       const rawBox =
         slot.boxId ?? slot.box_id ?? slot.box ?? slot.boxName ?? 1;
 
@@ -605,6 +646,7 @@ app.post("/api/verify-cart", async (req, res) => {
         numericBoxId = 1;
       }
 
+      // 3) Vérifier s'il y a déjà une réservation qui chevauche ce créneau
       const { data: conflicts, error: conflictError } = await supabase
         .from("reservations")
         .select("id")
@@ -630,6 +672,7 @@ app.post("/api/verify-cart", async (req, res) => {
           );
       }
 
+      // 4) Normaliser le prix (si manquant)
       const price =
         typeof slot.price === "number" && !Number.isNaN(slot.price)
           ? slot.price
@@ -645,6 +688,7 @@ app.post("/api/verify-cart", async (req, res) => {
       });
     }
 
+    // Tout est OK → renvoie le panier éventuellement corrigé
     return res.json({ items: normalizedItems });
   } catch (e) {
     console.error("Erreur /api/verify-cart :", e);
@@ -762,6 +806,7 @@ app.get("/api/my-reservations", authMiddleware, async (req, res) => {
 
     const userId = req.userId;
 
+    // On récupère l'email de l'utilisateur
     const { data: user, error: userError } = await supabase
       .from("users")
       .select("email")
@@ -773,6 +818,7 @@ app.get("/api/my-reservations", authMiddleware, async (req, res) => {
       return res.status(400).json({ error: "Utilisateur introuvable" });
     }
 
+    // On filtre les réservations par email (pas besoin de colonne user_id)
     const { data: reservations, error } = await supabase
       .from("reservations")
       .select("*")
@@ -917,11 +963,13 @@ app.post("/api/create-payment-intent", async (req, res) => {
       return res.status(400).json({ error: "Panier vide" });
     }
 
+    // Base : total du panier
     const totalBeforeDiscount = computeCartTotalEur(panier);
     let totalAmountEur = totalBeforeDiscount;
     let discountAmount = 0;
     let promo = null;
 
+    // 1) Applique le code promo côté serveur (source de vérité)
     if (promoCode) {
       const result = await validatePromoCode(promoCode, totalAmountEur);
       if (result.ok) {
@@ -933,12 +981,14 @@ app.post("/api/create-payment-intent", async (req, res) => {
       }
     }
 
+    // 2) Si la fidélité a été utilisée, on considère la séance comme 100 % gratuite
     if (loyaltyUsed) {
       console.log("⭐ Fidélité utilisée : séance gratuite côté backend.");
       discountAmount = totalBeforeDiscount;
       totalAmountEur = 0;
     }
 
+    // 3) Si le front a envoyé finalAmountCents, on peut vérifier l'écart pour debug
     if (
       typeof finalAmountCents === "number" &&
       finalAmountCents >= 0 &&
@@ -964,6 +1014,7 @@ app.post("/api/create-payment-intent", async (req, res) => {
       "€"
     );
 
+    // 4) Cas séance 100 % gratuite → on ne crée PAS de PaymentIntent Stripe
     if (totalAmountEur <= 0) {
       console.log("🟢 Séance gratuite : aucun PaymentIntent Stripe créé.");
       return res.json({
@@ -982,6 +1033,7 @@ app.post("/api/create-payment-intent", async (req, res) => {
       });
     }
 
+    // 5) Paiement normal Stripe
     const amountInCents = Math.round(totalAmountEur * 100);
 
     const paymentIntent = await stripe.paymentIntents.create({
@@ -1044,7 +1096,7 @@ app.post("/api/create-deposit-intent", async (req, res) => {
     const paymentIntent = await stripe.paymentIntents.create({
       amount: amountInCents,
       currency: "eur",
-      capture_method: "manual",
+      capture_method: "manual", // ⚠️ empreinte bancaire
       automatic_payment_methods: {
         enabled: true,
       },
@@ -1056,6 +1108,7 @@ app.post("/api/create-deposit-intent", async (req, res) => {
       },
     });
 
+    // Optionnel : on tente d'enregistrer l'ID de l'empreinte dans la réservation.
     if (supabase && reservationId) {
       try {
         await supabase
@@ -1108,6 +1161,7 @@ app.post("/api/confirm-reservation", async (req, res) => {
       return res.status(400).json({ error: "Panier vide" });
     }
 
+    // Si ce n'est PAS une séance gratuite, on vérifie le PaymentIntent Stripe
     if (!isFreeReservationFlag) {
       if (!paymentIntentId) {
         return res.status(400).json({ error: "paymentIntentId manquant" });
@@ -1134,6 +1188,7 @@ app.post("/api/confirm-reservation", async (req, res) => {
       return res.json({ status: "ok (sans enregistrement Supabase)" });
     }
 
+    // On essaie de récupérer l'userId depuis le token (s'il existe) pour la fidélité
     let userIdFromToken = null;
     try {
       const authHeader = req.headers.authorization;
@@ -1156,6 +1211,7 @@ app.post("/api/confirm-reservation", async (req, res) => {
       (customer?.prenom ? " " : "") +
       (customer?.nom || "");
 
+    // Recalculer le total pour les stats promo
     const totalBeforeDiscount = computeCartTotalEur(panier);
     let discountAmount = 0;
     let promo = null;
@@ -1243,6 +1299,8 @@ app.post("/api/confirm-reservation", async (req, res) => {
       console.error("Erreur globale envoi mails :", mailErr);
     }
 
+    // Fidélité : ajouter des points si l'utilisateur est identifié
+    // et que la réservation n'est PAS gratuite (ni promo.free, ni fidélité, ni isFree)
     try {
       const isFreeReservationFinal =
         isFreeReservationFlag || (promo && promo.type === "free");
@@ -1279,6 +1337,7 @@ app.post("/api/confirm-reservation", async (req, res) => {
       );
     }
 
+    // TRACE D’UTILISATION DU CODE PROMO
     try {
       if (promo && discountAmount > 0) {
         const totalAfterDiscount = Math.max(
