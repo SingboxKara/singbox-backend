@@ -11,6 +11,11 @@ import QRCode from "qrcode";
 import bcrypt from "bcryptjs";
 import jwt from "jsonwebtoken";
 
+// ✅ AJOUTS POUR LOGO LOCAL (assets/logo.png)
+import fs from "fs";
+import path from "path";
+import { fileURLToPath } from "url";
+
 dotenv.config(); // lit le fichier .env en local
 
 // ---------- CONFIG ENV ----------
@@ -219,6 +224,7 @@ function buildTimesFromSlot(slot) {
     hourNum = Math.floor(rawHour);
     minuteNum = Math.round((rawHour - hourNum) * 60);
   } else {
+    // gère "18h", "18:00", "18h30", "18h-19h30" → on prend l'heure de début
     const m = String(rawHour).match(/(\d{1,2})[h:]?(\d{2})?/);
     if (m) {
       hourNum = parseInt(m[1], 10);
@@ -260,45 +266,41 @@ function buildTimesFromSlot(slot) {
 }
 
 // ------------------------------------------------------
-// ✅ FIX LOGO EMAIL (CID INLINE) — cache en mémoire
+// ✅ LOGO EMAIL LOCAL (assets/logo.png) → inline CID
 // ------------------------------------------------------
-const LOGO_URL = "https://www.singbox.fr/logo.png";
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+
 const LOGO_CID = "singbox-logo";
 let cachedLogoBase64 = null;
 
-async function getLogoInlineAttachment() {
-  // Si déjà en cache, on renvoie direct
+function getLogoInlineAttachment() {
   if (cachedLogoBase64) {
     return {
       filename: "singbox-logo.png",
       content: cachedLogoBase64,
       contentType: "image/png",
-      content_id: LOGO_CID, // 👈 Resend: CID
+      content_id: LOGO_CID,
     };
   }
 
   try {
-    // Node 18+ : fetch global
-    const res = await fetch(LOGO_URL, { redirect: "follow" });
-    if (!res.ok) {
-      console.warn("⚠️ Logo non récupéré (HTTP)", res.status, LOGO_URL);
-      return null;
-    }
-
-    const arrayBuffer = await res.arrayBuffer();
-    const buffer = Buffer.from(arrayBuffer);
+    const logoPath = path.join(__dirname, "assets", "logo.png");
+    const buffer = fs.readFileSync(logoPath);
     const base64 = buffer.toString("base64");
 
     cachedLogoBase64 = base64;
 
+    console.log("✅ Logo local chargé :", logoPath);
+
     return {
       filename: "singbox-logo.png",
-      content: base64, // base64 string
+      content: base64,
       contentType: "image/png",
       content_id: LOGO_CID,
     };
-  } catch (e) {
-    console.warn("⚠️ Erreur récupération logo pour email :", e.message);
+  } catch (err) {
+    console.warn("⚠️ Logo local introuvable (assets/logo.png) :", err.message);
     return null;
   }
 }
@@ -326,8 +328,7 @@ async function sendReservationEmail(reservation) {
 
     // 1) Génère une data URL directement utilisable dans <img src="...">
     const qrDataUrl = await QRCode.toDataURL(qrText);
-    // Pour l'attachement, on garde juste le base64
-    const base64Data = qrDataUrl.split(",")[1];
+    const base64Qr = qrDataUrl.split(",")[1];
 
     const start = reservation.start_time
       ? new Date(reservation.start_time)
@@ -351,19 +352,16 @@ async function sendReservationEmail(reservation) {
 
     const subject = `🎤 Confirmation de votre réservation Singbox - Box ${reservation.box_id}`;
 
-    // ✅ récup logo inline (CID)
-    const logoAttachment = await getLogoInlineAttachment();
-
     const htmlBody = `
       <div style="margin:0;padding:24px 0;background-color:#050814;">
         <div style="max-width:640px;margin:0 auto;background:radial-gradient(circle at 0% 0%,rgba(56,189,248,0.12),transparent 55%),radial-gradient(circle at 100% 0%,rgba(201,76,53,0.25),transparent 55%),#020617;border-radius:18px;border:1px solid rgba(148,163,184,0.3);box-shadow:0 18px 45px rgba(0,0,0,0.85);padding:24px 22px 26px;font-family:'Montserrat',system-ui,-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;color:#F9FAFB;">
-          
+
           <!-- HEADER -->
           <table width="100%" cellpadding="0" cellspacing="0" role="presentation" style="border-collapse:collapse;margin-bottom:18px;">
             <tr>
               <td style="vertical-align:middle;">
                 <div style="display:flex;align-items:center;gap:10px;">
-                  <!-- ✅ Logo INLINE via CID (plus fiable que URL externe) -->
+                  <!-- ✅ LOGO INLINE (CID) -->
                   <img src="cid:${LOGO_CID}" alt="Logo Singbox" width="72" height="72" style="border-radius:999px;display:block;box-shadow:0 0 20px rgba(201,76,53,0.65);" />
                   <div>
                     <div style="font-family:'League Spartan','Montserrat',system-ui,sans-serif;font-weight:700;letter-spacing:0.18em;text-transform:uppercase;font-size:18px;line-height:1.2;">Singbox</div>
@@ -498,17 +496,19 @@ async function sendReservationEmail(reservation) {
       reservation.id
     );
 
+    const logoAttachment = getLogoInlineAttachment();
+
     const attachments = [
-      // QR en pièce jointe “classique”
+      // QR en pièce jointe (download)
       {
         filename: "qr-reservation.png",
-        content: base64Data,
+        content: base64Qr,
         contentType: "image/png",
       },
     ];
 
-    // ✅ Ajout logo inline si récup OK
-    if (logoAttachment) attachments.unshift(logoAttachment);
+    // ✅ Ajoute le logo inline si dispo
+    if (logoAttachment) attachments.push(logoAttachment);
 
     await resend.emails.send({
       from: "Singbox <onboarding@resend.dev>",
@@ -634,10 +634,8 @@ app.post("/api/verify-cart", async (req, res) => {
     const normalizedItems = [];
 
     for (const slot of items) {
-      // 1) Reconstruire date / start_time / end_time
       const times = buildTimesFromSlot(slot);
 
-      // 2) Identifier la box comme dans /api/confirm-reservation
       const rawBox =
         slot.boxId ?? slot.box_id ?? slot.box ?? slot.boxName ?? 1;
 
@@ -646,7 +644,6 @@ app.post("/api/verify-cart", async (req, res) => {
         numericBoxId = 1;
       }
 
-      // 3) Vérifier s'il y a déjà une réservation qui chevauche ce créneau
       const { data: conflicts, error: conflictError } = await supabase
         .from("reservations")
         .select("id")
@@ -672,7 +669,6 @@ app.post("/api/verify-cart", async (req, res) => {
           );
       }
 
-      // 4) Normaliser le prix (si manquant)
       const price =
         typeof slot.price === "number" && !Number.isNaN(slot.price)
           ? slot.price
@@ -688,7 +684,6 @@ app.post("/api/verify-cart", async (req, res) => {
       });
     }
 
-    // Tout est OK → renvoie le panier éventuellement corrigé
     return res.json({ items: normalizedItems });
   } catch (e) {
     console.error("Erreur /api/verify-cart :", e);
@@ -806,7 +801,6 @@ app.get("/api/my-reservations", authMiddleware, async (req, res) => {
 
     const userId = req.userId;
 
-    // On récupère l'email de l'utilisateur
     const { data: user, error: userError } = await supabase
       .from("users")
       .select("email")
@@ -818,7 +812,6 @@ app.get("/api/my-reservations", authMiddleware, async (req, res) => {
       return res.status(400).json({ error: "Utilisateur introuvable" });
     }
 
-    // On filtre les réservations par email (pas besoin de colonne user_id)
     const { data: reservations, error } = await supabase
       .from("reservations")
       .select("*")
@@ -963,13 +956,11 @@ app.post("/api/create-payment-intent", async (req, res) => {
       return res.status(400).json({ error: "Panier vide" });
     }
 
-    // Base : total du panier
     const totalBeforeDiscount = computeCartTotalEur(panier);
     let totalAmountEur = totalBeforeDiscount;
     let discountAmount = 0;
     let promo = null;
 
-    // 1) Applique le code promo côté serveur (source de vérité)
     if (promoCode) {
       const result = await validatePromoCode(promoCode, totalAmountEur);
       if (result.ok) {
@@ -981,14 +972,12 @@ app.post("/api/create-payment-intent", async (req, res) => {
       }
     }
 
-    // 2) Si la fidélité a été utilisée, on considère la séance comme 100 % gratuite
     if (loyaltyUsed) {
       console.log("⭐ Fidélité utilisée : séance gratuite côté backend.");
       discountAmount = totalBeforeDiscount;
       totalAmountEur = 0;
     }
 
-    // 3) Si le front a envoyé finalAmountCents, on peut vérifier l'écart pour debug
     if (
       typeof finalAmountCents === "number" &&
       finalAmountCents >= 0 &&
@@ -1014,7 +1003,6 @@ app.post("/api/create-payment-intent", async (req, res) => {
       "€"
     );
 
-    // 4) Cas séance 100 % gratuite → on ne crée PAS de PaymentIntent Stripe
     if (totalAmountEur <= 0) {
       console.log("🟢 Séance gratuite : aucun PaymentIntent Stripe créé.");
       return res.json({
@@ -1033,7 +1021,6 @@ app.post("/api/create-payment-intent", async (req, res) => {
       });
     }
 
-    // 5) Paiement normal Stripe
     const amountInCents = Math.round(totalAmountEur * 100);
 
     const paymentIntent = await stripe.paymentIntents.create({
@@ -1096,7 +1083,7 @@ app.post("/api/create-deposit-intent", async (req, res) => {
     const paymentIntent = await stripe.paymentIntents.create({
       amount: amountInCents,
       currency: "eur",
-      capture_method: "manual", // ⚠️ empreinte bancaire
+      capture_method: "manual",
       automatic_payment_methods: {
         enabled: true,
       },
@@ -1108,7 +1095,6 @@ app.post("/api/create-deposit-intent", async (req, res) => {
       },
     });
 
-    // Optionnel : on tente d'enregistrer l'ID de l'empreinte dans la réservation.
     if (supabase && reservationId) {
       try {
         await supabase
@@ -1161,7 +1147,6 @@ app.post("/api/confirm-reservation", async (req, res) => {
       return res.status(400).json({ error: "Panier vide" });
     }
 
-    // Si ce n'est PAS une séance gratuite, on vérifie le PaymentIntent Stripe
     if (!isFreeReservationFlag) {
       if (!paymentIntentId) {
         return res.status(400).json({ error: "paymentIntentId manquant" });
@@ -1188,7 +1173,6 @@ app.post("/api/confirm-reservation", async (req, res) => {
       return res.json({ status: "ok (sans enregistrement Supabase)" });
     }
 
-    // On essaie de récupérer l'userId depuis le token (s'il existe) pour la fidélité
     let userIdFromToken = null;
     try {
       const authHeader = req.headers.authorization;
@@ -1211,7 +1195,6 @@ app.post("/api/confirm-reservation", async (req, res) => {
       (customer?.prenom ? " " : "") +
       (customer?.nom || "");
 
-    // Recalculer le total pour les stats promo
     const totalBeforeDiscount = computeCartTotalEur(panier);
     let discountAmount = 0;
     let promo = null;
@@ -1299,8 +1282,6 @@ app.post("/api/confirm-reservation", async (req, res) => {
       console.error("Erreur globale envoi mails :", mailErr);
     }
 
-    // Fidélité : ajouter des points si l'utilisateur est identifié
-    // et que la réservation n'est PAS gratuite (ni promo.free, ni fidélité, ni isFree)
     try {
       const isFreeReservationFinal =
         isFreeReservationFlag || (promo && promo.type === "free");
@@ -1314,13 +1295,10 @@ app.post("/api/confirm-reservation", async (req, res) => {
       } else {
         const pointsToAdd = panier.length * 10;
 
-        const { error: pointsError } = await supabase.rpc(
-          "increment_points",
-          {
-            user_id: userIdFromToken,
-            points_to_add: pointsToAdd,
-          }
-        );
+        const { error: pointsError } = await supabase.rpc("increment_points", {
+          user_id: userIdFromToken,
+          points_to_add: pointsToAdd,
+        });
 
         if (pointsError) {
           console.error("Erreur ajout points fidélité :", pointsError);
@@ -1331,19 +1309,12 @@ app.post("/api/confirm-reservation", async (req, res) => {
         }
       }
     } catch (pointsErr) {
-      console.error(
-        "Erreur lors de l'ajout automatique des points :",
-        pointsErr
-      );
+      console.error("Erreur lors de l'ajout automatique des points :", pointsErr);
     }
 
-    // TRACE D’UTILISATION DU CODE PROMO
     try {
       if (promo && discountAmount > 0) {
-        const totalAfterDiscount = Math.max(
-          0,
-          totalBeforeDiscount - discountAmount
-        );
+        const totalAfterDiscount = Math.max(0, totalBeforeDiscount - discountAmount);
 
         await supabase.from("promo_usages").insert({
           promo_id: promo.id,
@@ -1361,15 +1332,10 @@ app.post("/api/confirm-reservation", async (req, res) => {
           .update({ used_count: currentUsed + 1 })
           .eq("id", promo.id);
 
-        console.log(
-          `📊 Promo ${promo.code} utilisée, remise=${discountAmount}€`
-        );
+        console.log(`📊 Promo ${promo.code} utilisée, remise=${discountAmount}€`);
       }
     } catch (promoErr) {
-      console.error(
-        "Erreur en enregistrant l'utilisation du code promo :",
-        promoErr
-      );
+      console.error("Erreur en enregistrant l'utilisation du code promo :", promoErr);
     }
 
     return res.json({
@@ -1386,9 +1352,7 @@ app.post("/api/confirm-reservation", async (req, res) => {
     });
   } catch (err) {
     console.error("Erreur confirm-reservation :", err);
-    return res
-      .status(500)
-      .json({ error: "Erreur serveur lors de la réservation" });
+    return res.status(500).json({ error: "Erreur serveur lors de la réservation" });
   }
 });
 
@@ -1404,16 +1368,12 @@ app.post("/api/capture-deposit", async (req, res) => {
     const { paymentIntentId, amountToCaptureEur, reservationId } = req.body;
 
     if (!paymentIntentId) {
-      return res
-        .status(400)
-        .json({ error: "paymentIntentId manquant pour la caution" });
+      return res.status(400).json({ error: "paymentIntentId manquant pour la caution" });
     }
 
     let params = {};
     if (amountToCaptureEur != null) {
-      const amountToCaptureCents = Math.round(
-        Number(amountToCaptureEur) * 100
-      );
+      const amountToCaptureCents = Math.round(Number(amountToCaptureEur) * 100);
       params.amount_to_capture = amountToCaptureCents;
     }
 
@@ -1424,36 +1384,23 @@ app.post("/api/capture-deposit", async (req, res) => {
       paymentIntentId
     );
 
-    const paymentIntent = await stripe.paymentIntents.capture(
-      paymentIntentId,
-      params
-    );
+    const paymentIntent = await stripe.paymentIntents.capture(paymentIntentId, params);
 
     if (supabase && reservationId) {
       try {
         await supabase
           .from("reservations")
-          .update({
-            deposit_status: "captured",
-          })
+          .update({ deposit_status: "captured" })
           .eq("id", reservationId);
       } catch (e) {
-        console.warn(
-          "⚠️ Impossible de mettre à jour deposit_status en BDD :",
-          e.message
-        );
+        console.warn("⚠️ Impossible de mettre à jour deposit_status en BDD :", e.message);
       }
     }
 
-    return res.json({
-      status: "captured",
-      paymentIntent,
-    });
+    return res.json({ status: "captured", paymentIntent });
   } catch (err) {
     console.error("Erreur capture-deposit :", err);
-    return res
-      .status(500)
-      .json({ error: "Erreur serveur lors de la capture de la caution" });
+    return res.status(500).json({ error: "Erreur serveur lors de la capture de la caution" });
   }
 });
 
@@ -1469,15 +1416,10 @@ app.post("/api/cancel-deposit", async (req, res) => {
     const { paymentIntentId, reservationId } = req.body;
 
     if (!paymentIntentId) {
-      return res
-        .status(400)
-        .json({ error: "paymentIntentId manquant pour la caution" });
+      return res.status(400).json({ error: "paymentIntentId manquant pour la caution" });
     }
 
-    console.log(
-      "/api/cancel-deposit - annulation de la caution pour PaymentIntent",
-      paymentIntentId
-    );
+    console.log("/api/cancel-deposit - annulation de la caution pour PaymentIntent", paymentIntentId);
 
     const canceled = await stripe.paymentIntents.cancel(paymentIntentId);
 
@@ -1485,27 +1427,17 @@ app.post("/api/cancel-deposit", async (req, res) => {
       try {
         await supabase
           .from("reservations")
-          .update({
-            deposit_status: "canceled",
-          })
+          .update({ deposit_status: "canceled" })
           .eq("id", reservationId);
       } catch (e) {
-        console.warn(
-          "⚠️ Impossible de mettre à jour deposit_status en BDD :",
-          e.message
-        );
+        console.warn("⚠️ Impossible de mettre à jour deposit_status en BDD :", e.message);
       }
     }
 
-    return res.json({
-      status: "canceled",
-      paymentIntent: canceled,
-    });
+    return res.json({ status: "canceled", paymentIntent: canceled });
   } catch (err) {
     console.error("Erreur cancel-deposit :", err);
-    return res
-      .status(500)
-      .json({ error: "Erreur serveur lors de l'annulation de la caution" });
+    return res.status(500).json({ error: "Erreur serveur lors de l'annulation de la caution" });
   }
 });
 
@@ -1519,9 +1451,7 @@ app.get("/api/slots", async (req, res) => {
 
   const date = req.query.date;
   if (!date) {
-    return res
-      .status(400)
-      .json({ error: "Paramètre 'date' manquant (YYYY-MM-DD)" });
+    return res.status(400).json({ error: "Paramètre 'date' manquant (YYYY-MM-DD)" });
   }
 
   try {
@@ -1554,9 +1484,7 @@ app.get("/api/slots", async (req, res) => {
 // ------------------------------------------------------
 app.get("/api/check", async (req, res) => {
   if (!supabase) {
-    return res
-      .status(500)
-      .json({ valid: false, error: "Supabase non configuré" });
+    return res.status(500).json({ valid: false, error: "Supabase non configuré" });
   }
 
   try {
@@ -1575,10 +1503,7 @@ app.get("/api/check", async (req, res) => {
 
     if (error || !data) {
       res.status(404);
-      return res.json({
-        valid: false,
-        reason: "Réservation introuvable.",
-      });
+      return res.json({ valid: false, reason: "Réservation introuvable." });
     }
 
     const now = new Date();
@@ -1588,12 +1513,8 @@ app.get("/api/check", async (req, res) => {
     const marginBeforeMinutes = 5;
     const marginBeforeEndMinutes = 5;
 
-    const startWithMargin = new Date(
-      start.getTime() - marginBeforeMinutes * 60000
-    );
-    const lastEntryTime = new Date(
-      end.getTime() - marginBeforeEndMinutes * 60000
-    );
+    const startWithMargin = new Date(start.getTime() - marginBeforeMinutes * 60000);
+    const lastEntryTime = new Date(end.getTime() - marginBeforeEndMinutes * 60000);
 
     let access = false;
     let reason = "OK";
@@ -1612,12 +1533,7 @@ app.get("/api/check", async (req, res) => {
       reason = "Créneau valide, accès autorisé.";
     }
 
-    return res.json({
-      valid: true,
-      access,
-      reason,
-      reservation: data,
-    });
+    return res.json({ valid: true, access, reason, reservation: data });
   } catch (e) {
     console.error("Erreur /api/check :", e);
     res.status(500);
