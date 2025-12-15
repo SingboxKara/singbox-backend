@@ -11,11 +11,6 @@ import QRCode from "qrcode";
 import bcrypt from "bcryptjs";
 import jwt from "jsonwebtoken";
 
-// ✅ AJOUTS POUR LOGO LOCAL (assets/logo.png)
-import fs from "fs";
-import path from "path";
-import { fileURLToPath } from "url";
-
 dotenv.config(); // lit le fichier .env en local
 
 // ---------- CONFIG ENV ----------
@@ -26,6 +21,11 @@ const SUPABASE_URL = process.env.SUPABASE_URL;
 const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
 
 const RESEND_API_KEY = process.env.RESEND_API_KEY;
+
+// ✅ LOGO PUBLIC (URL)
+const LOGO_URL =
+  process.env.LOGO_URL ||
+  "https://site-reservation-omnms3tbu-singboxs-projects.vercel.app/logo.png";
 
 if (!STRIPE_SECRET_KEY) {
   console.error("❌ STRIPE_SECRET_KEY manquante dans .env");
@@ -89,12 +89,10 @@ const SLOT_DURATION_MINUTES = 90;
 // Vacances scolaires (Zone C : Toulouse) - à ajuster chaque année
 // ------------------------------------------------------
 const VACANCES_ZONE_C = [
-  // Année scolaire 2024-2025 (exemple, à adapter si besoin)
   { start: "2025-10-19", end: "2025-11-03", label: "Toussaint 2024" },
   { start: "2025-12-21", end: "2026-01-05", label: "Noël 2024" },
   { start: "2026-02-22", end: "2026-03-09", label: "Hiver 2025" },
   { start: "2026-04-19", end: "2026-05-04", label: "Printemps 2025" },
-  // Été : on considère juillet/août comme vacances scolaires
   { start: "2026-07-05", end: "2026-09-01", label: "Été 2025" },
 ];
 
@@ -140,7 +138,6 @@ async function validatePromoCode(code, totalAmountEur) {
     return { ok: false, reason: "Code introuvable" };
   }
 
-  // is_active (bool) si tu l'as créé
   if (promo.is_active === false) {
     return { ok: false, reason: "Code inactif" };
   }
@@ -169,7 +166,6 @@ async function validatePromoCode(code, totalAmountEur) {
   } else if (type === "free") {
     discountAmount = totalAmountEur;
   } else {
-    // type inconnu -> pas de remise
     discountAmount = 0;
   }
 
@@ -199,7 +195,6 @@ function addDaysToDateString(dateStr, daysToAdd) {
  * Désormais : durée par défaut = SLOT_DURATION_MINUTES (1h30).
  */
 function buildTimesFromSlot(slot) {
-  // Cas 1 : start_time / end_time déjà fournis
   if (slot.start_time && slot.end_time) {
     const dateFromStart = slot.date || String(slot.start_time).slice(0, 10);
     return {
@@ -210,9 +205,8 @@ function buildTimesFromSlot(slot) {
     };
   }
 
-  // Cas 2 : on part de date + hour
-  const date = slot.date; // "YYYY-MM-DD"
-  const rawHour = slot.hour; // 21, "21", "21h-22h", "18h30", ...
+  const date = slot.date;
+  const rawHour = slot.hour;
 
   if (!date || rawHour === undefined || rawHour === null) {
     throw new Error(
@@ -227,7 +221,6 @@ function buildTimesFromSlot(slot) {
     hourNum = Math.floor(rawHour);
     minuteNum = Math.round((rawHour - hourNum) * 60);
   } else {
-    // gère "18h", "18:00", "18h30", "18h-19h30" → on prend l'heure de début
     const m = String(rawHour).match(/(\d{1,2})[h:]?(\d{2})?/);
     if (m) {
       hourNum = parseInt(m[1], 10);
@@ -235,15 +228,12 @@ function buildTimesFromSlot(slot) {
     }
   }
 
-  // Fuseau (simple) : à adapter si tu veux gérer l'heure d'été/ hiver dynamiquement
   const OFFSET = "+01:00";
 
-  // start
   const startHourStr = String(hourNum).padStart(2, "0");
   const startMinStr = String(minuteNum).padStart(2, "0");
   const startIso = `${date}T${startHourStr}:${startMinStr}:00${OFFSET}`;
 
-  // end = start + SLOT_DURATION_MINUTES (90 min)
   const totalStartMinutes = hourNum * 60 + minuteNum + SLOT_DURATION_MINUTES;
   const minutesPerDay = 24 * 60;
 
@@ -269,89 +259,8 @@ function buildTimesFromSlot(slot) {
 }
 
 // ------------------------------------------------------
-// ✅ LOGO EMAIL LOCAL (assets/logo.png) → inline CID
-// ✅ FIX : résolution robuste (Render peut changer __dirname / cwd)
+// ✅ Envoi d'email avec QR code (Resend) + LOGO par URL publique
 // ------------------------------------------------------
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
-
-const LOGO_CID = "singbox-logo";
-let cachedLogoBase64 = null;
-
-function resolveLogoPath() {
-  // Option 1 : forcer un chemin depuis l'env (recommandé sur Render)
-  // Exemple : LOGO_PATH=backend/assets/logo.png
-  if (process.env.LOGO_PATH) {
-    const p = path.resolve(process.cwd(), process.env.LOGO_PATH);
-    if (fs.existsSync(p)) return p;
-  }
-
-  const candidates = [
-    // cwd (Render: /opt/render/project/src)
-    path.resolve(process.cwd(), "assets", "logo.png"),
-    path.resolve(process.cwd(), "backend", "assets", "logo.png"),
-    path.resolve(process.cwd(), "src", "assets", "logo.png"),
-
-    // autour de __dirname (si server.js est dans backend/)
-    path.resolve(__dirname, "assets", "logo.png"),
-    path.resolve(__dirname, "..", "assets", "logo.png"),
-    path.resolve(__dirname, "..", "backend", "assets", "logo.png"),
-
-    // fallback : si build déplace des fichiers
-    path.resolve(process.cwd(), "backend", "src", "assets", "logo.png"),
-  ];
-
-  for (const p of candidates) {
-    if (fs.existsSync(p)) return p;
-  }
-  return null;
-}
-
-function getLogoInlineAttachment() {
-  if (cachedLogoBase64) {
-    return {
-      filename: "singbox-logo.png",
-      content: cachedLogoBase64,
-      contentType: "image/png",
-      content_id: LOGO_CID,
-    };
-  }
-
-  const logoPath = resolveLogoPath();
-
-  if (!logoPath) {
-    console.warn(
-      "⚠️ Logo local introuvable (assets/logo.png).",
-      "cwd=",
-      process.cwd(),
-      "dirname=",
-      __dirname,
-      "→ Astuce: mets LOGO_PATH=backend/assets/logo.png dans Render"
-    );
-    return null;
-  }
-
-  try {
-    const buffer = fs.readFileSync(logoPath);
-    const base64 = buffer.toString("base64");
-
-    cachedLogoBase64 = base64;
-
-    console.log("✅ Logo local chargé :", logoPath);
-
-    return {
-      filename: "singbox-logo.png",
-      content: base64,
-      contentType: "image/png",
-      content_id: LOGO_CID,
-    };
-  } catch (err) {
-    console.warn("⚠️ Erreur lecture logo :", err.message);
-    return null;
-  }
-}
-
-// Envoi d'email avec QR code pour une réservation (via Resend)
 async function sendReservationEmail(reservation) {
   if (!mailEnabled || !resend) {
     console.warn(
@@ -370,17 +279,15 @@ async function sendReservationEmail(reservation) {
   }
 
   try {
+    // ✅ QR = URL vers ton backend check
     const qrText = `https://singbox-backend.onrender.com/api/check?id=${encodeURIComponent(
       reservation.id
     )}`;
 
-    // 1) Génère une data URL directement utilisable dans <img src="...">
     const qrDataUrl = await QRCode.toDataURL(qrText);
     const base64Qr = qrDataUrl.split(",")[1];
 
-    const start = reservation.start_time
-      ? new Date(reservation.start_time)
-      : null;
+    const start = reservation.start_time ? new Date(reservation.start_time) : null;
     const end = reservation.end_time ? new Date(reservation.end_time) : null;
 
     const fmt = (d) =>
@@ -402,17 +309,17 @@ async function sendReservationEmail(reservation) {
 
     const htmlBody = `
       <div style="margin:0;padding:24px 0;background-color:#050814;">
-        <div style="max-width:640px;margin:0 auto;background:radial-gradient(circle at 0% 0%,rgba(56,189,248,0.12),transparent 55%),radial-gradient(circle at 100% 0%,rgba(201,76,53,0.25),transparent 55%),#020617;border-radius:18px;border:1px solid rgba(148,163,184,0.3);box-shadow:0 18px 45px rgba(0,0,0,0.85);padding:24px 22px 26px;font-family:'Montserrat',system-ui,-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;color:#F9FAFB;">
+        <div style="max-width:640px;margin:0 auto;background:radial-gradient(circle at 0% 0%,rgba(56,189,248,0.12),transparent 55%),radial-gradient(circle at 100% 0%,rgba(201,76,53,0.25),transparent 55%),#020617;border-radius:18px;border:1px solid rgba(148,163,184,0.3);box-shadow:0 18px 45px rgba(0,0,0,0.85);padding:24px 22px 26px;font-family:system-ui,-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;color:#F9FAFB;">
 
           <!-- HEADER -->
           <table width="100%" cellpadding="0" cellspacing="0" role="presentation" style="border-collapse:collapse;margin-bottom:18px;">
             <tr>
               <td style="vertical-align:middle;">
                 <div style="display:flex;align-items:center;gap:10px;">
-                  <!-- ✅ LOGO INLINE (CID) -->
-                  <img src="cid:${LOGO_CID}" alt="Logo Singbox" width="72" height="72" style="border-radius:999px;display:block;box-shadow:0 0 20px rgba(201,76,53,0.65);" />
+                  <!-- ✅ LOGO via URL publique -->
+                  <img src="${LOGO_URL}" alt="Logo Singbox" width="72" height="72" style="border-radius:999px;display:block;box-shadow:0 0 20px rgba(201,76,53,0.65);" />
                   <div>
-                    <div style="font-family:'League Spartan','Montserrat',system-ui,sans-serif;font-weight:700;letter-spacing:0.18em;text-transform:uppercase;font-size:18px;line-height:1.2;">Singbox</div>
+                    <div style="font-weight:700;letter-spacing:0.18em;text-transform:uppercase;font-size:18px;line-height:1.2;">Singbox</div>
                     <div style="font-size:12px;color:#9CA3AF;margin-top:2px;">Karaoké box privatives · Toulouse</div>
                   </div>
                 </div>
@@ -425,138 +332,62 @@ async function sendReservationEmail(reservation) {
             </tr>
           </table>
 
-          <!-- TITRE -->
-          <h1 style="margin:0 0 8px 0;font-family:'League Spartan','Montserrat',system-ui,sans-serif;font-size:22px;letter-spacing:0.06em;text-transform:uppercase;">
+          <h1 style="margin:0 0 8px 0;font-size:22px;letter-spacing:0.06em;text-transform:uppercase;">
             Votre session est confirmée ✅
           </h1>
           <p style="margin:0 0 14px 0;font-size:14px;color:rgba(249,250,251,0.88);line-height:1.6;">
             Merci pour votre réservation chez <strong>Singbox</strong> !
-            Voici le récapitulatif de votre box karaoké privative.
           </p>
 
-          <!-- CARTE RÉCAP -->
           <div style="margin:14px 0 16px 0;padding:14px 14px 12px 14px;border-radius:16px;background:rgba(15,23,42,0.92);border:1px solid rgba(148,163,184,0.45);">
             <table width="100%" cellpadding="0" cellspacing="0" role="presentation" style="border-collapse:collapse;">
               <tr>
-                <td style="font-size:13px;color:#9CA3AF;padding-bottom:6px;">
-                  Box réservée
-                </td>
-                <td style="font-size:13px;color:#9CA3AF;padding-bottom:6px;" align="right">
-                  Horaires
-                </td>
+                <td style="font-size:13px;color:#9CA3AF;padding-bottom:6px;">Box réservée</td>
+                <td style="font-size:13px;color:#9CA3AF;padding-bottom:6px;" align="right">Horaires</td>
               </tr>
               <tr>
-                <td style="font-size:15px;font-weight:600;">
-                  Box ${reservation.box_id}
-                </td>
-                <td style="font-size:14px;" align="right">
-                  ${startStr} → ${endStr}
-                </td>
+                <td style="font-size:15px;font-weight:600;">Box ${reservation.box_id}</td>
+                <td style="font-size:14px;" align="right">${startStr} → ${endStr}</td>
               </tr>
             </table>
             <p style="margin:10px 0 4px 0;font-size:13px;color:#E5E7EB;">
-              <strong>Merci d'arriver 10 minutes en avance</strong> afin de pouvoir vous installer et démarrer la session à l'heure.
+              <strong>Merci d'arriver 10 minutes en avance</strong>.
             </p>
           </div>
 
-          <!-- QR CODE -->
           <div style="text-align:center;margin:18px 0 8px 0;">
             <p style="margin:0 0 8px 0;font-size:13px;color:#9CA3AF;">
-              Présentez ce QR code à votre arrivée pour accéder à votre box :
+              Présentez ce QR code à votre arrivée :
             </p>
             <img src="${qrDataUrl}" alt="QR Code Singbox" style="max-width:220px;height:auto;border-radius:18px;box-shadow:0 14px 30px rgba(0,0,0,0.9);" />
           </div>
 
-          <!-- EMPREINTE BANCAIRE -->
           <div style="margin-top:18px;padding:14px 14px 12px 14px;border-radius:16px;background:rgba(24,24,27,0.96);border:1px solid rgba(248,113,113,0.45);">
-            <h2 style="margin:0 0 6px 0;font-size:15px;font-family:'League Spartan','Montserrat',system-ui,sans-serif;letter-spacing:0.06em;text-transform:uppercase;color:#fecaca;">
+            <h2 style="margin:0 0 6px 0;font-size:15px;letter-spacing:0.06em;text-transform:uppercase;color:#fecaca;">
               Empreinte bancaire de ${DEPOSIT_AMOUNT_EUR} €
             </h2>
             <p style="margin:0 0 6px 0;font-size:13px;color:#E5E7EB;">
-              Pour garantir le bon déroulement de la session, une <strong>empreinte bancaire de ${DEPOSIT_AMOUNT_EUR} €</strong> peut être réalisée sur votre carte bancaire.
-            </p>
-            <ul style="margin:6px 0 6px 18px;padding:0;font-size:12px;color:#E5E7EB;">
-              <li>Il ne s'agit <strong>pas d'un débit immédiat</strong>, mais d'un blocage temporaire du montant.</li>
-              <li>L'empreinte n'est <strong>pas encaissée</strong> si la session se déroule normalement et que le règlement est respecté.</li>
-              <li>En cas de dégradations ou non-respect des règles, tout ou partie de ce montant peut être prélevé après constat par l'équipe Singbox.</li>
-            </ul>
-            <p style="margin:0;font-size:11px;color:#9CA3AF;">
-              Les délais de libération de l’empreinte dépendent de votre banque (généralement quelques jours).
+              Une <strong>empreinte bancaire</strong> peut être réalisée pour garantir le bon déroulement.
             </p>
           </div>
 
-          <!-- CONDITIONS D'ANNULATION -->
-          <div style="margin-top:18px;">
-            <h2 style="margin:0 0 6px 0;font-size:15px;font-family:'League Spartan','Montserrat',system-ui,sans-serif;letter-spacing:0.06em;text-transform:uppercase;">
-              Conditions d'annulation
-            </h2>
-            <ul style="margin:6px 0 0 18px;padding:0;font-size:13px;color:#E5E7EB;">
-              <li>Annulation gratuite jusqu'à <strong>24h avant</strong> le début de la session.</li>
-              <li>Passé ce délai, la réservation est considérée comme due et <strong>non remboursable</strong>.</li>
-              <li>En cas de retard important, la session pourra être écourtée sans compensation afin de respecter les créneaux suivants.</li>
-            </ul>
-          </div>
-
-          <!-- REGLEMENT INTERIEUR -->
-          <div style="margin-top:18px;">
-            <h2 style="margin:0 0 6px 0;font-size:15px;font-family:'League Spartan','Montserrat',system-ui,sans-serif;letter-spacing:0.06em;text-transform:uppercase;">
-              Règlement intérieur Singbox
-            </h2>
-            <ul style="margin:6px 0 0 18px;padding:0;font-size:13px;color:#E5E7EB;">
-              <li><strong>Respect du matériel</strong> : micros, écrans, banquettes et équipements doivent être utilisés avec soin.</li>
-              <li><strong>Comportement</strong> : toute attitude violente, insultante ou dangereuse peut entraîner l'arrêt immédiat de la session.</li>
-              <li><strong>Alcool & drogues</strong> : l'accès pourra être refusé en cas d'état d'ébriété avancé ou de consommation de substances illicites.</li>
-              <li><strong>Fumée</strong> : il est strictement interdit de fumer ou vapoter dans les box.</li>
-              <li><strong>Nuisances sonores</strong> : merci de respecter les autres clients et le voisinage dans les espaces communs.</li>
-              <li><strong>Capacité maximale</strong> : le nombre de personnes par box ne doit pas dépasser la limite indiquée sur place.</li>
-            </ul>
-            <p style="margin:8px 0 0 0;font-size:11px;color:#9CA3AF;">
-              En validant votre réservation, vous acceptez le règlement intérieur de Singbox.
-            </p>
-          </div>
-
-          <!-- INFOS PRATIQUES -->
-          <div style="margin-top:20px;">
-            <h2 style="margin:0 0 6px 0;font-size:15px;font-family:'League Spartan','Montserrat',system-ui,sans-serif;letter-spacing:0.06em;text-transform:uppercase;">
-              Infos pratiques
-            </h2>
-            <p style="margin:0 0 4px 0;font-size:13px;color:#E5E7EB;">
-              Adresse : <strong>66 Rue de la République, 31300 Toulouse</strong> (à adapter si besoin).
-            </p>
-            <p style="margin:0 0 4px 0;font-size:13px;color:#9CA3AF;">
-              Pensez à vérifier l'accès et le stationnement avant votre venue.
-            </p>
-          </div>
-
-          <!-- FOOTER -->
           <div style="margin-top:22px;padding-top:10px;border-top:1px solid rgba(30,64,175,0.65);font-size:11px;color:#9CA3AF;text-align:center;">
-            Suivez-nous sur Instagram et TikTok : <strong>@singboxtoulouse</strong><br/>
+            Instagram/TikTok : <strong>@singboxtoulouse</strong><br/>
             Conservez cet e-mail, il vous sera demandé à l'arrivée.
           </div>
         </div>
       </div>
     `;
 
-    console.log(
-      "📧 Envoi de l'email (Resend) à",
-      toEmail,
-      "pour réservation",
-      reservation.id
-    );
-
-    const logoAttachment = getLogoInlineAttachment();
+    console.log("📧 Envoi de l'email (Resend) à", toEmail, "reservation", reservation.id);
 
     const attachments = [
-      // QR en pièce jointe (download)
       {
         filename: "qr-reservation.png",
         content: base64Qr,
         contentType: "image/png",
       },
     ];
-
-    // ✅ Ajoute le logo inline si dispo
-    if (logoAttachment) attachments.push(logoAttachment);
 
     await resend.emails.send({
       from: "Singbox <onboarding@resend.dev>",
@@ -566,12 +397,7 @@ async function sendReservationEmail(reservation) {
       attachments,
     });
 
-    console.log(
-      "✅ Email envoyé via Resend à",
-      toEmail,
-      "pour réservation",
-      reservation.id
-    );
+    console.log("✅ Email envoyé via Resend à", toEmail, "reservation", reservation.id);
   } catch (err) {
     console.error("❌ Erreur lors de l'envoi de l'email via Resend :", err);
   }
@@ -963,10 +789,10 @@ app.get("/", (req, res) => {
 });
 
 // ------------------------------------------------------
-// 0bis) /api/is-vacances : indique si la date est en vacances scolaires
+// 0bis) /api/is-vacances
 // ------------------------------------------------------
 app.get("/api/is-vacances", (req, res) => {
-  const date = req.query.date; // attendu: "YYYY-MM-DD"
+  const date = req.query.date;
   if (!date) {
     return res
       .status(400)
@@ -1155,7 +981,7 @@ app.post("/api/create-deposit-intent", async (req, res) => {
           .eq("id", reservationId);
       } catch (e) {
         console.warn(
-          "⚠️ Impossible de mettre à jour les infos de caution en BDD (colonnes manquantes ?):",
+          "⚠️ Impossible de mettre à jour les infos de caution en BDD :",
           e.message
         );
       }
@@ -1232,10 +1058,7 @@ app.post("/api/confirm-reservation", async (req, res) => {
         userIdFromToken = decoded.userId;
       }
     } catch (e) {
-      console.warn(
-        "⚠️ Token invalide sur /api/confirm-reservation :",
-        e.message
-      );
+      console.warn("⚠️ Token invalide sur /api/confirm-reservation :", e.message);
     }
 
     const fullName =
@@ -1330,6 +1153,7 @@ app.post("/api/confirm-reservation", async (req, res) => {
       console.error("Erreur globale envoi mails :", mailErr);
     }
 
+    // points fidélité + promo usages (inchangé)
     try {
       const isFreeReservationFinal =
         isFreeReservationFlag || (promo && promo.type === "free");
@@ -1383,15 +1207,10 @@ app.post("/api/confirm-reservation", async (req, res) => {
           .update({ used_count: currentUsed + 1 })
           .eq("id", promo.id);
 
-        console.log(
-          `📊 Promo ${promo.code} utilisée, remise=${discountAmount}€`
-        );
+        console.log(`📊 Promo ${promo.code} utilisée, remise=${discountAmount}€`);
       }
     } catch (promoErr) {
-      console.error(
-        "Erreur en enregistrant l'utilisation du code promo :",
-        promoErr
-      );
+      console.error("Erreur en enregistrant l'utilisation du code promo :", promoErr);
     }
 
     return res.json({
@@ -1456,10 +1275,7 @@ app.post("/api/capture-deposit", async (req, res) => {
           .update({ deposit_status: "captured" })
           .eq("id", reservationId);
       } catch (e) {
-        console.warn(
-          "⚠️ Impossible de mettre à jour deposit_status en BDD :",
-          e.message
-        );
+        console.warn("⚠️ Impossible de mettre à jour deposit_status en BDD :", e.message);
       }
     }
 
@@ -1503,10 +1319,7 @@ app.post("/api/cancel-deposit", async (req, res) => {
           .update({ deposit_status: "canceled" })
           .eq("id", reservationId);
       } catch (e) {
-        console.warn(
-          "⚠️ Impossible de mettre à jour deposit_status en BDD :",
-          e.message
-        );
+        console.warn("⚠️ Impossible de mettre à jour deposit_status en BDD :", e.message);
       }
     }
 
