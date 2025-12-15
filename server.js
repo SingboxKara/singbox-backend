@@ -287,7 +287,11 @@ async function sendReservationEmail(reservation) {
     )}`;
 
     // QR en dataURL (pour affichage dans l’email) + base64 (pour pièce jointe)
-    const qrDataUrl = await QRCode.toDataURL(qrText);
+    const qrDataUrl = await QRCode.toDataURL(qrText, {
+      errorCorrectionLevel: "M",
+      margin: 1,
+      width: 420,
+    });
     const base64Qr = qrDataUrl.split(",")[1];
 
     const start = reservation.start_time
@@ -295,155 +299,265 @@ async function sendReservationEmail(reservation) {
       : null;
     const end = reservation.end_time ? new Date(reservation.end_time) : null;
 
-    const fmt = (d) =>
+    const fmtDate = (d) =>
       d
-        ? d.toLocaleString("fr-FR", {
+        ? d.toLocaleDateString("fr-FR", {
             timeZone: "Europe/Paris",
             day: "2-digit",
             month: "2-digit",
             year: "numeric",
+          })
+        : "N/A";
+
+    const fmtTime = (d) =>
+      d
+        ? d.toLocaleTimeString("fr-FR", {
+            timeZone: "Europe/Paris",
             hour: "2-digit",
             minute: "2-digit",
           })
         : "N/A";
 
-    const startStr = fmt(start);
-    const endStr = fmt(end);
+    const startDateStr = fmtDate(start);
+    const endDateStr = fmtDate(end);
+    const startTimeStr = fmtTime(start);
+    const endTimeStr = fmtTime(end);
 
-    const subject = `🎤 Confirmation de votre réservation Singbox - Box ${reservation.box_id}`;
+    const subject = `Confirmation de votre réservation Singbox – Box ${reservation.box_id}`;
+
+    // Preheader (texte caché qui améliore la preview sur mobile)
+    const preheader = `Box ${reservation.box_id} • ${startDateStr} ${startTimeStr} → ${endTimeStr} • QR code inclus`;
 
     const htmlBody = `
-      <div style="margin:0;padding:24px 0;background-color:#050814;">
-        <div style="max-width:640px;margin:0 auto;background:radial-gradient(circle at 0% 0%,rgba(56,189,248,0.12),transparent 55%),radial-gradient(circle at 100% 0%,rgba(201,76,53,0.25),transparent 55%),#020617;border-radius:18px;border:1px solid rgba(148,163,184,0.3);box-shadow:0 18px 45px rgba(0,0,0,0.85);padding:24px 22px 26px;font-family:'Montserrat',system-ui,-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;color:#F9FAFB;">
+<div style="margin:0;padding:0;background:#0b1020;">
+  <!-- Preheader -->
+  <div style="display:none;max-height:0;overflow:hidden;opacity:0;color:transparent;">
+    ${preheader}
+  </div>
 
-          <!-- HEADER -->
-          <table width="100%" cellpadding="0" cellspacing="0" role="presentation" style="border-collapse:collapse;margin-bottom:18px;">
-            <tr>
-              <td style="vertical-align:middle;">
-                <div>
-                  <div style="font-family:'League Spartan','Montserrat',system-ui,sans-serif;font-weight:700;letter-spacing:0.18em;text-transform:uppercase;font-size:18px;line-height:1.2;">Singbox</div>
-                  <div style="font-size:12px;color:#9CA3AF;margin-top:2px;">Karaoké box privatives · Toulouse</div>
+  <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="border-collapse:collapse;background:#0b1020;">
+    <tr>
+      <td align="center" style="padding:18px 12px;">
+        <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="border-collapse:collapse;max-width:640px;background:#0b1228;border:1px solid rgba(148,163,184,0.28);border-radius:20px;overflow:hidden;">
+          
+          <!-- Header -->
+          <tr>
+            <td style="padding:18px 18px 8px 18px;">
+              <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="border-collapse:collapse;">
+                <tr>
+                  <td style="vertical-align:top;">
+                    <div style="font-family:system-ui,-apple-system,Segoe UI,Roboto,Montserrat,Arial,sans-serif;color:#F9FAFB;">
+                      <div style="font-weight:800;letter-spacing:0.18em;text-transform:uppercase;font-size:18px;line-height:1.2;">
+                        SINGBOX
+                      </div>
+                      <div style="margin-top:4px;font-size:13px;line-height:1.4;color:rgba(249,250,251,0.72);">
+                        Karaoké box privatives · Toulouse
+                      </div>
+                    </div>
+                  </td>
+                  <td align="right" style="vertical-align:top;">
+                    <span style="display:inline-block;padding:8px 12px;border-radius:999px;background:rgba(2,6,23,0.65);border:1px solid rgba(148,163,184,0.35);font-family:system-ui,-apple-system,Segoe UI,Roboto,Montserrat,Arial,sans-serif;font-size:11px;letter-spacing:0.10em;text-transform:uppercase;color:#E5E7EB;">
+                      Confirmation
+                    </span>
+                  </td>
+                </tr>
+              </table>
+            </td>
+          </tr>
+
+          <!-- Title -->
+          <tr>
+            <td style="padding:8px 18px 0 18px;">
+              <div style="font-family:system-ui,-apple-system,Segoe UI,Roboto,Montserrat,Arial,sans-serif;color:#F9FAFB;">
+                <div style="font-weight:900;letter-spacing:0.02em;text-transform:uppercase;font-size:24px;line-height:1.25;">
+                  Votre session est confirmée ✅
                 </div>
-              </td>
-              <td align="right" style="vertical-align:middle;">
-                <span style="display:inline-block;padding:6px 14px;border-radius:999px;background:rgba(15,23,42,0.85);border:1px solid rgba(148,163,184,0.45);font-size:11px;text-transform:uppercase;letter-spacing:0.12em;color:#E5E7EB;">
-                  Confirmation de réservation
-                </span>
-              </td>
-            </tr>
-          </table>
+                <div style="margin-top:10px;font-size:16px;line-height:1.6;color:rgba(249,250,251,0.86);">
+                  Merci pour votre réservation chez <strong>Singbox</strong> !<br/>
+                  Voici votre récapitulatif.
+                </div>
+              </div>
+            </td>
+          </tr>
 
-          <!-- TITRE -->
-          <h1 style="margin:0 0 8px 0;font-family:'League Spartan','Montserrat',system-ui,sans-serif;font-size:22px;letter-spacing:0.06em;text-transform:uppercase;">
-            Votre session est confirmée ✅
-          </h1>
-          <p style="margin:0 0 14px 0;font-size:14px;color:rgba(249,250,251,0.88);line-height:1.6;">
-            Merci pour votre réservation chez <strong>Singbox</strong> !
-            Voici le récapitulatif de votre box karaoké privative.
-          </p>
+          <!-- Recap card -->
+          <tr>
+            <td style="padding:16px 18px 0 18px;">
+              <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="border-collapse:collapse;background:rgba(2,6,23,0.45);border:1px solid rgba(148,163,184,0.35);border-radius:16px;">
+                <tr>
+                  <td style="padding:14px 14px 10px 14px;">
+                    <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="border-collapse:collapse;">
+                      <tr>
+                        <td style="font-family:system-ui,-apple-system,Segoe UI,Roboto,Montserrat,Arial,sans-serif;color:rgba(249,250,251,0.70);font-size:13px;line-height:1.4;">
+                          Box réservée
+                        </td>
+                        <td align="right" style="font-family:system-ui,-apple-system,Segoe UI,Roboto,Montserrat,Arial,sans-serif;color:rgba(249,250,251,0.70);font-size:13px;line-height:1.4;">
+                          Horaires
+                        </td>
+                      </tr>
+                      <tr>
+                        <td style="padding-top:6px;font-family:system-ui,-apple-system,Segoe UI,Roboto,Montserrat,Arial,sans-serif;color:#F9FAFB;font-size:18px;line-height:1.3;font-weight:800;">
+                          Box ${reservation.box_id}
+                        </td>
+                        <td align="right" style="padding-top:6px;font-family:system-ui,-apple-system,Segoe UI,Roboto,Montserrat,Arial,sans-serif;color:#F9FAFB;font-size:16px;line-height:1.4;font-weight:700;">
+                          ${startDateStr}<br/>
+                          ${startTimeStr} → ${endTimeStr}${endDateStr !== startDateStr ? `<br/><span style="font-weight:600;color:rgba(249,250,251,0.75);font-size:13px;">(fin le ${endDateStr})</span>` : ""}
+                        </td>
+                      </tr>
+                    </table>
 
-          <!-- CARTE RÉCAP -->
-          <div style="margin:14px 0 16px 0;padding:14px 14px 12px 14px;border-radius:16px;background:rgba(15,23,42,0.92);border:1px solid rgba(148,163,184,0.45);">
-            <table width="100%" cellpadding="0" cellspacing="0" role="presentation" style="border-collapse:collapse;">
-              <tr>
-                <td style="font-size:13px;color:#9CA3AF;padding-bottom:6px;">
-                  Box réservée
-                </td>
-                <td style="font-size:13px;color:#9CA3AF;padding-bottom:6px;" align="right">
-                  Horaires
-                </td>
-              </tr>
-              <tr>
-                <td style="font-size:15px;font-weight:600;">
-                  Box ${reservation.box_id}
-                </td>
-                <td style="font-size:14px;" align="right">
-                  ${startStr} → ${endStr}
-                </td>
-              </tr>
-            </table>
-            <p style="margin:10px 0 4px 0;font-size:13px;color:#E5E7EB;">
-              <strong>Merci d'arriver 10 minutes en avance</strong> afin de pouvoir vous installer et démarrer la session à l'heure.
-            </p>
-          </div>
+                    <div style="margin-top:12px;font-family:system-ui,-apple-system,Segoe UI,Roboto,Montserrat,Arial,sans-serif;color:rgba(249,250,251,0.88);font-size:15px;line-height:1.6;">
+                      <strong>Merci d'arriver 10 minutes en avance</strong> pour vous installer et démarrer à l'heure.
+                    </div>
+                  </td>
+                </tr>
+              </table>
+            </td>
+          </tr>
 
-          <!-- QR CODE -->
-          <div style="text-align:center;margin:18px 0 8px 0;">
-            <p style="margin:0 0 8px 0;font-size:13px;color:#9CA3AF;">
-              Votre QR code est <strong>en pièce jointe</strong> de cet e-mail (fichier <em>qr-reservation.png</em>).<br/>
-              Vous pouvez aussi le présenter directement ci-dessous :
-            </p>
-          </div>
+          <!-- QR block -->
+          <tr>
+            <td style="padding:18px 18px 0 18px;">
+              <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="border-collapse:collapse;background:rgba(2,6,23,0.35);border:1px solid rgba(148,163,184,0.28);border-radius:16px;">
+                <tr>
+                  <td style="padding:14px;">
+                    <div style="font-family:system-ui,-apple-system,Segoe UI,Roboto,Montserrat,Arial,sans-serif;color:#F9FAFB;font-size:16px;line-height:1.6;font-weight:800;">
+                      Votre QR code en pièce jointe
+                      Présentez-le à l’arrivée :
+                    </div>
+                    <div style="margin-top:12px;text-align:center;">
+                      <img src="${qrDataUrl}" alt="QR code réservation" width="220" style="width:220px;max-width:70vw;height:auto;border-radius:14px;border:1px solid rgba(148,163,184,0.35);display:inline-block;background:#ffffff;padding:10px;" />
+                      <div style="margin-top:10px;font-family:system-ui,-apple-system,Segoe UI,Roboto,Montserrat,Arial,sans-serif;color:rgba(249,250,251,0.68);font-size:12px;line-height:1.5;">
+                        Si besoin, lien de vérification :<br/>
+                        <span style="word-break:break-all;">${qrText}</span>
+                      </div>
+                    </div>
+                  </td>
+                </tr>
+              </table>
+            </td>
+          </tr>
 
-          <!-- EMPREINTE BANCAIRE -->
-          <div style="margin-top:18px;padding:14px 14px 12px 14px;border-radius:16px;background:rgba(24,24,27,0.96);border:1px solid rgba(248,113,113,0.45);">
-            <h2 style="margin:0 0 6px 0;font-size:15px;font-family:'League Spartan','Montserrat',system-ui,sans-serif;letter-spacing:0.06em;text-transform:uppercase;color:#fecaca;">
-              Empreinte bancaire de ${DEPOSIT_AMOUNT_EUR} €
-            </h2>
-            <p style="margin:0 0 6px 0;font-size:13px;color:#E5E7EB;">
-              Pour garantir le bon déroulement de la session, une <strong>empreinte bancaire de ${DEPOSIT_AMOUNT_EUR} €</strong> peut être réalisée sur votre carte bancaire.
-            </p>
-            <ul style="margin:6px 0 6px 18px;padding:0;font-size:12px;color:#E5E7EB;">
-              <li>Il ne s'agit <strong>pas d'un débit immédiat</strong>, mais d'un blocage temporaire du montant.</li>
-              <li>L'empreinte n'est <strong>pas encaissée</strong> si la session se déroule normalement et que le règlement est respecté.</li>
-              <li>En cas de dégradations ou non-respect des règles, tout ou partie de ce montant peut être prélevé après constat par l'équipe Singbox.</li>
-            </ul>
-            <p style="margin:0;font-size:11px;color:#9CA3AF;">
-              Les délais de libération de l’empreinte dépendent de votre banque (généralement quelques jours).
-            </p>
-          </div>
+          <!-- Deposit -->
+          <tr>
+            <td style="padding:18px 18px 0 18px;">
+              <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="border-collapse:collapse;background:rgba(127,29,29,0.16);border:1px solid rgba(248,113,113,0.40);border-radius:16px;">
+                <tr>
+                  <td style="padding:14px;">
+                    <div style="font-family:system-ui,-apple-system,Segoe UI,Roboto,Montserrat,Arial,sans-serif;color:#FECACA;font-size:16px;line-height:1.4;font-weight:900;text-transform:uppercase;letter-spacing:0.04em;">
+                      Empreinte bancaire de ${DEPOSIT_AMOUNT_EUR} €
+                    </div>
+                    <div style="margin-top:8px;font-family:system-ui,-apple-system,Segoe UI,Roboto,Montserrat,Arial,sans-serif;color:rgba(249,250,251,0.88);font-size:14px;line-height:1.7;">
+                      Pour garantir le bon déroulement de la session, une <strong>empreinte bancaire</strong> peut être réalisée (blocage temporaire).
+                    </div>
+                    <ul style="margin:10px 0 0 18px;padding:0;font-family:system-ui,-apple-system,Segoe UI,Roboto,Montserrat,Arial,sans-serif;color:rgba(249,250,251,0.86);font-size:14px;line-height:1.7;">
+                      <li>Ce n’est <strong>pas un débit immédiat</strong>.</li>
+                      <li>Elle n’est <strong>pas encaissée</strong> si tout se passe normalement.</li>
+                      <li>En cas de dégradations / non-respect, tout ou partie peut être prélevé après constat.</li>
+                    </ul>
+                    <div style="margin-top:10px;font-family:system-ui,-apple-system,Segoe UI,Roboto,Montserrat,Arial,sans-serif;color:rgba(249,250,251,0.62);font-size:12px;line-height:1.6;">
+                      Les délais de libération dépendent de votre banque (souvent quelques jours).
+                    </div>
+                  </td>
+                </tr>
+              </table>
+            </td>
+          </tr>
 
-          <!-- CONDITIONS D'ANNULATION -->
-          <div style="margin-top:18px;">
-            <h2 style="margin:0 0 6px 0;font-size:15px;font-family:'League Spartan','Montserrat',system-ui,sans-serif;letter-spacing:0.06em;text-transform:uppercase;">
-              Conditions d'annulation
-            </h2>
-            <ul style="margin:6px 0 0 18px;padding:0;font-size:13px;color:#E5E7EB;">
-              <li>Annulation gratuite jusqu'à <strong>24h avant</strong> le début de la session.</li>
-              <li>Passé ce délai, la réservation est considérée comme due et <strong>non remboursable</strong>.</li>
-              <li>En cas de retard important, la session pourra être écourtée sans compensation afin de respecter les créneaux suivants.</li>
-            </ul>
-          </div>
+          <!-- Cancellation -->
+          <tr>
+            <td style="padding:18px 18px 0 18px;">
+              <div style="font-family:system-ui,-apple-system,Segoe UI,Roboto,Montserrat,Arial,sans-serif;color:#F9FAFB;font-size:16px;line-height:1.4;font-weight:900;text-transform:uppercase;letter-spacing:0.04em;">
+                Conditions d'annulation
+              </div>
+              <ul style="margin:10px 0 0 18px;padding:0;font-family:system-ui,-apple-system,Segoe UI,Roboto,Montserrat,Arial,sans-serif;color:rgba(249,250,251,0.86);font-size:14px;line-height:1.8;">
+                <li>Annulation gratuite jusqu’à <strong>24h avant</strong>.</li>
+                <li>Passé ce délai : réservation due et <strong>non remboursable</strong>.</li>
+                <li>En cas de gros retard, la session peut être écourtée pour respecter les créneaux suivants.</li>
+              </ul>
+            </td>
+          </tr>
 
-          <!-- REGLEMENT INTERIEUR -->
-          <div style="margin-top:18px;">
-            <h2 style="margin:0 0 6px 0;font-size:15px;font-family:'League Spartan','Montserrat',system-ui,sans-serif;letter-spacing:0.06em;text-transform:uppercase;">
-              Règlement intérieur Singbox
-            </h2>
-            <ul style="margin:6px 0 0 18px;padding:0;font-size:13px;color:#E5E7EB;">
-              <li><strong>Respect du matériel</strong> : micros, écrans, banquettes et équipements doivent être utilisés avec soin.</li>
-              <li><strong>Comportement</strong> : toute attitude violente, insultante ou dangereuse peut entraîner l'arrêt immédiat de la session.</li>
-              <li><strong>Alcool & drogues</strong> : l'accès pourra être refusé en cas d'état d'ébriété avancé ou de consommation de substances illicites.</li>
-              <li><strong>Fumée</strong> : il est strictement interdit de fumer ou vapoter dans les box.</li>
-              <li><strong>Nuisances sonores</strong> : merci de respecter les autres clients et le voisinage dans les espaces communs.</li>
-              <li><strong>Capacité maximale</strong> : le nombre de personnes par box ne doit pas dépasser la limite indiquée sur place.</li>
-            </ul>
-            <p style="margin:8px 0 0 0;font-size:11px;color:#9CA3AF;">
-              En validant votre réservation, vous acceptez le règlement intérieur de Singbox.
-            </p>
-          </div>
+          <!-- Rules (shorter / more readable) -->
+          <tr>
+            <td style="padding:18px 18px 0 18px;">
+              <div style="font-family:system-ui,-apple-system,Segoe UI,Roboto,Montserrat,Arial,sans-serif;color:#F9FAFB;font-size:16px;line-height:1.4;font-weight:900;text-transform:uppercase;letter-spacing:0.04em;">
+                Règlement (résumé)
+              </div>
+              <ul style="margin:10px 0 0 18px;padding:0;font-family:system-ui,-apple-system,Segoe UI,Roboto,Montserrat,Arial,sans-serif;color:rgba(249,250,251,0.86);font-size:14px;line-height:1.8;">
+                <li>Respect du matériel (micros, écrans, banquettes).</li>
+                <li>Interdit de fumée des cigarettes dans les box.</li>
+                <li>Comportement respectueux : sinon arrêt de la session.</li>
+                <li>Capacité max : ne pas dépasser la limite affichée sur place.</li>
+              </ul>
+              <div style="margin-top:10px;font-family:system-ui,-apple-system,Segoe UI,Roboto,Montserrat,Arial,sans-serif;color:rgba(249,250,251,0.62);font-size:12px;line-height:1.6;">
+                En validant votre réservation, vous acceptez le règlement intérieur complet.
+              </div>
+            </td>
+          </tr>
 
-          <!-- INFOS PRATIQUES -->
-          <div style="margin-top:20px;">
-            <h2 style="margin:0 0 6px 0;font-size:15px;font-family:'League Spartan','Montserrat',system-ui,sans-serif;letter-spacing:0.06em;text-transform:uppercase;">
-              Infos pratiques
-            </h2>
-            <p style="margin:0 0 4px 0;font-size:13px;color:#E5E7EB;">
-              Adresse : <strong>66 Rue de la République, 31300 Toulouse</strong> (à adapter si besoin).
-            </p>
-            <p style="margin:0 0 4px 0;font-size:13px;color:#9CA3AF;">
-              Pensez à vérifier l'accès et le stationnement avant votre venue.
-            </p>
-          </div>
+          <!-- Practical info -->
+          <tr>
+            <td style="padding:18px 18px 0 18px;">
+              <div style="font-family:system-ui,-apple-system,Segoe UI,Roboto,Montserrat,Arial,sans-serif;color:#F9FAFB;font-size:16px;line-height:1.4;font-weight:900;text-transform:uppercase;letter-spacing:0.04em;">
+                Infos pratiques
+              </div>
+              <div style="margin-top:10px;font-family:system-ui,-apple-system,Segoe UI,Roboto,Montserrat,Arial,sans-serif;color:rgba(249,250,251,0.86);font-size:14px;line-height:1.8;">
+                Adresse : <strong>66 Rue de la République, 31300 Toulouse</strong> (à adapter)
+              </div>
+              <div style="margin-top:6px;font-family:system-ui,-apple-system,Segoe UI,Roboto,Montserrat,Arial,sans-serif;color:rgba(249,250,251,0.62);font-size:12px;line-height:1.6;">
+                Pensez à vérifier l'accès et le stationnement avant votre venue.
+              </div>
+            </td>
+          </tr>
 
-          <!-- FOOTER -->
-          <div style="margin-top:22px;padding-top:10px;border-top:1px solid rgba(30,64,175,0.65);font-size:11px;color:#9CA3AF;text-align:center;">
-            Suivez-nous sur Instagram et TikTok : <strong>@singboxtoulouse</strong><br/>
-            Conservez cet e-mail, il vous sera demandé à l'arrivée.
-          </div>
+          <!-- Footer -->
+          <tr>
+            <td style="padding:18px;">
+              <div style="border-top:1px solid rgba(148,163,184,0.22);padding-top:12px;text-align:center;font-family:system-ui,-apple-system,Segoe UI,Roboto,Montserrat,Arial,sans-serif;color:rgba(249,250,251,0.60);font-size:12px;line-height:1.7;">
+                Instagram / TikTok : <strong style="color:rgba(249,250,251,0.88);">@singboxtoulouse</strong><br/>
+                Conservez cet e-mail : il pourra être demandé à l'arrivée.
+              </div>
+            </td>
+          </tr>
+
+        </table>
+
+        <div style="max-width:640px;margin:10px auto 0 auto;text-align:center;font-family:system-ui,-apple-system,Segoe UI,Roboto,Montserrat,Arial,sans-serif;color:rgba(249,250,251,0.45);font-size:11px;line-height:1.5;">
+          © Singbox – Ceci est un email automatique.
         </div>
-      </div>
-    `;
+      </td>
+    </tr>
+  </table>
+</div>
+`;
+
+    const textBody = `SINGBOX — Confirmation de réservation
+
+Votre session est confirmée.
+
+Récapitulatif
+- Box : ${reservation.box_id}
+- Date : ${startDateStr}
+- Horaires : ${startTimeStr} → ${endTimeStr}${endDateStr !== startDateStr ? ` (fin le ${endDateStr})` : ""}
+
+Merci d'arriver 10 minutes en avance.
+
+QR code :
+- En pièce jointe : qr-reservation.png
+- Lien de vérification : ${qrText}
+
+Empreinte bancaire (${DEPOSIT_AMOUNT_EUR} €)
+- Pas de débit immédiat : blocage temporaire
+- Non encaissée si tout se passe normalement
+- Peut être prélevée en cas de dégradations / non-respect
+
+Conditions d'annulation
+- Gratuite jusqu'à 24h avant
+- Passé ce délai : non remboursable
+
+Instagram / TikTok : @singboxtoulouse
+`;
 
     console.log(
       "📧 Envoi de l'email (Resend) à",
@@ -453,7 +567,6 @@ async function sendReservationEmail(reservation) {
     );
 
     const attachments = [
-      // ✅ QR en pièce jointe (download)
       {
         filename: "qr-reservation.png",
         content: base64Qr,
@@ -466,6 +579,7 @@ async function sendReservationEmail(reservation) {
       to: toEmail,
       subject,
       html: htmlBody,
+      text: textBody,
       attachments,
     });
 
