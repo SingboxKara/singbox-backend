@@ -22,9 +22,6 @@ const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
 
 const RESEND_API_KEY = process.env.RESEND_API_KEY;
 
-// ✅ LOGO URL (le plus simple et fiable en prod)
-const LOGO_URL = process.env.LOGO_URL || ""; // ex: https://...vercel.app/logo.png
-
 if (!STRIPE_SECRET_KEY) {
   console.error("❌ STRIPE_SECRET_KEY manquante dans .env");
 }
@@ -167,7 +164,6 @@ async function validatePromoCode(code, totalAmountEur) {
   } else if (type === "free") {
     discountAmount = totalAmountEur;
   } else {
-    // type inconnu -> pas de remise
     discountAmount = 0;
   }
 
@@ -225,7 +221,6 @@ function buildTimesFromSlot(slot) {
     hourNum = Math.floor(rawHour);
     minuteNum = Math.round((rawHour - hourNum) * 60);
   } else {
-    // gère "18h", "18:00", "18h30", "18h-19h30" → on prend l'heure de début
     const m = String(rawHour).match(/(\d{1,2})[h:]?(\d{2})?/);
     if (m) {
       hourNum = parseInt(m[1], 10);
@@ -233,7 +228,7 @@ function buildTimesFromSlot(slot) {
     }
   }
 
-  // Fuseau (simple)
+  // Fuseau (simple) : à adapter si tu veux gérer l'heure d'été/ hiver dynamiquement
   const OFFSET = "+01:00";
 
   // start
@@ -241,7 +236,7 @@ function buildTimesFromSlot(slot) {
   const startMinStr = String(minuteNum).padStart(2, "0");
   const startIso = `${date}T${startHourStr}:${startMinStr}:00${OFFSET}`;
 
-  // end = start + SLOT_DURATION_MINUTES (90 min)
+  // end = start + SLOT_DURATION_MINUTES
   const totalStartMinutes = hourNum * 60 + minuteNum + SLOT_DURATION_MINUTES;
   const minutesPerDay = 24 * 60;
 
@@ -266,7 +261,9 @@ function buildTimesFromSlot(slot) {
   };
 }
 
+// ------------------------------------------------------
 // Envoi d'email avec QR code pour une réservation (via Resend)
+// ------------------------------------------------------
 async function sendReservationEmail(reservation) {
   if (!mailEnabled || !resend) {
     console.warn(
@@ -289,7 +286,7 @@ async function sendReservationEmail(reservation) {
       reservation.id
     )}`;
 
-    // 1) Génère une data URL directement utilisable dans <img src="...">
+    // QR en dataURL (pour affichage dans l’email) + base64 (pour pièce jointe)
     const qrDataUrl = await QRCode.toDataURL(qrText);
     const base64Qr = qrDataUrl.split(",")[1];
 
@@ -323,16 +320,9 @@ async function sendReservationEmail(reservation) {
           <table width="100%" cellpadding="0" cellspacing="0" role="presentation" style="border-collapse:collapse;margin-bottom:18px;">
             <tr>
               <td style="vertical-align:middle;">
-                <div style="display:flex;align-items:center;gap:10px;">
-                  ${
-                    LOGO_URL
-                      ? `<img src="${LOGO_URL}" alt="Logo Singbox" width="72" height="72" style="border-radius:999px;display:block;box-shadow:0 0 20px rgba(201,76,53,0.65);" />`
-                      : `<div style="width:72px;height:72px;border-radius:999px;background:rgba(255,255,255,0.08);display:flex;align-items:center;justify-content:center;font-size:11px;color:#9CA3AF;">Logo</div>`
-                  }
-                  <div>
-                    <div style="font-family:'League Spartan','Montserrat',system-ui,sans-serif;font-weight:700;letter-spacing:0.18em;text-transform:uppercase;font-size:18px;line-height:1.2;">Singbox</div>
-                    <div style="font-size:12px;color:#9CA3AF;margin-top:2px;">Karaoké box privatives · Toulouse</div>
-                  </div>
+                <div>
+                  <div style="font-family:'League Spartan','Montserrat',system-ui,sans-serif;font-weight:700;letter-spacing:0.18em;text-transform:uppercase;font-size:18px;line-height:1.2;">Singbox</div>
+                  <div style="font-size:12px;color:#9CA3AF;margin-top:2px;">Karaoké box privatives · Toulouse</div>
                 </div>
               </td>
               <td align="right" style="vertical-align:middle;">
@@ -380,9 +370,9 @@ async function sendReservationEmail(reservation) {
           <!-- QR CODE -->
           <div style="text-align:center;margin:18px 0 8px 0;">
             <p style="margin:0 0 8px 0;font-size:13px;color:#9CA3AF;">
-              Présentez ce QR code à votre arrivée pour accéder à votre box :
+              Votre QR code est <strong>en pièce jointe</strong> de cet e-mail (fichier <em>qr-reservation.png</em>).<br/>
+              Vous pouvez aussi le présenter directement ci-dessous :
             </p>
-            <img src="${qrDataUrl}" alt="QR Code Singbox" style="max-width:220px;height:auto;border-radius:18px;box-shadow:0 14px 30px rgba(0,0,0,0.9);" />
           </div>
 
           <!-- EMPREINTE BANCAIRE -->
@@ -463,6 +453,7 @@ async function sendReservationEmail(reservation) {
     );
 
     const attachments = [
+      // ✅ QR en pièce jointe (download)
       {
         filename: "qr-reservation.png",
         content: base64Qr,
@@ -988,7 +979,8 @@ app.post("/api/create-payment-intent", async (req, res) => {
       metadata: {
         panier: JSON.stringify(panier),
         customer_email: customer?.email || "",
-        customer_name: (customer?.prenom || "") + " " + (customer?.nom || ""),
+        customer_name:
+          (customer?.prenom || "") + " " + (customer?.nom || ""),
         promo_code: promoCode || "",
         total_before_discount: String(totalBeforeDiscount),
         discount_amount: String(discountAmount),
@@ -1142,7 +1134,10 @@ app.post("/api/confirm-reservation", async (req, res) => {
         userIdFromToken = decoded.userId;
       }
     } catch (e) {
-      console.warn("⚠️ Token invalide sur /api/confirm-reservation :", e.message);
+      console.warn(
+        "⚠️ Token invalide sur /api/confirm-reservation :",
+        e.message
+      );
     }
 
     const fullName =
@@ -1170,7 +1165,8 @@ app.post("/api/confirm-reservation", async (req, res) => {
     const rows = panier.map((slot) => {
       const times = buildTimesFromSlot(slot);
 
-      const rawBox = slot.boxId ?? slot.box_id ?? slot.box ?? slot.boxName ?? 1;
+      const rawBox =
+        slot.boxId ?? slot.box_id ?? slot.box ?? slot.boxName ?? 1;
 
       let numericBoxId = parseInt(String(rawBox).replace(/[^0-9]/g, ""), 10);
       if (!Number.isFinite(numericBoxId)) {
@@ -1289,7 +1285,9 @@ app.post("/api/confirm-reservation", async (req, res) => {
           .update({ used_count: currentUsed + 1 })
           .eq("id", promo.id);
 
-        console.log(`📊 Promo ${promo.code} utilisée, remise=${discountAmount}€`);
+        console.log(
+          `📊 Promo ${promo.code} utilisée, remise=${discountAmount}€`
+        );
       }
     } catch (promoErr) {
       console.error(
