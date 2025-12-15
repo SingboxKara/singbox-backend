@@ -2,6 +2,7 @@
 
 import express from "express";
 import cors from "cors";
+import bodyParser from "body-parser";
 import Stripe from "stripe";
 import { createClient } from "@supabase/supabase-js";
 import dotenv from "dotenv";
@@ -14,7 +15,6 @@ import jwt from "jsonwebtoken";
 import fs from "fs";
 import path from "path";
 import { fileURLToPath } from "url";
-import crypto from "crypto";
 
 dotenv.config(); // lit le fichier .env en local
 
@@ -26,9 +26,6 @@ const SUPABASE_URL = process.env.SUPABASE_URL;
 const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
 
 const RESEND_API_KEY = process.env.RESEND_API_KEY;
-const JWT_SECRET = process.env.JWT_SECRET;
-
-if (!JWT_SECRET) console.warn("⚠️ JWT_SECRET manquant : auth cassée (login/register).");
 
 if (!STRIPE_SECRET_KEY) {
   console.error("❌ STRIPE_SECRET_KEY manquante dans .env");
@@ -48,10 +45,15 @@ if (!STRIPE_WEBHOOK_SECRET) {
     "⚠️ STRIPE_WEBHOOK_SECRET manquant : les webhooks Stripe ne seront pas vérifiés"
   );
 }
+if (!process.env.JWT_SECRET) {
+  console.warn("⚠️ JWT_SECRET manquant : l'auth (login/register) va échouer");
+}
 
 // ---------- INIT CLIENTS ----------
 const stripe = STRIPE_SECRET_KEY
-  ? new Stripe(STRIPE_SECRET_KEY, { apiVersion: "2023-10-16" })
+  ? new Stripe(STRIPE_SECRET_KEY, {
+      apiVersion: "2023-10-16",
+    })
   : null;
 
 const supabase =
@@ -66,7 +68,12 @@ const resend = mailEnabled ? new Resend(RESEND_API_KEY) : null;
 const app = express();
 
 // CORS : tu peux mettre l’URL exacte de ton front à la place de "*"
-app.use(cors({ origin: "*" }));
+app.use(
+  cors({
+    origin: "*",
+  })
+);
+
 console.log("🌍 CORS autorise l'origine : *");
 
 // Prix par créneau de secours (si jamais le slot n'a pas de price)
@@ -78,19 +85,17 @@ const DEPOSIT_AMOUNT_EUR = 250;
 // Durée d’un créneau en minutes (1h30)
 const SLOT_DURATION_MINUTES = 90;
 
-// Marge d'accès QR (tu peux régler)
-const CHECK_MARGIN_BEFORE_MIN = 5; // minutes avant start
-const CHECK_MARGIN_END_CUTOFF_MIN = 5; // minutes avant end -> dernier accès
-
 // ------------------------------------------------------
 // Vacances scolaires (Zone C : Toulouse) - à ajuster chaque année
 // ------------------------------------------------------
 const VACANCES_ZONE_C = [
-  { start: "2025-10-19", end: "2025-11-03", label: "Toussaint 2025" },
-  { start: "2025-12-21", end: "2026-01-05", label: "Noël 2025" },
-  { start: "2026-02-22", end: "2026-03-09", label: "Hiver 2026" },
-  { start: "2026-04-19", end: "2026-05-04", label: "Printemps 2026" },
-  { start: "2026-07-05", end: "2026-09-01", label: "Été 2026" },
+  // Année scolaire 2024-2025 (exemple, à adapter si besoin)
+  { start: "2025-10-19", end: "2025-11-03", label: "Toussaint 2024" },
+  { start: "2025-12-21", end: "2026-01-05", label: "Noël 2024" },
+  { start: "2026-02-22", end: "2026-03-09", label: "Hiver 2025" },
+  { start: "2026-04-19", end: "2026-05-04", label: "Printemps 2025" },
+  // Été : on considère juillet/août comme vacances scolaires
+  { start: "2026-07-05", end: "2026-09-01", label: "Été 2025" },
 ];
 
 // Helper : savoir si une date ISO est dans [start, end] (inclus)
@@ -115,8 +120,12 @@ function computeCartTotalEur(panier) {
 
 // Valide un code promo + calcule la remise
 async function validatePromoCode(code, totalAmountEur) {
-  if (!supabase) return { ok: false, reason: "Supabase non configuré" };
-  if (!code) return { ok: false, reason: "Code vide" };
+  if (!supabase) {
+    return { ok: false, reason: "Supabase non configuré" };
+  }
+  if (!code) {
+    return { ok: false, reason: "Code vide" };
+  }
 
   const upperCode = String(code).trim().toUpperCase();
 
@@ -124,14 +133,17 @@ async function validatePromoCode(code, totalAmountEur) {
     .from("promo_codes")
     .select("*")
     .eq("code", upperCode)
-    .maybeSingle();
+    .single();
 
   if (error || !promo) {
     console.warn("Promo introuvable :", error);
     return { ok: false, reason: "Code introuvable" };
   }
 
-  if (promo.is_active === false) return { ok: false, reason: "Code inactif" };
+  // is_active (bool) si tu l'as créé
+  if (promo.is_active === false) {
+    return { ok: false, reason: "Code inactif" };
+  }
 
   const today = new Date().toISOString().slice(0, 10); // YYYY-MM-DD
 
@@ -156,11 +168,19 @@ async function validatePromoCode(code, totalAmountEur) {
     discountAmount = Math.min(totalAmountEur, value);
   } else if (type === "free") {
     discountAmount = totalAmountEur;
+  } else {
+    // type inconnu -> pas de remise
+    discountAmount = 0;
   }
 
   const newTotal = Math.max(0, totalAmountEur - discountAmount);
 
-  return { ok: true, newTotal, discountAmount, promo };
+  return {
+    ok: true,
+    newTotal,
+    discountAmount,
+    promo,
+  };
 }
 
 // Ajoute des jours à une date ISO (YYYY-MM-DD)
@@ -176,8 +196,7 @@ function addDaysToDateString(dateStr, daysToAdd) {
 
 /**
  * Construit start_time / end_time à partir du slot.
- * ✅ Corrigé : on génère des timestamps ISO en UTC (Z) via Date,
- * plutôt qu'un OFFSET fixe "+01:00" (cassé en heure d'été).
+ * Désormais : durée par défaut = SLOT_DURATION_MINUTES (1h30).
  */
 function buildTimesFromSlot(slot) {
   // Cas 1 : start_time / end_time déjà fournis
@@ -193,7 +212,7 @@ function buildTimesFromSlot(slot) {
 
   // Cas 2 : on part de date + hour
   const date = slot.date; // "YYYY-MM-DD"
-  const rawHour = slot.hour;
+  const rawHour = slot.hour; // 21, "21", "21h-22h", "18h30", ...
 
   if (!date || rawHour === undefined || rawHour === null) {
     throw new Error(
@@ -208,7 +227,7 @@ function buildTimesFromSlot(slot) {
     hourNum = Math.floor(rawHour);
     minuteNum = Math.round((rawHour - hourNum) * 60);
   } else {
-    // "18h", "18:00", "18h30", "18h-19h30" → on prend l'heure de début
+    // gère "18h", "18:00", "18h30", "18h-19h30" → on prend l'heure de début
     const m = String(rawHour).match(/(\d{1,2})[h:]?(\d{2})?/);
     if (m) {
       hourNum = parseInt(m[1], 10);
@@ -216,45 +235,77 @@ function buildTimesFromSlot(slot) {
     }
   }
 
-  // ✅ On construit une date "Europe/Paris" de manière safe : on part d'un Date local serveur
-  // mais on STOCKE en ISO (UTC) pour Supabase.
-  // Important : si ton serveur est en UTC (Render), ça reste cohérent.
-  const startLocal = new Date(`${date}T${String(hourNum).padStart(2, "0")}:${String(minuteNum).padStart(2, "0")}:00`);
-  const endLocal = new Date(startLocal.getTime() + SLOT_DURATION_MINUTES * 60 * 1000);
+  // Fuseau (simple) : à adapter si tu veux gérer l'heure d'été/ hiver dynamiquement
+  const OFFSET = "+01:00";
 
-  // Si ça passe minuit, endLocal gère automatiquement (date +1)
-  const startIso = startLocal.toISOString();
-  const endIso = endLocal.toISOString();
-  const startDateStr = startIso.slice(0, 10);
+  // start
+  const startHourStr = String(hourNum).padStart(2, "0");
+  const startMinStr = String(minuteNum).padStart(2, "0");
+  const startIso = `${date}T${startHourStr}:${startMinStr}:00${OFFSET}`;
+
+  // end = start + SLOT_DURATION_MINUTES (90 min)
+  const totalStartMinutes = hourNum * 60 + minuteNum + SLOT_DURATION_MINUTES;
+  const minutesPerDay = 24 * 60;
+
+  const endDayOffset = Math.floor(totalStartMinutes / minutesPerDay);
+  const minutesOfDay = totalStartMinutes % minutesPerDay;
+
+  const endHour = Math.floor(minutesOfDay / 60);
+  const endMinute = minutesOfDay % 60;
+
+  const endDateStr =
+    endDayOffset === 0 ? date : addDaysToDateString(date, endDayOffset);
+
+  const endHourStr = String(endHour).padStart(2, "0");
+  const endMinStr = String(endMinute).padStart(2, "0");
+  const endIso = `${endDateStr}T${endHourStr}:${endMinStr}:00${OFFSET}`;
 
   return {
     start_time: startIso,
     end_time: endIso,
-    date: startDateStr,
+    date,
     datetime: startIso,
   };
 }
 
-function normalizeBoxId(slot) {
-  const rawBox = slot.boxId ?? slot.box_id ?? slot.box ?? slot.boxName ?? 1;
-  let numericBoxId = parseInt(String(rawBox).replace(/[^0-9]/g, ""), 10);
-  if (!Number.isFinite(numericBoxId) || numericBoxId <= 0) numericBoxId = 1;
-  return numericBoxId;
-}
-
-function makeReservationId() {
-  // QR-friendly, court, unique
-  return crypto.randomUUID();
-}
-
 // ------------------------------------------------------
 // ✅ LOGO EMAIL LOCAL (assets/logo.png) → inline CID
+// ✅ FIX : résolution robuste (Render peut changer __dirname / cwd)
 // ------------------------------------------------------
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 const LOGO_CID = "singbox-logo";
 let cachedLogoBase64 = null;
+
+function resolveLogoPath() {
+  // Option 1 : forcer un chemin depuis l'env (recommandé sur Render)
+  // Exemple : LOGO_PATH=backend/assets/logo.png
+  if (process.env.LOGO_PATH) {
+    const p = path.resolve(process.cwd(), process.env.LOGO_PATH);
+    if (fs.existsSync(p)) return p;
+  }
+
+  const candidates = [
+    // cwd (Render: /opt/render/project/src)
+    path.resolve(process.cwd(), "assets", "logo.png"),
+    path.resolve(process.cwd(), "backend", "assets", "logo.png"),
+    path.resolve(process.cwd(), "src", "assets", "logo.png"),
+
+    // autour de __dirname (si server.js est dans backend/)
+    path.resolve(__dirname, "assets", "logo.png"),
+    path.resolve(__dirname, "..", "assets", "logo.png"),
+    path.resolve(__dirname, "..", "backend", "assets", "logo.png"),
+
+    // fallback : si build déplace des fichiers
+    path.resolve(process.cwd(), "backend", "src", "assets", "logo.png"),
+  ];
+
+  for (const p of candidates) {
+    if (fs.existsSync(p)) return p;
+  }
+  return null;
+}
 
 function getLogoInlineAttachment() {
   if (cachedLogoBase64) {
@@ -266,8 +317,21 @@ function getLogoInlineAttachment() {
     };
   }
 
+  const logoPath = resolveLogoPath();
+
+  if (!logoPath) {
+    console.warn(
+      "⚠️ Logo local introuvable (assets/logo.png).",
+      "cwd=",
+      process.cwd(),
+      "dirname=",
+      __dirname,
+      "→ Astuce: mets LOGO_PATH=backend/assets/logo.png dans Render"
+    );
+    return null;
+  }
+
   try {
-    const logoPath = path.join(__dirname, "assets", "logo.png");
     const buffer = fs.readFileSync(logoPath);
     const base64 = buffer.toString("base64");
 
@@ -282,7 +346,7 @@ function getLogoInlineAttachment() {
       content_id: LOGO_CID,
     };
   } catch (err) {
-    console.warn("⚠️ Logo local introuvable (assets/logo.png) :", err.message);
+    console.warn("⚠️ Erreur lecture logo :", err.message);
     return null;
   }
 }
@@ -290,24 +354,33 @@ function getLogoInlineAttachment() {
 // Envoi d'email avec QR code pour une réservation (via Resend)
 async function sendReservationEmail(reservation) {
   if (!mailEnabled || !resend) {
-    console.warn("📧 Envoi mail désactivé (RESEND_API_KEY manquante) – email non envoyé.");
+    console.warn(
+      "📧 Envoi mail désactivé (RESEND_API_KEY manquante) – email non envoyé."
+    );
     return;
   }
 
   const toEmail = reservation.email;
   if (!toEmail) {
-    console.warn("📧 Impossible d'envoyer l'email : pas d'adresse sur la réservation", reservation.id);
+    console.warn(
+      "📧 Impossible d'envoyer l'email : pas d'adresse sur la réservation",
+      reservation.id
+    );
     return;
   }
 
   try {
-    // ✅ Ajout box param (si ton script le donne)
-    const qrText = `https://singbox-backend.onrender.com/api/check?id=${encodeURIComponent(reservation.id)}&box=${encodeURIComponent(reservation.box_id ?? 1)}`;
+    const qrText = `https://singbox-backend.onrender.com/api/check?id=${encodeURIComponent(
+      reservation.id
+    )}`;
 
+    // 1) Génère une data URL directement utilisable dans <img src="...">
     const qrDataUrl = await QRCode.toDataURL(qrText);
     const base64Qr = qrDataUrl.split(",")[1];
 
-    const start = reservation.start_time ? new Date(reservation.start_time) : null;
+    const start = reservation.start_time
+      ? new Date(reservation.start_time)
+      : null;
     const end = reservation.end_time ? new Date(reservation.end_time) : null;
 
     const fmt = (d) =>
@@ -331,10 +404,12 @@ async function sendReservationEmail(reservation) {
       <div style="margin:0;padding:24px 0;background-color:#050814;">
         <div style="max-width:640px;margin:0 auto;background:radial-gradient(circle at 0% 0%,rgba(56,189,248,0.12),transparent 55%),radial-gradient(circle at 100% 0%,rgba(201,76,53,0.25),transparent 55%),#020617;border-radius:18px;border:1px solid rgba(148,163,184,0.3);box-shadow:0 18px 45px rgba(0,0,0,0.85);padding:24px 22px 26px;font-family:'Montserrat',system-ui,-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;color:#F9FAFB;">
 
+          <!-- HEADER -->
           <table width="100%" cellpadding="0" cellspacing="0" role="presentation" style="border-collapse:collapse;margin-bottom:18px;">
             <tr>
               <td style="vertical-align:middle;">
                 <div style="display:flex;align-items:center;gap:10px;">
+                  <!-- ✅ LOGO INLINE (CID) -->
                   <img src="cid:${LOGO_CID}" alt="Logo Singbox" width="72" height="72" style="border-radius:999px;display:block;box-shadow:0 0 20px rgba(201,76,53,0.65);" />
                   <div>
                     <div style="font-family:'League Spartan','Montserrat',system-ui,sans-serif;font-weight:700;letter-spacing:0.18em;text-transform:uppercase;font-size:18px;line-height:1.2;">Singbox</div>
@@ -350,6 +425,7 @@ async function sendReservationEmail(reservation) {
             </tr>
           </table>
 
+          <!-- TITRE -->
           <h1 style="margin:0 0 8px 0;font-family:'League Spartan','Montserrat',system-ui,sans-serif;font-size:22px;letter-spacing:0.06em;text-transform:uppercase;">
             Votre session est confirmée ✅
           </h1>
@@ -358,15 +434,24 @@ async function sendReservationEmail(reservation) {
             Voici le récapitulatif de votre box karaoké privative.
           </p>
 
+          <!-- CARTE RÉCAP -->
           <div style="margin:14px 0 16px 0;padding:14px 14px 12px 14px;border-radius:16px;background:rgba(15,23,42,0.92);border:1px solid rgba(148,163,184,0.45);">
             <table width="100%" cellpadding="0" cellspacing="0" role="presentation" style="border-collapse:collapse;">
               <tr>
-                <td style="font-size:13px;color:#9CA3AF;padding-bottom:6px;">Box réservée</td>
-                <td style="font-size:13px;color:#9CA3AF;padding-bottom:6px;" align="right">Horaires</td>
+                <td style="font-size:13px;color:#9CA3AF;padding-bottom:6px;">
+                  Box réservée
+                </td>
+                <td style="font-size:13px;color:#9CA3AF;padding-bottom:6px;" align="right">
+                  Horaires
+                </td>
               </tr>
               <tr>
-                <td style="font-size:15px;font-weight:600;">Box ${reservation.box_id}</td>
-                <td style="font-size:14px;" align="right">${startStr} → ${endStr}</td>
+                <td style="font-size:15px;font-weight:600;">
+                  Box ${reservation.box_id}
+                </td>
+                <td style="font-size:14px;" align="right">
+                  ${startStr} → ${endStr}
+                </td>
               </tr>
             </table>
             <p style="margin:10px 0 4px 0;font-size:13px;color:#E5E7EB;">
@@ -374,6 +459,7 @@ async function sendReservationEmail(reservation) {
             </p>
           </div>
 
+          <!-- QR CODE -->
           <div style="text-align:center;margin:18px 0 8px 0;">
             <p style="margin:0 0 8px 0;font-size:13px;color:#9CA3AF;">
               Présentez ce QR code à votre arrivée pour accéder à votre box :
@@ -381,6 +467,7 @@ async function sendReservationEmail(reservation) {
             <img src="${qrDataUrl}" alt="QR Code Singbox" style="max-width:220px;height:auto;border-radius:18px;box-shadow:0 14px 30px rgba(0,0,0,0.9);" />
           </div>
 
+          <!-- EMPREINTE BANCAIRE -->
           <div style="margin-top:18px;padding:14px 14px 12px 14px;border-radius:16px;background:rgba(24,24,27,0.96);border:1px solid rgba(248,113,113,0.45);">
             <h2 style="margin:0 0 6px 0;font-size:15px;font-family:'League Spartan','Montserrat',system-ui,sans-serif;letter-spacing:0.06em;text-transform:uppercase;color:#fecaca;">
               Empreinte bancaire de ${DEPOSIT_AMOUNT_EUR} €
@@ -388,8 +475,60 @@ async function sendReservationEmail(reservation) {
             <p style="margin:0 0 6px 0;font-size:13px;color:#E5E7EB;">
               Pour garantir le bon déroulement de la session, une <strong>empreinte bancaire de ${DEPOSIT_AMOUNT_EUR} €</strong> peut être réalisée sur votre carte bancaire.
             </p>
+            <ul style="margin:6px 0 6px 18px;padding:0;font-size:12px;color:#E5E7EB;">
+              <li>Il ne s'agit <strong>pas d'un débit immédiat</strong>, mais d'un blocage temporaire du montant.</li>
+              <li>L'empreinte n'est <strong>pas encaissée</strong> si la session se déroule normalement et que le règlement est respecté.</li>
+              <li>En cas de dégradations ou non-respect des règles, tout ou partie de ce montant peut être prélevé après constat par l'équipe Singbox.</li>
+            </ul>
+            <p style="margin:0;font-size:11px;color:#9CA3AF;">
+              Les délais de libération de l’empreinte dépendent de votre banque (généralement quelques jours).
+            </p>
           </div>
 
+          <!-- CONDITIONS D'ANNULATION -->
+          <div style="margin-top:18px;">
+            <h2 style="margin:0 0 6px 0;font-size:15px;font-family:'League Spartan','Montserrat',system-ui,sans-serif;letter-spacing:0.06em;text-transform:uppercase;">
+              Conditions d'annulation
+            </h2>
+            <ul style="margin:6px 0 0 18px;padding:0;font-size:13px;color:#E5E7EB;">
+              <li>Annulation gratuite jusqu'à <strong>24h avant</strong> le début de la session.</li>
+              <li>Passé ce délai, la réservation est considérée comme due et <strong>non remboursable</strong>.</li>
+              <li>En cas de retard important, la session pourra être écourtée sans compensation afin de respecter les créneaux suivants.</li>
+            </ul>
+          </div>
+
+          <!-- REGLEMENT INTERIEUR -->
+          <div style="margin-top:18px;">
+            <h2 style="margin:0 0 6px 0;font-size:15px;font-family:'League Spartan','Montserrat',system-ui,sans-serif;letter-spacing:0.06em;text-transform:uppercase;">
+              Règlement intérieur Singbox
+            </h2>
+            <ul style="margin:6px 0 0 18px;padding:0;font-size:13px;color:#E5E7EB;">
+              <li><strong>Respect du matériel</strong> : micros, écrans, banquettes et équipements doivent être utilisés avec soin.</li>
+              <li><strong>Comportement</strong> : toute attitude violente, insultante ou dangereuse peut entraîner l'arrêt immédiat de la session.</li>
+              <li><strong>Alcool & drogues</strong> : l'accès pourra être refusé en cas d'état d'ébriété avancé ou de consommation de substances illicites.</li>
+              <li><strong>Fumée</strong> : il est strictement interdit de fumer ou vapoter dans les box.</li>
+              <li><strong>Nuisances sonores</strong> : merci de respecter les autres clients et le voisinage dans les espaces communs.</li>
+              <li><strong>Capacité maximale</strong> : le nombre de personnes par box ne doit pas dépasser la limite indiquée sur place.</li>
+            </ul>
+            <p style="margin:8px 0 0 0;font-size:11px;color:#9CA3AF;">
+              En validant votre réservation, vous acceptez le règlement intérieur de Singbox.
+            </p>
+          </div>
+
+          <!-- INFOS PRATIQUES -->
+          <div style="margin-top:20px;">
+            <h2 style="margin:0 0 6px 0;font-size:15px;font-family:'League Spartan','Montserrat',system-ui,sans-serif;letter-spacing:0.06em;text-transform:uppercase;">
+              Infos pratiques
+            </h2>
+            <p style="margin:0 0 4px 0;font-size:13px;color:#E5E7EB;">
+              Adresse : <strong>66 Rue de la République, 31300 Toulouse</strong> (à adapter si besoin).
+            </p>
+            <p style="margin:0 0 4px 0;font-size:13px;color:#9CA3AF;">
+              Pensez à vérifier l'accès et le stationnement avant votre venue.
+            </p>
+          </div>
+
+          <!-- FOOTER -->
           <div style="margin-top:22px;padding-top:10px;border-top:1px solid rgba(30,64,175,0.65);font-size:11px;color:#9CA3AF;text-align:center;">
             Suivez-nous sur Instagram et TikTok : <strong>@singboxtoulouse</strong><br/>
             Conservez cet e-mail, il vous sera demandé à l'arrivée.
@@ -398,11 +537,17 @@ async function sendReservationEmail(reservation) {
       </div>
     `;
 
-    console.log("📧 Envoi de l'email (Resend) à", toEmail, "pour réservation", reservation.id);
+    console.log(
+      "📧 Envoi de l'email (Resend) à",
+      toEmail,
+      "pour réservation",
+      reservation.id
+    );
 
     const logoAttachment = getLogoInlineAttachment();
 
     const attachments = [
+      // QR en pièce jointe (download)
       {
         filename: "qr-reservation.png",
         content: base64Qr,
@@ -410,6 +555,7 @@ async function sendReservationEmail(reservation) {
       },
     ];
 
+    // ✅ Ajoute le logo inline si dispo
     if (logoAttachment) attachments.push(logoAttachment);
 
     await resend.emails.send({
@@ -420,7 +566,12 @@ async function sendReservationEmail(reservation) {
       attachments,
     });
 
-    console.log("✅ Email envoyé via Resend à", toEmail, "pour réservation", reservation.id);
+    console.log(
+      "✅ Email envoyé via Resend à",
+      toEmail,
+      "pour réservation",
+      reservation.id
+    );
   } catch (err) {
     console.error("❌ Erreur lors de l'envoi de l'email via Resend :", err);
   }
@@ -431,12 +582,16 @@ async function sendReservationEmail(reservation) {
 // ------------------------------------------------------
 function authMiddleware(req, res, next) {
   const authHeader = req.headers.authorization;
-  const token = authHeader?.startsWith("Bearer ") ? authHeader.split(" ")[1] : null;
+  const token = authHeader?.startsWith("Bearer ")
+    ? authHeader.split(" ")[1]
+    : null;
 
-  if (!token) return res.status(401).json({ error: "Token manquant" });
+  if (!token) {
+    return res.status(401).json({ error: "Token manquant" });
+  }
 
   try {
-    const decoded = jwt.verify(token, JWT_SECRET);
+    const decoded = jwt.verify(token, process.env.JWT_SECRET);
     req.userId = decoded.userId;
     next();
   } catch (err) {
@@ -446,80 +601,77 @@ function authMiddleware(req, res, next) {
 }
 
 // ------------------------------------------------------
-// ✅ WEBHOOK STRIPE (IMPORTANT : doit être AVANT express.json())
+// WEBHOOK STRIPE
 // ------------------------------------------------------
-app.post("/api/webhook", express.raw({ type: "application/json" }), async (req, res) => {
-  if (!stripe || !STRIPE_WEBHOOK_SECRET) {
-    console.error("❌ Webhook Stripe reçu mais STRIPE ou STRIPE_WEBHOOK_SECRET non configurés");
-    return res.status(500).send("Webhook non configuré");
-  }
-
-  const sig = req.headers["stripe-signature"];
-
-  let event;
-  try {
-    event = stripe.webhooks.constructEvent(req.body, sig, STRIPE_WEBHOOK_SECRET);
-  } catch (err) {
-    console.error("❌ Erreur vérification signature webhook :", err.message);
-    return res.status(400).send(`Webhook Error: ${err.message}`);
-  }
-
-  console.log("📩 Webhook Stripe reçu :", event.type);
-
-  switch (event.type) {
-    case "payment_intent.succeeded": {
-      const paymentIntent = event.data.object;
-      console.log("✅ payment_intent.succeeded :", paymentIntent.id, "montant", paymentIntent.amount);
-      break;
+app.post(
+  "/api/webhook",
+  bodyParser.raw({ type: "application/json" }),
+  async (req, res) => {
+    if (!stripe || !STRIPE_WEBHOOK_SECRET) {
+      console.error(
+        "❌ Webhook Stripe reçu mais STRIPE ou STRIPE_WEBHOOK_SECRET non configurés"
+      );
+      return res.status(500).send("Webhook non configuré");
     }
-    case "payment_intent.payment_failed": {
-      const paymentIntent = event.data.object;
-      console.warn("⚠️ payment_intent.payment_failed :", paymentIntent.id, paymentIntent.last_payment_error?.message);
-      break;
+
+    const sig = req.headers["stripe-signature"];
+
+    let event;
+    try {
+      event = stripe.webhooks.constructEvent(
+        req.body,
+        sig,
+        STRIPE_WEBHOOK_SECRET
+      );
+    } catch (err) {
+      console.error("❌ Erreur vérification signature webhook :", err.message);
+      return res.status(400).send(`Webhook Error: ${err.message}`);
     }
-    default:
-      console.log(`ℹ️ Événement Stripe non géré : ${event.type}`);
+
+    console.log("📩 Webhook Stripe reçu :", event.type);
+
+    switch (event.type) {
+      case "payment_intent.succeeded": {
+        const paymentIntent = event.data.object;
+        console.log(
+          "✅ payment_intent.succeeded :",
+          paymentIntent.id,
+          "montant",
+          paymentIntent.amount,
+          "client",
+          paymentIntent.metadata?.customer_email
+        );
+        break;
+      }
+      case "payment_intent.payment_failed": {
+        const paymentIntent = event.data.object;
+        console.warn(
+          "⚠️ payment_intent.payment_failed :",
+          paymentIntent.id,
+          paymentIntent.last_payment_error?.message
+        );
+        break;
+      }
+      default:
+        console.log(`ℹ️ Événement Stripe non géré : ${event.type}`);
+    }
+
+    res.json({ received: true });
   }
+);
 
-  res.json({ received: true });
-});
+app.use(bodyParser.json());
 
-// ✅ JSON pour toutes les autres routes
-app.use(express.json({ limit: "1mb" }));
-console.log("🌍 JSON configuré");
-
-// ------------------------------------------------------
-// 0) Route de test
-// ------------------------------------------------------
-app.get("/", (req, res) => res.send("API Singbox OK"));
-
-// ------------------------------------------------------
-// 0bis) /api/is-vacances
-// ------------------------------------------------------
-app.get("/api/is-vacances", (req, res) => {
-  const date = req.query.date; // "YYYY-MM-DD"
-  if (!date) {
-    return res.status(400).json({ error: "Paramètre 'date' manquant (YYYY-MM-DD)" });
-  }
-
-  const matchingPeriods = VACANCES_ZONE_C.filter((p) => isDateInRange(date, p.start, p.end));
-  const isHoliday = matchingPeriods.length > 0;
-
-  return res.json({
-    vacances: isHoliday,
-    is_vacances: isHoliday,
-    zone: "C",
-    date,
-    periods: matchingPeriods,
-  });
-});
+console.log("🌍 CORS + JSON configurés");
 
 // ------------------------------------------------------
 // Vérifier le panier avant paiement : /api/verify-cart
 // ------------------------------------------------------
 app.post("/api/verify-cart", async (req, res) => {
   try {
-    if (!supabase) return res.status(500).send("Supabase non configuré");
+    if (!supabase) {
+      return res.status(500).send("Supabase non configuré");
+    }
 
     const { items } = req.body;
 
@@ -531,7 +683,14 @@ app.post("/api/verify-cart", async (req, res) => {
 
     for (const slot of items) {
       const times = buildTimesFromSlot(slot);
-      const numericBoxId = normalizeBoxId(slot);
+
+      const rawBox =
+        slot.boxId ?? slot.box_id ?? slot.box ?? slot.boxName ?? 1;
+
+      let numericBoxId = parseInt(String(rawBox).replace(/[^0-9]/g, ""), 10);
+      if (!Number.isFinite(numericBoxId)) {
+        numericBoxId = 1;
+      }
 
       const { data: conflicts, error: conflictError } = await supabase
         .from("reservations")
@@ -541,12 +700,21 @@ app.post("/api/verify-cart", async (req, res) => {
         .gt("end_time", times.start_time);
 
       if (conflictError) {
-        console.error("Erreur vérification conflits /api/verify-cart :", conflictError);
-        return res.status(500).send("Erreur serveur lors de la vérification des créneaux");
+        console.error(
+          "Erreur vérification conflits /api/verify-cart :",
+          conflictError
+        );
+        return res
+          .status(500)
+          .send("Erreur serveur lors de la vérification des créneaux");
       }
 
       if (conflicts && conflicts.length > 0) {
-        return res.status(409).send(`Le créneau ${times.date} pour la box ${numericBoxId} n'est plus disponible.`);
+        return res
+          .status(409)
+          .send(
+            `Le créneau ${times.date} pour la box ${numericBoxId} n'est plus disponible.`
+          );
       }
 
       const price =
@@ -567,7 +735,9 @@ app.post("/api/verify-cart", async (req, res) => {
     return res.json({ items: normalizedItems });
   } catch (e) {
     console.error("Erreur /api/verify-cart :", e);
-    return res.status(500).send("Erreur serveur lors de la vérification du panier");
+    return res
+      .status(500)
+      .send("Erreur serveur lors de la vérification du panier");
   }
 });
 
@@ -578,33 +748,25 @@ app.post("/api/register", async (req, res) => {
   try {
     const { email, password } = req.body;
 
-    if (!email || !password) return res.status(400).json({ error: "Email et mot de passe requis" });
-    if (!supabase) return res.status(500).json({ error: "Supabase non configuré" });
+    if (!email || !password)
+      return res.status(400).json({ error: "Email et mot de passe requis" });
 
-    const cleanEmail = String(email).trim().toLowerCase();
-    const hash = await bcrypt.hash(String(password), 10);
+    if (!supabase) {
+      return res.status(500).json({ error: "Supabase non configuré" });
+    }
 
-    const { data: existing } = await supabase
+    const hash = await bcrypt.hash(password, 10);
+
+    const { error } = await supabase
       .from("users")
-      .select("id")
-      .eq("email", cleanEmail)
-      .maybeSingle();
-
-    if (existing?.id) return res.status(400).json({ error: "Email déjà utilisé" });
-
-    const { data: created, error } = await supabase
-      .from("users")
-      .insert({ email: cleanEmail, password_hash: hash })
-      .select("id")
-      .single();
+      .insert({ email, password_hash: hash });
 
     if (error) {
       console.error(error);
       return res.status(400).json({ error: error.message });
     }
 
-    const token = jwt.sign({ userId: created.id }, JWT_SECRET, { expiresIn: "7d" });
-    res.json({ message: "Compte créé", token });
+    res.json({ message: "Compte créé" });
   } catch (err) {
     console.error("Erreur register :", err);
     res.status(500).json({ error: "Erreur serveur" });
@@ -618,24 +780,31 @@ app.post("/api/login", async (req, res) => {
   try {
     const { email, password } = req.body;
 
-    if (!email || !password) return res.status(400).json({ error: "Email et mot de passe requis" });
-    if (!supabase) return res.status(500).json({ error: "Supabase non configuré" });
+    if (!email || !password)
+      return res.status(400).json({ error: "Email et mot de passe requis" });
 
-    const cleanEmail = String(email).trim().toLowerCase();
+    if (!supabase) {
+      return res.status(500).json({ error: "Supabase non configuré" });
+    }
 
-    const { data: user, error } = await supabase
+    const { data: users, error } = await supabase
       .from("users")
       .select("*")
-      .eq("email", cleanEmail)
-      .maybeSingle();
+      .eq("email", email)
+      .limit(1);
 
     if (error) return res.status(400).json({ error: error.message });
+
+    const user = users && users[0];
     if (!user) return res.status(400).json({ error: "Email inconnu" });
 
-    const ok = await bcrypt.compare(String(password), user.password_hash);
+    const ok = await bcrypt.compare(password, user.password_hash);
     if (!ok) return res.status(400).json({ error: "Mot de passe incorrect" });
 
-    const token = jwt.sign({ userId: user.id }, JWT_SECRET, { expiresIn: "7d" });
+    const token = jwt.sign({ userId: user.id }, process.env.JWT_SECRET, {
+      expiresIn: "7d",
+    });
+
     res.json({ token });
   } catch (err) {
     console.error("Erreur login :", err);
@@ -649,7 +818,10 @@ app.post("/api/login", async (req, res) => {
 app.get("/api/me", authMiddleware, async (req, res) => {
   try {
     const userId = req.userId;
-    if (!supabase) return res.status(500).json({ error: "Supabase non configuré" });
+
+    if (!supabase) {
+      return res.status(500).json({ error: "Supabase non configuré" });
+    }
 
     const { data, error } = await supabase
       .from("users")
@@ -671,7 +843,9 @@ app.get("/api/me", authMiddleware, async (req, res) => {
 // ------------------------------------------------------
 app.get("/api/my-reservations", authMiddleware, async (req, res) => {
   try {
-    if (!supabase) return res.status(500).json({ error: "Supabase non configuré" });
+    if (!supabase) {
+      return res.status(500).json({ error: "Supabase non configuré" });
+    }
 
     const userId = req.userId;
 
@@ -694,7 +868,9 @@ app.get("/api/my-reservations", authMiddleware, async (req, res) => {
 
     if (error) {
       console.error("Erreur Supabase my-reservations :", error);
-      return res.status(500).json({ error: "Erreur en chargeant les réservations" });
+      return res
+        .status(500)
+        .json({ error: "Erreur en chargeant les réservations" });
     }
 
     return res.json({ reservations: reservations || [] });
@@ -712,8 +888,13 @@ app.post("/api/add-points", authMiddleware, async (req, res) => {
     const userId = req.userId;
     const { points } = req.body;
 
-    if (points == null) return res.status(400).json({ error: "Nombre de points manquant" });
-    if (!supabase) return res.status(500).json({ error: "Supabase non configuré" });
+    if (!points) {
+      return res.status(400).json({ error: "Nombre de points manquant" });
+    }
+
+    if (!supabase) {
+      return res.status(500).json({ error: "Supabase non configuré" });
+    }
 
     const { error } = await supabase.rpc("increment_points", {
       user_id: userId,
@@ -738,12 +919,24 @@ app.post("/api/add-points", authMiddleware, async (req, res) => {
 app.post("/api/use-loyalty", authMiddleware, async (req, res) => {
   try {
     const userId = req.userId;
-    if (!supabase) return res.status(500).json({ error: "Supabase non configuré" });
 
-    const { data: user, error } = await supabase.from("users").select("points").eq("id", userId).single();
-    if (error || !user) return res.status(400).json({ error: "Utilisateur introuvable" });
+    if (!supabase) {
+      return res.status(500).json({ error: "Supabase non configuré" });
+    }
 
-    if (user.points < 100) return res.status(400).json({ error: "Pas assez de points" });
+    const { data: user, error } = await supabase
+      .from("users")
+      .select("points")
+      .eq("id", userId)
+      .single();
+
+    if (error || !user) {
+      return res.status(400).json({ error: "Utilisateur introuvable" });
+    }
+
+    if (user.points < 100) {
+      return res.status(400).json({ error: "Pas assez de points" });
+    }
 
     const { error: updateErr } = await supabase
       .from("users")
@@ -763,13 +956,49 @@ app.post("/api/use-loyalty", authMiddleware, async (req, res) => {
 });
 
 // ------------------------------------------------------
+// 0) Route de test
+// ------------------------------------------------------
+app.get("/", (req, res) => {
+  res.send("API Singbox OK");
+});
+
+// ------------------------------------------------------
+// 0bis) /api/is-vacances : indique si la date est en vacances scolaires
+// ------------------------------------------------------
+app.get("/api/is-vacances", (req, res) => {
+  const date = req.query.date; // attendu: "YYYY-MM-DD"
+  if (!date) {
+    return res
+      .status(400)
+      .json({ error: "Paramètre 'date' manquant (YYYY-MM-DD)" });
+  }
+
+  const matchingPeriods = VACANCES_ZONE_C.filter((p) =>
+    isDateInRange(date, p.start, p.end)
+  );
+  const isHoliday = matchingPeriods.length > 0;
+
+  return res.json({
+    vacances: isHoliday,
+    is_vacances: isHoliday,
+    zone: "C",
+    date,
+    periods: matchingPeriods,
+  });
+});
+
+// ------------------------------------------------------
 // 1) CRÉER UN PAYMENT INTENT STRIPE (paiement de la session)
 // ------------------------------------------------------
 app.post("/api/create-payment-intent", async (req, res) => {
   try {
-    if (!stripe) return res.status(500).json({ error: "Stripe non configuré" });
+    if (!stripe) {
+      return res.status(500).json({ error: "Stripe non configuré" });
+    }
 
-    const { panier, customer, promoCode, finalAmountCents, loyaltyUsed } = req.body || {};
+    console.log("/api/create-payment-intent appelé");
+    const { panier, customer, promoCode, finalAmountCents, loyaltyUsed } =
+      req.body || {};
 
     if (!panier || !Array.isArray(panier) || panier.length === 0) {
       return res.status(400).json({ error: "Panier vide" });
@@ -786,28 +1015,57 @@ app.post("/api/create-payment-intent", async (req, res) => {
         totalAmountEur = result.newTotal;
         discountAmount = result.discountAmount;
         promo = result.promo;
+      } else {
+        console.warn("Code promo non appliqué :", result.reason);
       }
     }
 
     if (loyaltyUsed) {
+      console.log("⭐ Fidélité utilisée : séance gratuite côté backend.");
       discountAmount = totalBeforeDiscount;
       totalAmountEur = 0;
     }
 
-    if (typeof finalAmountCents === "number" && finalAmountCents >= 0 && Number.isFinite(finalAmountCents)) {
+    if (
+      typeof finalAmountCents === "number" &&
+      finalAmountCents >= 0 &&
+      Number.isFinite(finalAmountCents)
+    ) {
       const frontTotal = finalAmountCents / 100;
       if (Math.abs(frontTotal - totalAmountEur) > 0.01) {
-        console.warn("⚠️ Écart total front/back :", "front=", frontTotal, "back=", totalAmountEur);
+        console.warn(
+          "⚠️ Écart entre total front et back :",
+          "front=",
+          frontTotal,
+          "back=",
+          totalAmountEur
+        );
       }
     }
 
+    console.log(
+      "Montant total calculé (après remise / fidélité) :",
+      totalAmountEur,
+      "€ ; remise=",
+      discountAmount,
+      "€"
+    );
+
     if (totalAmountEur <= 0) {
+      console.log("🟢 Séance gratuite : aucun PaymentIntent Stripe créé.");
       return res.json({
         isFree: true,
         totalBeforeDiscount,
         totalAfterDiscount: 0,
         discountAmount: totalBeforeDiscount,
-        promo: promo ? { id: promo.id, code: promo.code, type: promo.type, value: promo.value } : null,
+        promo: promo
+          ? {
+              id: promo.id,
+              code: promo.code,
+              type: promo.type,
+              value: promo.value,
+            }
+          : null,
       });
     }
 
@@ -816,11 +1074,11 @@ app.post("/api/create-payment-intent", async (req, res) => {
     const paymentIntent = await stripe.paymentIntents.create({
       amount: amountInCents,
       currency: "eur",
-      automatic_payment_methods: { enabled: true },
       metadata: {
         panier: JSON.stringify(panier),
         customer_email: customer?.email || "",
-        customer_name: `${customer?.prenom || ""} ${customer?.nom || ""}`.trim(),
+        customer_name:
+          (customer?.prenom || "") + " " + (customer?.nom || ""),
         promo_code: promoCode || "",
         total_before_discount: String(totalBeforeDiscount),
         discount_amount: String(discountAmount),
@@ -834,7 +1092,9 @@ app.post("/api/create-payment-intent", async (req, res) => {
       totalBeforeDiscount,
       totalAfterDiscount: totalAmountEur,
       discountAmount,
-      promo: promo ? { id: promo.id, code: promo.code, type: promo.type, value: promo.value } : null,
+      promo: promo
+        ? { id: promo.id, code: promo.code, type: promo.type, value: promo.value }
+        : null,
     });
   } catch (err) {
     console.error("Erreur create-payment-intent :", err);
@@ -847,19 +1107,34 @@ app.post("/api/create-payment-intent", async (req, res) => {
 // ------------------------------------------------------
 app.post("/api/create-deposit-intent", async (req, res) => {
   try {
-    if (!stripe) return res.status(500).json({ error: "Stripe non configuré" });
+    if (!stripe) {
+      return res.status(500).json({ error: "Stripe non configuré" });
+    }
 
     const { reservationId, customer } = req.body;
 
-    const amountInCents = Math.round(DEPOSIT_AMOUNT_EUR * 100);
+    const depositAmountEur = DEPOSIT_AMOUNT_EUR;
+    const amountInCents = Math.round(depositAmountEur * 100);
 
-    const fullName = `${customer?.prenom || ""} ${customer?.nom || ""}`.trim();
+    console.log(
+      "/api/create-deposit-intent - création empreinte",
+      depositAmountEur,
+      "€ pour réservation",
+      reservationId
+    );
+
+    const fullName =
+      (customer?.prenom || "") +
+      (customer?.prenom ? " " : "") +
+      (customer?.nom || "");
 
     const paymentIntent = await stripe.paymentIntents.create({
       amount: amountInCents,
       currency: "eur",
       capture_method: "manual",
-      automatic_payment_methods: { enabled: true },
+      automatic_payment_methods: {
+        enabled: true,
+      },
       metadata: {
         type: "singbox_deposit",
         reservation_id: reservationId || "",
@@ -869,24 +1144,33 @@ app.post("/api/create-deposit-intent", async (req, res) => {
     });
 
     if (supabase && reservationId) {
-      await supabase
-        .from("reservations")
-        .update({
-          deposit_payment_intent_id: paymentIntent.id,
-          deposit_amount_cents: amountInCents,
-          deposit_status: "authorized",
-        })
-        .eq("id", reservationId);
+      try {
+        await supabase
+          .from("reservations")
+          .update({
+            deposit_payment_intent_id: paymentIntent.id,
+            deposit_amount_cents: amountInCents,
+            deposit_status: "authorized",
+          })
+          .eq("id", reservationId);
+      } catch (e) {
+        console.warn(
+          "⚠️ Impossible de mettre à jour les infos de caution en BDD (colonnes manquantes ?):",
+          e.message
+        );
+      }
     }
 
     return res.json({
       clientSecret: paymentIntent.client_secret,
       paymentIntentId: paymentIntent.id,
-      depositAmountEur: DEPOSIT_AMOUNT_EUR,
+      depositAmountEur,
     });
   } catch (err) {
     console.error("Erreur create-deposit-intent :", err);
-    return res.status(500).json({ error: "Erreur serveur Stripe (caution)" });
+    return res
+      .status(500)
+      .json({ error: "Erreur serveur Stripe (caution)" });
   }
 });
 
@@ -895,7 +1179,16 @@ app.post("/api/create-deposit-intent", async (req, res) => {
 // ------------------------------------------------------
 app.post("/api/confirm-reservation", async (req, res) => {
   try {
-    const { panier, customer, promoCode, paymentIntentId, loyaltyUsed, isFree } = req.body || {};
+    console.log("/api/confirm-reservation appelé");
+    const {
+      panier,
+      customer,
+      promoCode,
+      paymentIntentId,
+      loyaltyUsed,
+      isFree,
+    } = req.body || {};
+
     const isFreeReservationFlag = !!isFree || !!loyaltyUsed;
 
     if (!panier || !Array.isArray(panier) || panier.length === 0) {
@@ -903,34 +1196,52 @@ app.post("/api/confirm-reservation", async (req, res) => {
     }
 
     if (!isFreeReservationFlag) {
-      if (!paymentIntentId) return res.status(400).json({ error: "paymentIntentId manquant" });
-      if (!stripe) return res.status(500).json({ error: "Stripe non configuré" });
+      if (!paymentIntentId) {
+        return res.status(400).json({ error: "paymentIntentId manquant" });
+      }
+      if (!stripe) {
+        return res.status(500).json({ error: "Stripe non configuré" });
+      }
 
       const pi = await stripe.paymentIntents.retrieve(paymentIntentId);
+      console.log("Statut PaymentIntent :", pi.status);
       if (pi.status !== "succeeded") {
-        return res.status(400).json({ error: "Paiement non validé par Stripe" });
+        return res
+          .status(400)
+          .json({ error: "Paiement non validé par Stripe" });
       }
+    } else {
+      console.log("✅ Réservation confirmée en mode gratuit (isFree / fidélité).");
     }
 
     if (!supabase) {
-      console.warn("⚠️ Supabase non configuré, réservation non enregistrée en base.");
+      console.warn(
+        "⚠️ Supabase non configuré, réservation non enregistrée en base."
+      );
       return res.json({ status: "ok (sans enregistrement Supabase)" });
     }
 
-    // token optionnel
     let userIdFromToken = null;
     try {
       const authHeader = req.headers.authorization;
-      const token = authHeader?.startsWith("Bearer ") ? authHeader.split(" ")[1] : null;
+      const token = authHeader?.startsWith("Bearer ")
+        ? authHeader.split(" ")[1]
+        : null;
       if (token) {
-        const decoded = jwt.verify(token, JWT_SECRET);
+        const decoded = jwt.verify(token, process.env.JWT_SECRET);
         userIdFromToken = decoded.userId;
       }
     } catch (e) {
-      console.warn("⚠️ Token invalide sur /api/confirm-reservation :", e.message);
+      console.warn(
+        "⚠️ Token invalide sur /api/confirm-reservation :",
+        e.message
+      );
     }
 
-    const fullName = `${customer?.prenom || ""} ${customer?.nom || ""}`.trim();
+    const fullName =
+      (customer?.prenom || "") +
+      (customer?.prenom ? " " : "") +
+      (customer?.nom || "");
 
     const totalBeforeDiscount = computeCartTotalEur(panier);
     let discountAmount = 0;
@@ -941,16 +1252,26 @@ app.post("/api/confirm-reservation", async (req, res) => {
       if (result.ok) {
         discountAmount = result.discountAmount;
         promo = result.promo;
+      } else {
+        console.warn(
+          "Code promo non appliqué lors de confirm-reservation :",
+          result.reason
+        );
       }
     }
 
-    // ✅ on génère un id par créneau (QR = reservation.id)
     const rows = panier.map((slot) => {
       const times = buildTimesFromSlot(slot);
-      const numericBoxId = normalizeBoxId(slot);
+
+      const rawBox =
+        slot.boxId ?? slot.box_id ?? slot.box ?? slot.boxName ?? 1;
+
+      let numericBoxId = parseInt(String(rawBox).replace(/[^0-9]/g, ""), 10);
+      if (!Number.isFinite(numericBoxId)) {
+        numericBoxId = 1;
+      }
 
       return {
-        id: makeReservationId(),
         name: fullName || null,
         email: customer?.email || null,
         box_id: numericBoxId,
@@ -959,12 +1280,11 @@ app.post("/api/confirm-reservation", async (req, res) => {
         date: times.date,
         datetime: times.datetime,
         status: "confirmed",
-        user_id: userIdFromToken || null,
-        payment_intent_id: paymentIntentId || null,
       };
     });
 
-    // conflits
+    console.log("Lignes à insérer dans reservations :", rows);
+
     for (const row of rows) {
       const { data: conflicts, error: conflictError } = await supabase
         .from("reservations")
@@ -975,40 +1295,77 @@ app.post("/api/confirm-reservation", async (req, res) => {
 
       if (conflictError) {
         console.error("Erreur vérification conflits :", conflictError);
-        return res.status(500).json({ error: "Erreur serveur (vérification conflit)" });
+        return res
+          .status(500)
+          .json({ error: "Erreur serveur (vérification conflit)" });
       }
 
       if (conflicts && conflicts.length > 0) {
         return res.status(400).json({
-          error: "Ce créneau est déjà réservé pour la box " + row.box_id + ".",
+          error:
+            "Ce créneau est déjà réservé pour la box " +
+            row.box_id +
+            ". Choisissez une autre heure ou une autre box.",
         });
       }
     }
 
-    const { data, error } = await supabase.from("reservations").insert(rows).select();
+    const { data, error } = await supabase
+      .from("reservations")
+      .insert(rows)
+      .select();
+
     if (error) {
       console.error("Erreur Supabase insert reservations :", error);
-      return res.status(500).json({ error: "Erreur en enregistrant la réservation" });
+      return res
+        .status(500)
+        .json({ error: "Erreur en enregistrant la réservation" });
     }
 
-    // mails
-    await Promise.allSettled((data || []).map((row) => sendReservationEmail(row)));
+    console.log("✅ Réservations insérées :", data);
 
-    // points
     try {
-      const isFreeReservationFinal = isFreeReservationFlag || (promo && promo.type === "free");
-      if (userIdFromToken && !isFreeReservationFinal) {
+      await Promise.allSettled(data.map((row) => sendReservationEmail(row)));
+    } catch (mailErr) {
+      console.error("Erreur globale envoi mails :", mailErr);
+    }
+
+    try {
+      const isFreeReservationFinal =
+        isFreeReservationFlag || (promo && promo.type === "free");
+
+      if (!supabase) {
+        console.log("Supabase non configuré, pas de points fidélité.");
+      } else if (!userIdFromToken) {
+        console.log("Aucun token fourni, pas d'ajout automatique de points.");
+      } else if (isFreeReservationFinal) {
+        console.log("🎁 Réservation gratuite → aucun point fidélité ajouté.");
+      } else {
         const pointsToAdd = panier.length * 10;
-        await supabase.rpc("increment_points", { user_id: userIdFromToken, points_to_add: pointsToAdd });
+
+        const { error: pointsError } = await supabase.rpc("increment_points", {
+          user_id: userIdFromToken,
+          points_to_add: pointsToAdd,
+        });
+
+        if (pointsError) {
+          console.error("Erreur ajout points fidélité :", pointsError);
+        } else {
+          console.log(
+            `⭐ ${pointsToAdd} points ajoutés à l'utilisateur ${userIdFromToken}`
+          );
+        }
       }
     } catch (pointsErr) {
-      console.error("Erreur ajout points :", pointsErr);
+      console.error("Erreur lors de l'ajout automatique des points :", pointsErr);
     }
 
-    // promo usage
     try {
       if (promo && discountAmount > 0) {
-        const totalAfterDiscount = Math.max(0, totalBeforeDiscount - discountAmount);
+        const totalAfterDiscount = Math.max(
+          0,
+          totalBeforeDiscount - discountAmount
+        );
 
         await supabase.from("promo_usages").insert({
           promo_id: promo.id,
@@ -1021,10 +1378,20 @@ app.post("/api/confirm-reservation", async (req, res) => {
         });
 
         const currentUsed = Number(promo.used_count || 0);
-        await supabase.from("promo_codes").update({ used_count: currentUsed + 1 }).eq("id", promo.id);
+        await supabase
+          .from("promo_codes")
+          .update({ used_count: currentUsed + 1 })
+          .eq("id", promo.id);
+
+        console.log(
+          `📊 Promo ${promo.code} utilisée, remise=${discountAmount}€`
+        );
       }
     } catch (promoErr) {
-      console.error("Erreur promo usage :", promoErr);
+      console.error(
+        "Erreur en enregistrant l'utilisation du code promo :",
+        promoErr
+      );
     }
 
     return res.json({
@@ -1041,7 +1408,9 @@ app.post("/api/confirm-reservation", async (req, res) => {
     });
   } catch (err) {
     console.error("Erreur confirm-reservation :", err);
-    return res.status(500).json({ error: "Erreur serveur lors de la réservation" });
+    return res
+      .status(500)
+      .json({ error: "Erreur serveur lors de la réservation" });
   }
 });
 
@@ -1050,29 +1419,56 @@ app.post("/api/confirm-reservation", async (req, res) => {
 // ------------------------------------------------------
 app.post("/api/capture-deposit", async (req, res) => {
   try {
-    if (!stripe) return res.status(500).json({ error: "Stripe non configuré" });
+    if (!stripe) {
+      return res.status(500).json({ error: "Stripe non configuré" });
+    }
 
     const { paymentIntentId, amountToCaptureEur, reservationId } = req.body;
 
     if (!paymentIntentId) {
-      return res.status(400).json({ error: "paymentIntentId manquant pour la caution" });
+      return res
+        .status(400)
+        .json({ error: "paymentIntentId manquant pour la caution" });
     }
 
-    const params = {};
+    let params = {};
     if (amountToCaptureEur != null) {
-      params.amount_to_capture = Math.round(Number(amountToCaptureEur) * 100);
+      const amountToCaptureCents = Math.round(Number(amountToCaptureEur) * 100);
+      params.amount_to_capture = amountToCaptureCents;
     }
 
-    const paymentIntent = await stripe.paymentIntents.capture(paymentIntentId, params);
+    console.log(
+      "/api/capture-deposit - capture de la caution",
+      amountToCaptureEur,
+      "€ pour PaymentIntent",
+      paymentIntentId
+    );
+
+    const paymentIntent = await stripe.paymentIntents.capture(
+      paymentIntentId,
+      params
+    );
 
     if (supabase && reservationId) {
-      await supabase.from("reservations").update({ deposit_status: "captured" }).eq("id", reservationId);
+      try {
+        await supabase
+          .from("reservations")
+          .update({ deposit_status: "captured" })
+          .eq("id", reservationId);
+      } catch (e) {
+        console.warn(
+          "⚠️ Impossible de mettre à jour deposit_status en BDD :",
+          e.message
+        );
+      }
     }
 
     return res.json({ status: "captured", paymentIntent });
   } catch (err) {
     console.error("Erreur capture-deposit :", err);
-    return res.status(500).json({ error: "Erreur serveur lors de la capture de la caution" });
+    return res.status(500).json({
+      error: "Erreur serveur lors de la capture de la caution",
+    });
   }
 });
 
@@ -1081,24 +1477,45 @@ app.post("/api/capture-deposit", async (req, res) => {
 // ------------------------------------------------------
 app.post("/api/cancel-deposit", async (req, res) => {
   try {
-    if (!stripe) return res.status(500).json({ error: "Stripe non configuré" });
+    if (!stripe) {
+      return res.status(500).json({ error: "Stripe non configuré" });
+    }
 
     const { paymentIntentId, reservationId } = req.body;
 
     if (!paymentIntentId) {
-      return res.status(400).json({ error: "paymentIntentId manquant pour la caution" });
+      return res
+        .status(400)
+        .json({ error: "paymentIntentId manquant pour la caution" });
     }
+
+    console.log(
+      "/api/cancel-deposit - annulation de la caution pour PaymentIntent",
+      paymentIntentId
+    );
 
     const canceled = await stripe.paymentIntents.cancel(paymentIntentId);
 
     if (supabase && reservationId) {
-      await supabase.from("reservations").update({ deposit_status: "canceled" }).eq("id", reservationId);
+      try {
+        await supabase
+          .from("reservations")
+          .update({ deposit_status: "canceled" })
+          .eq("id", reservationId);
+      } catch (e) {
+        console.warn(
+          "⚠️ Impossible de mettre à jour deposit_status en BDD :",
+          e.message
+        );
+      }
     }
 
     return res.json({ status: "canceled", paymentIntent: canceled });
   } catch (err) {
     console.error("Erreur cancel-deposit :", err);
-    return res.status(500).json({ error: "Erreur serveur lors de l'annulation de la caution" });
+    return res.status(500).json({
+      error: "Erreur serveur lors de l'annulation de la caution",
+    });
   }
 });
 
@@ -1106,20 +1523,29 @@ app.post("/api/cancel-deposit", async (req, res) => {
 // 3) /api/slots : planning
 // ------------------------------------------------------
 app.get("/api/slots", async (req, res) => {
-  if (!supabase) return res.status(500).json({ error: "Supabase non configuré" });
+  if (!supabase) {
+    return res.status(500).json({ error: "Supabase non configuré" });
+  }
 
   const date = req.query.date;
-  if (!date) return res.status(400).json({ error: "Paramètre 'date' manquant (YYYY-MM-DD)" });
+  if (!date) {
+    return res
+      .status(400)
+      .json({ error: "Paramètre 'date' manquant (YYYY-MM-DD)" });
+  }
 
   try {
-    const dayStart = new Date(`${date}T00:00:00`);
-    const dayEnd = new Date(`${date}T23:59:59`);
+    const dayStartLocal = new Date(`${date}T00:00:00`);
+    const dayEndLocal = new Date(`${date}T23:59:59`);
+
+    const dayStartIso = dayStartLocal.toISOString();
+    const dayEndIso = dayEndLocal.toISOString();
 
     const { data, error } = await supabase
       .from("reservations")
-      .select("id, box_id, start_time, end_time, status")
-      .gte("start_time", dayStart.toISOString())
-      .lte("start_time", dayEnd.toISOString());
+      .select("id, box_id, start_time, end_time")
+      .gte("start_time", dayStartIso)
+      .lte("start_time", dayEndIso);
 
     if (error) {
       console.error("Erreur /api/slots Supabase :", error);
@@ -1134,57 +1560,70 @@ app.get("/api/slots", async (req, res) => {
 });
 
 // ------------------------------------------------------
-// 4) /api/check : lecteur de QR (✅ compatible script Python)
-//  - accepte ?id=...&box=1
-//  - renvoie { valid, access, reason }
+// 4) /api/check : lecteur de QR
 // ------------------------------------------------------
 app.get("/api/check", async (req, res) => {
-  if (!supabase) return res.status(500).json({ valid: false, access: false, reason: "Supabase non configuré" });
+  if (!supabase) {
+    return res
+      .status(500)
+      .json({ valid: false, error: "Supabase non configuré" });
+  }
 
   try {
-    const id = String(req.query.id || "").trim();
-    const box = parseInt(String(req.query.box || "0"), 10); // optionnel
+    const id = req.query.id;
 
-    if (!id) return res.status(400).json({ valid: false, access: false, reason: "Missing id" });
+    if (!id) {
+      res.status(400);
+      return res.json({ valid: false, error: "Missing id" });
+    }
 
-    let q = supabase.from("reservations").select("*").eq("id", id);
-    if (Number.isFinite(box) && box > 0) q = q.eq("box_id", box);
-
-    const { data, error } = await q.maybeSingle();
+    const { data, error } = await supabase
+      .from("reservations")
+      .select("*")
+      .eq("id", id)
+      .single();
 
     if (error || !data) {
-      return res.status(404).json({ valid: false, access: false, reason: "Réservation introuvable." });
+      res.status(404);
+      return res.json({ valid: false, reason: "Réservation introuvable." });
     }
 
     const now = new Date();
     const start = new Date(data.start_time);
     const end = new Date(data.end_time);
 
-    const startWithMargin = new Date(start.getTime() - CHECK_MARGIN_BEFORE_MIN * 60000);
-    const lastEntryTime = new Date(end.getTime() - CHECK_MARGIN_END_CUTOFF_MIN * 60000);
+    const marginBeforeMinutes = 5;
+    const marginBeforeEndMinutes = 5;
+
+    const startWithMargin = new Date(
+      start.getTime() - marginBeforeMinutes * 60000
+    );
+    const lastEntryTime = new Date(
+      end.getTime() - marginBeforeEndMinutes * 60000
+    );
 
     let access = false;
     let reason = "OK";
 
-    if (data.status !== "confirmed") {
-      access = false;
-      reason = `Statut invalide : ${data.status}`;
-    } else if (now < startWithMargin) {
+    if (now < startWithMargin) {
       access = false;
       reason = "Trop tôt pour accéder à la box.";
     } else if (now > lastEntryTime) {
       access = false;
       reason = "Créneau terminé, accès refusé.";
+    } else if (data.status !== "confirmed") {
+      access = false;
+      reason = `Statut invalide : ${data.status}`;
     } else {
       access = true;
       reason = "Créneau valide, accès autorisé.";
     }
 
-    // ⚠️ ton script Python n’a pas besoin de reservation, mais on la laisse
     return res.json({ valid: true, access, reason, reservation: data });
   } catch (e) {
     console.error("Erreur /api/check :", e);
-    return res.status(500).json({ valid: false, access: false, reason: e.message });
+    res.status(500);
+    return res.json({ valid: false, error: e.message });
   }
 });
 
