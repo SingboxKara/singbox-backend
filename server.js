@@ -84,12 +84,10 @@ const SLOT_DURATION_MINUTES = 90;
 // Vacances scolaires (Zone C : Toulouse) - à ajuster chaque année
 // ------------------------------------------------------
 const VACANCES_ZONE_C = [
-  // Année scolaire 2024-2025 (exemple, à adapter si besoin)
   { start: "2025-10-19", end: "2025-11-03", label: "Toussaint 2024" },
   { start: "2025-12-21", end: "2026-01-05", label: "Noël 2024" },
   { start: "2026-02-22", end: "2026-03-09", label: "Hiver 2025" },
   { start: "2026-04-19", end: "2026-05-04", label: "Printemps 2025" },
-  // Été : on considère juillet/août comme vacances scolaires
   { start: "2026-07-05", end: "2026-09-01", label: "Été 2025" },
 ];
 
@@ -99,10 +97,66 @@ function isDateInRange(isoDate, start, end) {
 }
 
 // ------------------------------------------------------
-// Helpers
+// Helpers (checkout profile)
 // ------------------------------------------------------
+function safeText(v, max = 255) {
+  if (v === undefined || v === null) return null;
+  const s = String(v).trim();
+  if (!s) return null;
+  return s.length > max ? s.slice(0, max) : s;
+}
 
+function safeClientType(v) {
+  const s = String(v || "").toLowerCase().trim();
+  if (s === "particulier" || s === "entreprise") return s;
+  return null;
+}
+
+function safeCountry(v) {
+  const s = String(v || "").trim();
+  if (!s) return null;
+  return s.length > 10 ? s.slice(0, 10) : s;
+}
+
+function safeBirthdate(v) {
+  if (!v) return null;
+  const s = String(v).slice(0, 10); // YYYY-MM-DD
+  // simple check
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(s)) return null;
+  return s;
+}
+
+async function upsertCheckoutInfo(userId, payload) {
+  if (!supabase) return;
+
+  const row = {
+    user_id: userId,
+    save_checkout_info: !!payload.save_checkout_info,
+    client_type: safeClientType(payload.client_type),
+    prenom: safeText(payload.prenom, 80),
+    nom: safeText(payload.nom, 80),
+    telephone: safeText(payload.telephone, 40),
+    pays: safeCountry(payload.pays),
+    adresse: safeText(payload.adresse, 160),
+    complement: safeText(payload.complement, 160),
+    cp: safeText(payload.cp, 20),
+    ville: safeText(payload.ville, 80),
+    naissance: safeBirthdate(payload.naissance),
+    updated_at: new Date().toISOString(),
+  };
+
+  const { error } = await supabase.from("user_checkout_info").upsert(row, {
+    onConflict: "user_id",
+  });
+
+  if (error) {
+    console.warn("⚠️ upsert user_checkout_info error:", error.message);
+  }
+}
+
+// ------------------------------------------------------
 // total du panier en € (en priorité slot.price)
+// ------------------------------------------------------
 function computeCartTotalEur(panier) {
   return panier.reduce((sum, item) => {
     const price =
@@ -135,7 +189,6 @@ async function validatePromoCode(code, totalAmountEur) {
     return { ok: false, reason: "Code introuvable" };
   }
 
-  // is_active (bool) si tu l'as créé
   if (promo.is_active === false) {
     return { ok: false, reason: "Code inactif" };
   }
@@ -189,31 +242,10 @@ function addDaysToDateString(dateStr, daysToAdd) {
 }
 
 /**
- * Accepte date de naissance en "YYYY-MM-DD" ou "DD/MM/YYYY"
- * Retourne "YYYY-MM-DD" ou null.
- */
-function normalizeBirthDate(input) {
-  if (!input) return null;
-  const s = String(input).trim();
-  // YYYY-MM-DD
-  if (/^\d{4}-\d{2}-\d{2}$/.test(s)) return s;
-  // DD/MM/YYYY
-  const m = s.match(/^(\d{2})\/(\d{2})\/(\d{4})$/);
-  if (m) {
-    const dd = m[1];
-    const mm = m[2];
-    const yyyy = m[3];
-    return `${yyyy}-${mm}-${dd}`;
-  }
-  return null;
-}
-
-/**
  * Construit start_time / end_time à partir du slot.
  * Désormais : durée par défaut = SLOT_DURATION_MINUTES (1h30).
  */
 function buildTimesFromSlot(slot) {
-  // Cas 1 : start_time / end_time déjà fournis
   if (slot.start_time && slot.end_time) {
     const dateFromStart = slot.date || String(slot.start_time).slice(0, 10);
     return {
@@ -224,9 +256,8 @@ function buildTimesFromSlot(slot) {
     };
   }
 
-  // Cas 2 : on part de date + hour
   const date = slot.date; // "YYYY-MM-DD"
-  const rawHour = slot.hour; // 21, "21", "21h-22h", "18h30", ...
+  const rawHour = slot.hour;
 
   if (!date || rawHour === undefined || rawHour === null) {
     throw new Error(
@@ -248,15 +279,12 @@ function buildTimesFromSlot(slot) {
     }
   }
 
-  // Fuseau (simple) : à adapter si tu veux gérer l'heure d'été/ hiver dynamiquement
   const OFFSET = "+01:00";
 
-  // start
   const startHourStr = String(hourNum).padStart(2, "0");
   const startMinStr = String(minuteNum).padStart(2, "0");
   const startIso = `${date}T${startHourStr}:${startMinStr}:00${OFFSET}`;
 
-  // end = start + SLOT_DURATION_MINUTES
   const totalStartMinutes = hourNum * 60 + minuteNum + SLOT_DURATION_MINUTES;
   const minutesPerDay = 24 * 60;
 
@@ -306,7 +334,6 @@ async function sendReservationEmail(reservation) {
       reservation.id
     )}`;
 
-    // QR en dataURL + base64 (pour pièce jointe)
     const qrDataUrl = await QRCode.toDataURL(qrText);
     const base64Qr = qrDataUrl.split(",")[1];
 
@@ -335,8 +362,6 @@ async function sendReservationEmail(reservation) {
     const htmlBody = `
       <div style="margin:0;padding:24px 0;background-color:#050814;">
         <div style="max-width:640px;margin:0 auto;background:radial-gradient(circle at 0% 0%,rgba(56,189,248,0.12),transparent 55%),radial-gradient(circle at 100% 0%,rgba(201,76,53,0.25),transparent 55%),#020617;border-radius:18px;border:1px solid rgba(148,163,184,0.3);box-shadow:0 18px 45px rgba(0,0,0,0.85);padding:24px 22px 26px;font-family:'Montserrat',system-ui,-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;color:#F9FAFB;">
-
-          <!-- HEADER -->
           <table width="100%" cellpadding="0" cellspacing="0" role="presentation" style="border-collapse:collapse;margin-bottom:18px;">
             <tr>
               <td style="vertical-align:middle;">
@@ -353,7 +378,6 @@ async function sendReservationEmail(reservation) {
             </tr>
           </table>
 
-          <!-- TITRE -->
           <h1 style="margin:0 0 8px 0;font-family:'League Spartan','Montserrat',system-ui,sans-serif;font-size:22px;letter-spacing:0.06em;text-transform:uppercase;">
             Votre session est confirmée ✅
           </h1>
@@ -362,7 +386,6 @@ async function sendReservationEmail(reservation) {
             Voici le récapitulatif de votre box karaoké privative.
           </p>
 
-          <!-- CARTE RÉCAP -->
           <div style="margin:14px 0 16px 0;padding:14px 14px 12px 14px;border-radius:16px;background:rgba(15,23,42,0.92);border:1px solid rgba(148,163,184,0.45);">
             <table width="100%" cellpadding="0" cellspacing="0" role="presentation" style="border-collapse:collapse;">
               <tr>
@@ -375,96 +398,31 @@ async function sendReservationEmail(reservation) {
               </tr>
             </table>
             <p style="margin:10px 0 4px 0;font-size:13px;color:#E5E7EB;">
-              <strong>Merci d'arriver 10 minutes en avance</strong> afin de pouvoir vous installer et démarrer la session à l'heure.
+              <strong>Merci d'arriver 10 minutes en avance</strong>.
             </p>
           </div>
 
-          <!-- QR : phrase plus visible (pièce jointe uniquement) -->
-          <div style="margin:16px 0 6px 0;padding:12px 14px;border-radius:14px;background:rgba(15,23,42,0.72);border:1px solid rgba(148,163,184,0.30);">
-            <p style="margin:0;font-size:15px;line-height:1.5;color:#F9FAFB;">
-              <strong>Votre QR code est en pièce jointe</strong> (fichier <em>qr-reservation.png</em>).
-            </p>
-            <p style="margin:6px 0 0 0;font-size:12px;line-height:1.5;color:#9CA3AF;">
-              Présentez-le à l’accueil pour accéder à votre box.
+          <div style="text-align:center;margin:18px 0 8px 0;">
+            <p style="margin:0 0 8px 0;font-size:13px;color:#9CA3AF;">
+              Votre QR code est <strong>en pièce jointe</strong> (qr-reservation.png).
             </p>
           </div>
 
-          <!-- EMPREINTE BANCAIRE -->
           <div style="margin-top:18px;padding:14px 14px 12px 14px;border-radius:16px;background:rgba(24,24,27,0.96);border:1px solid rgba(248,113,113,0.45);">
             <h2 style="margin:0 0 6px 0;font-size:15px;font-family:'League Spartan','Montserrat',system-ui,sans-serif;letter-spacing:0.06em;text-transform:uppercase;color:#fecaca;">
               Empreinte bancaire de ${DEPOSIT_AMOUNT_EUR} €
             </h2>
             <p style="margin:0 0 6px 0;font-size:13px;color:#E5E7EB;">
-              Pour garantir le bon déroulement de la session, une <strong>empreinte bancaire de ${DEPOSIT_AMOUNT_EUR} €</strong> peut être réalisée sur votre carte bancaire.
-            </p>
-            <ul style="margin:6px 0 6px 18px;padding:0;font-size:12px;color:#E5E7EB;">
-              <li>Il ne s'agit <strong>pas d'un débit immédiat</strong>, mais d'un blocage temporaire du montant.</li>
-              <li>L'empreinte n'est <strong>pas encaissée</strong> si la session se déroule normalement et que le règlement est respecté.</li>
-              <li>En cas de dégradations ou non-respect des règles, tout ou partie de ce montant peut être prélevé après constat par l'équipe Singbox.</li>
-            </ul>
-            <p style="margin:0;font-size:11px;color:#9CA3AF;">
-              Les délais de libération de l’empreinte dépendent de votre banque (généralement quelques jours).
+              Une <strong>empreinte bancaire de ${DEPOSIT_AMOUNT_EUR} €</strong> peut être réalisée (pas un débit).
             </p>
           </div>
 
-          <!-- CONDITIONS D'ANNULATION -->
-          <div style="margin-top:18px;">
-            <h2 style="margin:0 0 6px 0;font-size:15px;font-family:'League Spartan','Montserrat',system-ui,sans-serif;letter-spacing:0.06em;text-transform:uppercase;">
-              Conditions d'annulation
-            </h2>
-            <ul style="margin:6px 0 0 18px;padding:0;font-size:13px;color:#E5E7EB;">
-              <li>Annulation gratuite jusqu'à <strong>24h avant</strong> le début de la session.</li>
-              <li>Passé ce délai, la réservation est considérée comme due et <strong>non remboursable</strong>.</li>
-              <li>En cas de retard important, la session pourra être écourtée sans compensation afin de respecter les créneaux suivants.</li>
-            </ul>
-          </div>
-
-          <!-- REGLEMENT INTERIEUR -->
-          <div style="margin-top:18px;">
-            <h2 style="margin:0 0 6px 0;font-size:15px;font-family:'League Spartan','Montserrat',system-ui,sans-serif;letter-spacing:0.06em;text-transform:uppercase;">
-              Règlement intérieur Singbox
-            </h2>
-            <ul style="margin:6px 0 0 18px;padding:0;font-size:13px;color:#E5E7EB;">
-              <li><strong>Respect du matériel</strong> : micros, écrans, banquettes et équipements doivent être utilisés avec soin.</li>
-              <li><strong>Comportement</strong> : toute attitude violente, insultante ou dangereuse peut entraîner l'arrêt immédiat de la session.</li>
-              <li><strong>Alcool & drogues</strong> : l'accès pourra être refusé en cas d'état d'ébriété avancé ou de consommation de substances illicites.</li>
-              <li><strong>Fumée</strong> : il est strictement interdit de fumer dans les box.</li>
-              <li><strong>Nuisances sonores</strong> : merci de respecter les autres clients et le voisinage dans les espaces communs.</li>
-              <li><strong>Capacité maximale</strong> : le nombre de personnes par box ne doit pas dépasser la limite indiquée sur place.</li>
-            </ul>
-            <p style="margin:8px 0 0 0;font-size:11px;color:#9CA3AF;">
-              En validant votre réservation, vous acceptez le règlement intérieur de Singbox.
-            </p>
-          </div>
-
-          <!-- INFOS PRATIQUES -->
-          <div style="margin-top:20px;">
-            <h2 style="margin:0 0 6px 0;font-size:15px;font-family:'League Spartan','Montserrat',system-ui,sans-serif;letter-spacing:0.06em;text-transform:uppercase;">
-              Infos pratiques
-            </h2>
-            <p style="margin:0 0 4px 0;font-size:13px;color:#E5E7EB;">
-              Adresse : <strong>66 Rue de la République, 31300 Toulouse</strong> (à adapter si besoin).
-            </p>
-            <p style="margin:0 0 4px 0;font-size:13px;color:#9CA3AF;">
-              Pensez à vérifier l'accès et le stationnement avant votre venue.
-            </p>
-          </div>
-
-          <!-- FOOTER -->
           <div style="margin-top:22px;padding-top:10px;border-top:1px solid rgba(30,64,175,0.65);font-size:11px;color:#9CA3AF;text-align:center;">
-            Suivez-nous sur Instagram et TikTok : <strong>@singboxtoulouse</strong><br/>
-            Conservez cet e-mail, il vous sera demandé à l'arrivée.
+            Instagram/TikTok : <strong>@singboxtoulouse</strong>
           </div>
         </div>
       </div>
     `;
-
-    console.log(
-      "📧 Envoi de l'email (Resend) à",
-      toEmail,
-      "pour réservation",
-      reservation.id
-    );
 
     const attachments = [
       {
@@ -482,12 +440,7 @@ async function sendReservationEmail(reservation) {
       attachments,
     });
 
-    console.log(
-      "✅ Email envoyé via Resend à",
-      toEmail,
-      "pour réservation",
-      reservation.id
-    );
+    console.log("✅ Email envoyé via Resend à", toEmail, "reservation", reservation.id);
   } catch (err) {
     console.error("❌ Erreur lors de l'envoi de l'email via Resend :", err);
   }
@@ -576,8 +529,8 @@ app.post(
   }
 );
 
-// Important : JSON après /api/webhook
 app.use(bodyParser.json());
+
 console.log("🌍 CORS + JSON configurés");
 
 // ------------------------------------------------------
@@ -728,7 +681,8 @@ app.post("/api/login", async (req, res) => {
 });
 
 // ------------------------------------------------------
-// PROFIL UTILISATEUR (inclut les infos checkout à préremplir)
+// PROFIL UTILISATEUR (ENRICHI)
+// - Renvoie email, points + checkout_info (si enregistré)
 // ------------------------------------------------------
 app.get("/api/me", authMiddleware, async (req, res) => {
   try {
@@ -738,17 +692,33 @@ app.get("/api/me", authMiddleware, async (req, res) => {
       return res.status(500).json({ error: "Supabase non configuré" });
     }
 
-    const { data, error } = await supabase
+    const { data: user, error: userErr } = await supabase
       .from("users")
-      .select(
-        "email, points, first_name, last_name, phone, customer_type, country, address_line1, address_line2, postal_code, city, birth_date, save_checkout_info, company_name, vat_number"
-      )
+      .select("email, points")
       .eq("id", userId)
       .single();
 
-    if (error) return res.status(400).json({ error: error.message });
+    if (userErr) return res.status(400).json({ error: userErr.message });
 
-    res.json(data);
+    // checkout info (optionnel)
+    let checkoutInfo = null;
+    try {
+      const { data: ci, error: ciErr } = await supabase
+        .from("user_checkout_info")
+        .select("*")
+        .eq("user_id", userId)
+        .maybeSingle();
+
+      if (!ciErr && ci) checkoutInfo = ci;
+    } catch (e) {
+      // table pas créée => pas bloquant
+    }
+
+    return res.json({
+      email: user.email,
+      points: user.points ?? 0,
+      checkout_info: checkoutInfo,
+    });
   } catch (err) {
     console.error("Erreur me :", err);
     res.status(500).json({ error: "Erreur serveur" });
@@ -756,65 +726,41 @@ app.get("/api/me", authMiddleware, async (req, res) => {
 });
 
 // ------------------------------------------------------
-// SAUVER INFOS CHECKOUT (si connecté + checkbox côté front)
+// SAUVEGARDER LES INFOS CHECKOUT (pré-remplissage)
+// POST /api/me/checkout-info
 // ------------------------------------------------------
 app.post("/api/me/checkout-info", authMiddleware, async (req, res) => {
   try {
     const userId = req.userId;
-
     if (!supabase) {
       return res.status(500).json({ error: "Supabase non configuré" });
     }
 
-    const {
-      first_name,
-      last_name,
-      phone,
-      customer_type, // "particulier" | "entreprise"
-      country,
-      address_line1,
-      address_line2,
-      postal_code,
-      city,
-      birth_date, // "YYYY-MM-DD" ou "DD/MM/YYYY"
-      save_checkout_info, // boolean
-      company_name,
-      vat_number,
-    } = req.body || {};
+    const payload = req.body || {};
+    // tu peux envoyer save_checkout_info: true/false
+    const save = !!payload.save_checkout_info;
 
-    const payload = {
-      first_name: (first_name || "").trim() || null,
-      last_name: (last_name || "").trim() || null,
-      phone: (phone || "").trim() || null,
+    if (!save) {
+      // si l’utilisateur décoche, on enregistre juste le flag
+      await upsertCheckoutInfo(userId, { save_checkout_info: false });
+      return res.json({ ok: true, saved: false });
+    }
 
-      customer_type: (customer_type || "").trim() || null,
-      country: (country || "").trim() || null,
-      address_line1: (address_line1 || "").trim() || null,
-      address_line2: (address_line2 || "").trim() || null,
-      postal_code: (postal_code || "").trim() || null,
-      city: (city || "").trim() || null,
+    await upsertCheckoutInfo(userId, {
+      save_checkout_info: true,
+      client_type: payload.client_type,
+      prenom: payload.prenom,
+      nom: payload.nom,
+      telephone: payload.telephone,
+      pays: payload.pays,
+      adresse: payload.adresse,
+      complement: payload.complement,
+      cp: payload.cp,
+      ville: payload.ville,
+      naissance: payload.naissance,
+    });
 
-      birth_date: normalizeBirthDate(birth_date),
-
-      company_name: (company_name || "").trim() || null,
-      vat_number: (vat_number || "").trim() || null,
-
-      save_checkout_info: save_checkout_info !== false, // true par défaut
-      updated_at: new Date().toISOString(),
-    };
-
-    const { data, error } = await supabase
-      .from("users")
-      .update(payload)
-      .eq("id", userId)
-      .select(
-        "email, points, first_name, last_name, phone, customer_type, country, address_line1, address_line2, postal_code, city, birth_date, save_checkout_info, company_name, vat_number"
-      )
-      .single();
-
-    if (error) return res.status(400).json({ error: error.message });
-
-    return res.json({ ok: true, user: data });
+    return res.json({ ok: true, saved: true });
   } catch (e) {
     console.error("Erreur /api/me/checkout-info :", e);
     return res.status(500).json({ error: "Erreur serveur" });
@@ -1221,6 +1167,27 @@ app.post("/api/confirm-reservation", async (req, res) => {
       );
     }
 
+    // ✅ BONUS: si l'utilisateur est connecté et a demandé la sauvegarde
+    try {
+      if (userIdFromToken && customer?.save_checkout_info === true) {
+        await upsertCheckoutInfo(userIdFromToken, {
+          save_checkout_info: true,
+          client_type: customer?.client_type,
+          prenom: customer?.prenom,
+          nom: customer?.nom,
+          telephone: customer?.telephone,
+          pays: customer?.pays,
+          adresse: customer?.adresse,
+          complement: customer?.complement,
+          cp: customer?.cp,
+          ville: customer?.ville,
+          naissance: customer?.naissance,
+        });
+      }
+    } catch (e) {
+      console.warn("⚠️ Sauvegarde checkout_info (confirm-reservation) a échoué:", e.message);
+    }
+
     const fullName =
       (customer?.prenom || "") +
       (customer?.prenom ? " " : "") +
@@ -1266,8 +1233,6 @@ app.post("/api/confirm-reservation", async (req, res) => {
       };
     });
 
-    console.log("Lignes à insérer dans reservations :", rows);
-
     for (const row of rows) {
       const { data: conflicts, error: conflictError } = await supabase
         .from("reservations")
@@ -1305,8 +1270,6 @@ app.post("/api/confirm-reservation", async (req, res) => {
         .json({ error: "Erreur en enregistrant la réservation" });
     }
 
-    console.log("✅ Réservations insérées :", data);
-
     try {
       await Promise.allSettled(data.map((row) => sendReservationEmail(row)));
     } catch (mailErr) {
@@ -1317,12 +1280,10 @@ app.post("/api/confirm-reservation", async (req, res) => {
       const isFreeReservationFinal =
         isFreeReservationFlag || (promo && promo.type === "free");
 
-      if (!supabase) {
-        console.log("Supabase non configuré, pas de points fidélité.");
-      } else if (!userIdFromToken) {
-        console.log("Aucun token fourni, pas d'ajout automatique de points.");
+      if (!userIdFromToken) {
+        // pas de points si pas connecté
       } else if (isFreeReservationFinal) {
-        console.log("🎁 Réservation gratuite → aucun point fidélité ajouté.");
+        // pas de points si gratuit
       } else {
         const pointsToAdd = panier.length * 10;
 
@@ -1333,10 +1294,6 @@ app.post("/api/confirm-reservation", async (req, res) => {
 
         if (pointsError) {
           console.error("Erreur ajout points fidélité :", pointsError);
-        } else {
-          console.log(
-            `⭐ ${pointsToAdd} points ajoutés à l'utilisateur ${userIdFromToken}`
-          );
         }
       }
     } catch (pointsErr) {
@@ -1365,16 +1322,9 @@ app.post("/api/confirm-reservation", async (req, res) => {
           .from("promo_codes")
           .update({ used_count: currentUsed + 1 })
           .eq("id", promo.id);
-
-        console.log(
-          `📊 Promo ${promo.code} utilisée, remise=${discountAmount}€`
-        );
       }
     } catch (promoErr) {
-      console.error(
-        "Erreur en enregistrant l'utilisation du code promo :",
-        promoErr
-      );
+      console.error("Erreur promo usages :", promoErr);
     }
 
     return res.json({
@@ -1420,13 +1370,6 @@ app.post("/api/capture-deposit", async (req, res) => {
       params.amount_to_capture = amountToCaptureCents;
     }
 
-    console.log(
-      "/api/capture-deposit - capture de la caution",
-      amountToCaptureEur,
-      "€ pour PaymentIntent",
-      paymentIntentId
-    );
-
     const paymentIntent = await stripe.paymentIntents.capture(
       paymentIntentId,
       params
@@ -1438,12 +1381,7 @@ app.post("/api/capture-deposit", async (req, res) => {
           .from("reservations")
           .update({ deposit_status: "captured" })
           .eq("id", reservationId);
-      } catch (e) {
-        console.warn(
-          "⚠️ Impossible de mettre à jour deposit_status en BDD :",
-          e.message
-        );
-      }
+      } catch (e) {}
     }
 
     return res.json({ status: "captured", paymentIntent });
@@ -1472,11 +1410,6 @@ app.post("/api/cancel-deposit", async (req, res) => {
         .json({ error: "paymentIntentId manquant pour la caution" });
     }
 
-    console.log(
-      "/api/cancel-deposit - annulation de la caution pour PaymentIntent",
-      paymentIntentId
-    );
-
     const canceled = await stripe.paymentIntents.cancel(paymentIntentId);
 
     if (supabase && reservationId) {
@@ -1485,12 +1418,7 @@ app.post("/api/cancel-deposit", async (req, res) => {
           .from("reservations")
           .update({ deposit_status: "canceled" })
           .eq("id", reservationId);
-      } catch (e) {
-        console.warn(
-          "⚠️ Impossible de mettre à jour deposit_status en BDD :",
-          e.message
-        );
-      }
+      } catch (e) {}
     }
 
     return res.json({ status: "canceled", paymentIntent: canceled });
