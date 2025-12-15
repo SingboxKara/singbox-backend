@@ -189,6 +189,26 @@ function addDaysToDateString(dateStr, daysToAdd) {
 }
 
 /**
+ * Accepte date de naissance en "YYYY-MM-DD" ou "DD/MM/YYYY"
+ * Retourne "YYYY-MM-DD" ou null.
+ */
+function normalizeBirthDate(input) {
+  if (!input) return null;
+  const s = String(input).trim();
+  // YYYY-MM-DD
+  if (/^\d{4}-\d{2}-\d{2}$/.test(s)) return s;
+  // DD/MM/YYYY
+  const m = s.match(/^(\d{2})\/(\d{2})\/(\d{4})$/);
+  if (m) {
+    const dd = m[1];
+    const mm = m[2];
+    const yyyy = m[3];
+    return `${yyyy}-${mm}-${dd}`;
+  }
+  return null;
+}
+
+/**
  * Construit start_time / end_time à partir du slot.
  * Désormais : durée par défaut = SLOT_DURATION_MINUTES (1h30).
  */
@@ -286,7 +306,7 @@ async function sendReservationEmail(reservation) {
       reservation.id
     )}`;
 
-    // QR en dataURL (pour affichage dans l’email) + base64 (pour pièce jointe)
+    // QR en dataURL + base64 (pour pièce jointe)
     const qrDataUrl = await QRCode.toDataURL(qrText);
     const base64Qr = qrDataUrl.split(",")[1];
 
@@ -346,20 +366,12 @@ async function sendReservationEmail(reservation) {
           <div style="margin:14px 0 16px 0;padding:14px 14px 12px 14px;border-radius:16px;background:rgba(15,23,42,0.92);border:1px solid rgba(148,163,184,0.45);">
             <table width="100%" cellpadding="0" cellspacing="0" role="presentation" style="border-collapse:collapse;">
               <tr>
-                <td style="font-size:13px;color:#9CA3AF;padding-bottom:6px;">
-                  Box réservée
-                </td>
-                <td style="font-size:13px;color:#9CA3AF;padding-bottom:6px;" align="right">
-                  Horaires
-                </td>
+                <td style="font-size:13px;color:#9CA3AF;padding-bottom:6px;">Box réservée</td>
+                <td style="font-size:13px;color:#9CA3AF;padding-bottom:6px;" align="right">Horaires</td>
               </tr>
               <tr>
-                <td style="font-size:15px;font-weight:600;">
-                  Box ${reservation.box_id}
-                </td>
-                <td style="font-size:14px;" align="right">
-                  ${startStr} → ${endStr}
-                </td>
+                <td style="font-size:15px;font-weight:600;">Box ${reservation.box_id}</td>
+                <td style="font-size:14px;" align="right">${startStr} → ${endStr}</td>
               </tr>
             </table>
             <p style="margin:10px 0 4px 0;font-size:13px;color:#E5E7EB;">
@@ -367,11 +379,13 @@ async function sendReservationEmail(reservation) {
             </p>
           </div>
 
-          <!-- QR CODE -->
-          <div style="text-align:center;margin:18px 0 8px 0;">
-            <p style="margin:0 0 8px 0;font-size:13px;color:#9CA3AF;">
-              Votre QR code est <strong>en pièce jointe</strong> de cet e-mail (fichier <em>qr-reservation.png</em>).<br/>
-              Vous pouvez aussi le présenter directement ci-dessous :
+          <!-- QR : phrase plus visible (pièce jointe uniquement) -->
+          <div style="margin:16px 0 6px 0;padding:12px 14px;border-radius:14px;background:rgba(15,23,42,0.72);border:1px solid rgba(148,163,184,0.30);">
+            <p style="margin:0;font-size:15px;line-height:1.5;color:#F9FAFB;">
+              <strong>Votre QR code est en pièce jointe</strong> (fichier <em>qr-reservation.png</em>).
+            </p>
+            <p style="margin:6px 0 0 0;font-size:12px;line-height:1.5;color:#9CA3AF;">
+              Présentez-le à l’accueil pour accéder à votre box.
             </p>
           </div>
 
@@ -414,7 +428,7 @@ async function sendReservationEmail(reservation) {
               <li><strong>Respect du matériel</strong> : micros, écrans, banquettes et équipements doivent être utilisés avec soin.</li>
               <li><strong>Comportement</strong> : toute attitude violente, insultante ou dangereuse peut entraîner l'arrêt immédiat de la session.</li>
               <li><strong>Alcool & drogues</strong> : l'accès pourra être refusé en cas d'état d'ébriété avancé ou de consommation de substances illicites.</li>
-              <li><strong>Fumée</strong> : il est strictement interdit de fumer ou vapoter dans les box.</li>
+              <li><strong>Fumée</strong> : il est strictement interdit de fumer dans les box.</li>
               <li><strong>Nuisances sonores</strong> : merci de respecter les autres clients et le voisinage dans les espaces communs.</li>
               <li><strong>Capacité maximale</strong> : le nombre de personnes par box ne doit pas dépasser la limite indiquée sur place.</li>
             </ul>
@@ -453,7 +467,6 @@ async function sendReservationEmail(reservation) {
     );
 
     const attachments = [
-      // ✅ QR en pièce jointe (download)
       {
         filename: "qr-reservation.png",
         content: base64Qr,
@@ -563,8 +576,8 @@ app.post(
   }
 );
 
+// Important : JSON après /api/webhook
 app.use(bodyParser.json());
-
 console.log("🌍 CORS + JSON configurés");
 
 // ------------------------------------------------------
@@ -715,7 +728,7 @@ app.post("/api/login", async (req, res) => {
 });
 
 // ------------------------------------------------------
-// PROFIL UTILISATEUR
+// PROFIL UTILISATEUR (inclut les infos checkout à préremplir)
 // ------------------------------------------------------
 app.get("/api/me", authMiddleware, async (req, res) => {
   try {
@@ -727,7 +740,9 @@ app.get("/api/me", authMiddleware, async (req, res) => {
 
     const { data, error } = await supabase
       .from("users")
-      .select("email, points")
+      .select(
+        "email, points, first_name, last_name, phone, customer_type, country, address_line1, address_line2, postal_code, city, birth_date, save_checkout_info, company_name, vat_number"
+      )
       .eq("id", userId)
       .single();
 
@@ -737,6 +752,72 @@ app.get("/api/me", authMiddleware, async (req, res) => {
   } catch (err) {
     console.error("Erreur me :", err);
     res.status(500).json({ error: "Erreur serveur" });
+  }
+});
+
+// ------------------------------------------------------
+// SAUVER INFOS CHECKOUT (si connecté + checkbox côté front)
+// ------------------------------------------------------
+app.post("/api/me/checkout-info", authMiddleware, async (req, res) => {
+  try {
+    const userId = req.userId;
+
+    if (!supabase) {
+      return res.status(500).json({ error: "Supabase non configuré" });
+    }
+
+    const {
+      first_name,
+      last_name,
+      phone,
+      customer_type, // "particulier" | "entreprise"
+      country,
+      address_line1,
+      address_line2,
+      postal_code,
+      city,
+      birth_date, // "YYYY-MM-DD" ou "DD/MM/YYYY"
+      save_checkout_info, // boolean
+      company_name,
+      vat_number,
+    } = req.body || {};
+
+    const payload = {
+      first_name: (first_name || "").trim() || null,
+      last_name: (last_name || "").trim() || null,
+      phone: (phone || "").trim() || null,
+
+      customer_type: (customer_type || "").trim() || null,
+      country: (country || "").trim() || null,
+      address_line1: (address_line1 || "").trim() || null,
+      address_line2: (address_line2 || "").trim() || null,
+      postal_code: (postal_code || "").trim() || null,
+      city: (city || "").trim() || null,
+
+      birth_date: normalizeBirthDate(birth_date),
+
+      company_name: (company_name || "").trim() || null,
+      vat_number: (vat_number || "").trim() || null,
+
+      save_checkout_info: save_checkout_info !== false, // true par défaut
+      updated_at: new Date().toISOString(),
+    };
+
+    const { data, error } = await supabase
+      .from("users")
+      .update(payload)
+      .eq("id", userId)
+      .select(
+        "email, points, first_name, last_name, phone, customer_type, country, address_line1, address_line2, postal_code, city, birth_date, save_checkout_info, company_name, vat_number"
+      )
+      .single();
+
+    if (error) return res.status(400).json({ error: error.message });
+
+    return res.json({ ok: true, user: data });
+  } catch (e) {
+    console.error("Erreur /api/me/checkout-info :", e);
+    return res.status(500).json({ error: "Erreur serveur" });
   }
 });
 
