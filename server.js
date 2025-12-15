@@ -287,12 +287,7 @@ async function sendReservationEmail(reservation) {
     )}`;
 
     // QR en dataURL (pour affichage dans l’email) + base64 (pour pièce jointe)
-    // Ici : on garde uniquement la PJ comme tu veux (pas d'affichage inline)
-    const qrDataUrl = await QRCode.toDataURL(qrText, {
-      errorCorrectionLevel: "M",
-      margin: 1,
-      width: 512,
-    });
+    const qrDataUrl = await QRCode.toDataURL(qrText);
     const base64Qr = qrDataUrl.split(",")[1];
 
     const start = reservation.start_time
@@ -317,29 +312,9 @@ async function sendReservationEmail(reservation) {
 
     const subject = `🎤 Confirmation de votre réservation Singbox - Box ${reservation.box_id}`;
 
-    // ✅ On garde ton look, mais on ajoute une couche responsive mobile + aération
     const htmlBody = `
       <div style="margin:0;padding:24px 0;background-color:#050814;">
         <div style="max-width:640px;margin:0 auto;background:radial-gradient(circle at 0% 0%,rgba(56,189,248,0.12),transparent 55%),radial-gradient(circle at 100% 0%,rgba(201,76,53,0.25),transparent 55%),#020617;border-radius:18px;border:1px solid rgba(148,163,184,0.3);box-shadow:0 18px 45px rgba(0,0,0,0.85);padding:24px 22px 26px;font-family:'Montserrat',system-ui,-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;color:#F9FAFB;">
-
-          <!-- Responsive helpers (Gmail mobile OK) -->
-          <style>
-            /* reset safe */
-            img{border:0;outline:none;text-decoration:none}
-            table{border-collapse:collapse}
-            /* mobile */
-            @media only screen and (max-width: 480px){
-              .sb-wrap{padding:18px 14px !important;border-radius:18px !important;}
-              .sb-pill{padding:8px 12px !important;font-size:11px !important;}
-              .sb-h1{font-size:22px !important;line-height:1.25 !important;}
-              .sb-p{font-size:15px !important;line-height:1.75 !important;}
-              .sb-card{padding:16px 14px !important;border-radius:18px !important;}
-              .sb-label{font-size:13px !important;}
-              .sb-big{font-size:16px !important;line-height:1.45 !important;}
-              .sb-qr{font-size:16px !important;line-height:1.65 !important;padding:14px 14px !important;}
-              .sb-foot{font-size:12px !important;line-height:1.7 !important;}
-            }
-          </style>
 
           <!-- HEADER -->
           <table width="100%" cellpadding="0" cellspacing="0" role="presentation" style="border-collapse:collapse;margin-bottom:18px;">
@@ -351,7 +326,7 @@ async function sendReservationEmail(reservation) {
                 </div>
               </td>
               <td align="right" style="vertical-align:middle;">
-                <span class="sb-pill" style="display:inline-block;padding:6px 14px;border-radius:999px;background:rgba(15,23,42,0.85);border:1px solid rgba(148,163,184,0.45);font-size:11px;text-transform:uppercase;letter-spacing:0.12em;color:#E5E7EB;">
+                <span style="display:inline-block;padding:6px 14px;border-radius:999px;background:rgba(15,23,42,0.85);border:1px solid rgba(148,163,184,0.45);font-size:11px;text-transform:uppercase;letter-spacing:0.12em;color:#E5E7EB;">
                   Confirmation de réservation
                 </span>
               </td>
@@ -359,71 +334,71 @@ async function sendReservationEmail(reservation) {
           </table>
 
           <!-- TITRE -->
-          <h1 class="sb-h1" style="margin:0 0 10px 0;font-family:'League Spartan','Montserrat',system-ui,sans-serif;font-size:22px;letter-spacing:0.06em;text-transform:uppercase;">
+          <h1 style="margin:0 0 8px 0;font-family:'League Spartan','Montserrat',system-ui,sans-serif;font-size:22px;letter-spacing:0.06em;text-transform:uppercase;">
             Votre session est confirmée ✅
           </h1>
-          <p class="sb-p" style="margin:0 0 16px 0;font-size:14px;color:rgba(249,250,251,0.88);line-height:1.7;">
-            Merci pour votre réservation chez <strong>Singbox</strong> !<br/>
+          <p style="margin:0 0 14px 0;font-size:14px;color:rgba(249,250,251,0.88);line-height:1.6;">
+            Merci pour votre réservation chez <strong>Singbox</strong> !
             Voici le récapitulatif de votre box karaoké privative.
           </p>
 
           <!-- CARTE RÉCAP -->
-          <div class="sb-card" style="margin:16px 0 18px 0;padding:14px 14px 12px 14px;border-radius:16px;background:rgba(15,23,42,0.92);border:1px solid rgba(148,163,184,0.45);">
+          <div style="margin:14px 0 16px 0;padding:14px 14px 12px 14px;border-radius:16px;background:rgba(15,23,42,0.92);border:1px solid rgba(148,163,184,0.45);">
             <table width="100%" cellpadding="0" cellspacing="0" role="presentation" style="border-collapse:collapse;">
               <tr>
-                <td class="sb-label" style="font-size:13px;color:#9CA3AF;padding-bottom:8px;">
+                <td style="font-size:13px;color:#9CA3AF;padding-bottom:6px;">
                   Box réservée
                 </td>
-                <td class="sb-label" style="font-size:13px;color:#9CA3AF;padding-bottom:8px;" align="right">
+                <td style="font-size:13px;color:#9CA3AF;padding-bottom:6px;" align="right">
                   Horaires
                 </td>
               </tr>
               <tr>
-                <td class="sb-big" style="font-size:15px;font-weight:600;line-height:1.35;">
+                <td style="font-size:15px;font-weight:600;">
                   Box ${reservation.box_id}
                 </td>
-                <td class="sb-big" style="font-size:14px;line-height:1.45;" align="right">
-                  ${startStr} →<br/>${endStr}
+                <td style="font-size:14px;" align="right">
+                  ${startStr} → ${endStr}
                 </td>
               </tr>
             </table>
-            <p class="sb-p" style="margin:12px 0 0 0;font-size:13px;color:#E5E7EB;line-height:1.7;">
+            <p style="margin:10px 0 4px 0;font-size:13px;color:#E5E7EB;">
               <strong>Merci d'arriver 10 minutes en avance</strong> afin de pouvoir vous installer et démarrer la session à l'heure.
             </p>
           </div>
 
-          <!-- QR CODE (plus grand, visible, et uniquement "PJ") -->
-          <div class="sb-qr" style="margin:0 0 16px 0;padding:12px 14px;border-radius:16px;background:rgba(2,6,23,0.35);border:1px solid rgba(148,163,184,0.35);">
-            <p style="margin:0;font-size:15px;line-height:1.7;color:rgba(249,250,251,0.92);">
-              <strong style="font-size:16px;letter-spacing:0.02em;">Votre QR code est en pièce jointe</strong>
-              <span style="color:rgba(249,250,251,0.85);"> (fichier <em>qr-reservation.png</em>).</span>
+          <!-- QR CODE -->
+          <div style="text-align:center;margin:18px 0 8px 0;">
+            <p style="margin:0 0 8px 0;font-size:13px;color:#9CA3AF;">
+              Votre QR code est <strong>en pièce jointe</strong> de cet e-mail (fichier <em>qr-reservation.png</em>).<br/>
+              Vous pouvez aussi le présenter directement ci-dessous :
             </p>
           </div>
 
           <!-- EMPREINTE BANCAIRE -->
           <div style="margin-top:18px;padding:14px 14px 12px 14px;border-radius:16px;background:rgba(24,24,27,0.96);border:1px solid rgba(248,113,113,0.45);">
-            <h2 style="margin:0 0 8px 0;font-size:15px;font-family:'League Spartan','Montserrat',system-ui,sans-serif;letter-spacing:0.06em;text-transform:uppercase;color:#fecaca;">
+            <h2 style="margin:0 0 6px 0;font-size:15px;font-family:'League Spartan','Montserrat',system-ui,sans-serif;letter-spacing:0.06em;text-transform:uppercase;color:#fecaca;">
               Empreinte bancaire de ${DEPOSIT_AMOUNT_EUR} €
             </h2>
-            <p style="margin:0 0 8px 0;font-size:13px;line-height:1.75;color:#E5E7EB;">
+            <p style="margin:0 0 6px 0;font-size:13px;color:#E5E7EB;">
               Pour garantir le bon déroulement de la session, une <strong>empreinte bancaire de ${DEPOSIT_AMOUNT_EUR} €</strong> peut être réalisée sur votre carte bancaire.
             </p>
-            <ul style="margin:8px 0 6px 18px;padding:0;font-size:12px;line-height:1.75;color:#E5E7EB;">
+            <ul style="margin:6px 0 6px 18px;padding:0;font-size:12px;color:#E5E7EB;">
               <li>Il ne s'agit <strong>pas d'un débit immédiat</strong>, mais d'un blocage temporaire du montant.</li>
               <li>L'empreinte n'est <strong>pas encaissée</strong> si la session se déroule normalement et que le règlement est respecté.</li>
               <li>En cas de dégradations ou non-respect des règles, tout ou partie de ce montant peut être prélevé après constat par l'équipe Singbox.</li>
             </ul>
-            <p style="margin:0;font-size:11px;line-height:1.6;color:#9CA3AF;">
+            <p style="margin:0;font-size:11px;color:#9CA3AF;">
               Les délais de libération de l’empreinte dépendent de votre banque (généralement quelques jours).
             </p>
           </div>
 
           <!-- CONDITIONS D'ANNULATION -->
           <div style="margin-top:18px;">
-            <h2 style="margin:0 0 8px 0;font-size:15px;font-family:'League Spartan','Montserrat',system-ui,sans-serif;letter-spacing:0.06em;text-transform:uppercase;">
+            <h2 style="margin:0 0 6px 0;font-size:15px;font-family:'League Spartan','Montserrat',system-ui,sans-serif;letter-spacing:0.06em;text-transform:uppercase;">
               Conditions d'annulation
             </h2>
-            <ul style="margin:8px 0 0 18px;padding:0;font-size:13px;line-height:1.85;color:#E5E7EB;">
+            <ul style="margin:6px 0 0 18px;padding:0;font-size:13px;color:#E5E7EB;">
               <li>Annulation gratuite jusqu'à <strong>24h avant</strong> le début de la session.</li>
               <li>Passé ce délai, la réservation est considérée comme due et <strong>non remboursable</strong>.</li>
               <li>En cas de retard important, la session pourra être écourtée sans compensation afin de respecter les créneaux suivants.</li>
@@ -432,41 +407,40 @@ async function sendReservationEmail(reservation) {
 
           <!-- REGLEMENT INTERIEUR -->
           <div style="margin-top:18px;">
-            <h2 style="margin:0 0 8px 0;font-size:15px;font-family:'League Spartan','Montserrat',system-ui,sans-serif;letter-spacing:0.06em;text-transform:uppercase;">
+            <h2 style="margin:0 0 6px 0;font-size:15px;font-family:'League Spartan','Montserrat',system-ui,sans-serif;letter-spacing:0.06em;text-transform:uppercase;">
               Règlement intérieur Singbox
             </h2>
-            <ul style="margin:8px 0 0 18px;padding:0;font-size:13px;line-height:1.85;color:#E5E7EB;">
+            <ul style="margin:6px 0 0 18px;padding:0;font-size:13px;color:#E5E7EB;">
               <li><strong>Respect du matériel</strong> : micros, écrans, banquettes et équipements doivent être utilisés avec soin.</li>
               <li><strong>Comportement</strong> : toute attitude violente, insultante ou dangereuse peut entraîner l'arrêt immédiat de la session.</li>
               <li><strong>Alcool & drogues</strong> : l'accès pourra être refusé en cas d'état d'ébriété avancé ou de consommation de substances illicites.</li>
-              <li><strong>Fumée</strong> : il est strictement interdit de fumer dans les box.</li>
+              <li><strong>Fumée</strong> : il est strictement interdit de fumer ou vapoter dans les box.</li>
               <li><strong>Nuisances sonores</strong> : merci de respecter les autres clients et le voisinage dans les espaces communs.</li>
               <li><strong>Capacité maximale</strong> : le nombre de personnes par box ne doit pas dépasser la limite indiquée sur place.</li>
             </ul>
-            <p style="margin:10px 0 0 0;font-size:11px;line-height:1.6;color:#9CA3AF;">
+            <p style="margin:8px 0 0 0;font-size:11px;color:#9CA3AF;">
               En validant votre réservation, vous acceptez le règlement intérieur de Singbox.
             </p>
           </div>
 
           <!-- INFOS PRATIQUES -->
           <div style="margin-top:20px;">
-            <h2 style="margin:0 0 8px 0;font-size:15px;font-family:'League Spartan','Montserrat',system-ui,sans-serif;letter-spacing:0.06em;text-transform:uppercase;">
+            <h2 style="margin:0 0 6px 0;font-size:15px;font-family:'League Spartan','Montserrat',system-ui,sans-serif;letter-spacing:0.06em;text-transform:uppercase;">
               Infos pratiques
             </h2>
-            <p style="margin:0 0 6px 0;font-size:13px;line-height:1.8;color:#E5E7EB;">
+            <p style="margin:0 0 4px 0;font-size:13px;color:#E5E7EB;">
               Adresse : <strong>66 Rue de la République, 31300 Toulouse</strong> (à adapter si besoin).
             </p>
-            <p style="margin:0;font-size:13px;line-height:1.8;color:#9CA3AF;">
+            <p style="margin:0 0 4px 0;font-size:13px;color:#9CA3AF;">
               Pensez à vérifier l'accès et le stationnement avant votre venue.
             </p>
           </div>
 
           <!-- FOOTER -->
-          <div class="sb-foot" style="margin-top:22px;padding-top:12px;border-top:1px solid rgba(30,64,175,0.65);font-size:11px;line-height:1.7;color:#9CA3AF;text-align:center;">
+          <div style="margin-top:22px;padding-top:10px;border-top:1px solid rgba(30,64,175,0.65);font-size:11px;color:#9CA3AF;text-align:center;">
             Suivez-nous sur Instagram et TikTok : <strong>@singboxtoulouse</strong><br/>
             Conservez cet e-mail, il vous sera demandé à l'arrivée.
           </div>
-
         </div>
       </div>
     `;
@@ -479,6 +453,7 @@ async function sendReservationEmail(reservation) {
     );
 
     const attachments = [
+      // ✅ QR en pièce jointe (download)
       {
         filename: "qr-reservation.png",
         content: base64Qr,
@@ -1159,7 +1134,10 @@ app.post("/api/confirm-reservation", async (req, res) => {
         userIdFromToken = decoded.userId;
       }
     } catch (e) {
-      console.warn("⚠️ Token invalide sur /api/confirm-reservation :", e.message);
+      console.warn(
+        "⚠️ Token invalide sur /api/confirm-reservation :",
+        e.message
+      );
     }
 
     const fullName =
@@ -1307,7 +1285,9 @@ app.post("/api/confirm-reservation", async (req, res) => {
           .update({ used_count: currentUsed + 1 })
           .eq("id", promo.id);
 
-        console.log(`📊 Promo ${promo.code} utilisée, remise=${discountAmount}€`);
+        console.log(
+          `📊 Promo ${promo.code} utilisée, remise=${discountAmount}€`
+        );
       }
     } catch (promoErr) {
       console.error(
