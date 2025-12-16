@@ -1146,71 +1146,80 @@ app.post("/api/create-payment-intent", optionalAuthMiddleware, async (req, res) 
     // ==========================
     // NEW : Paiement “1-clic” avec carte enregistrée
     // ==========================
-    if (useSavedPaymentMethod) {
-      if (!req.userId) {
-        return res.status(401).json({ error: "Connexion requise pour payer avec carte enregistrée" });
-      }
-      if (!supabase) {
-        return res.status(500).json({ error: "Supabase non configuré" });
-      }
+if (useSavedPaymentMethod) {
+  if (!req.userId) {
+    return res.status(401).json({ error: "Connexion requise pour payer avec carte enregistrée" });
+  }
+  if (!supabase) {
+    return res.status(500).json({ error: "Supabase non configuré" });
+  }
 
-      const user = await getUserById(req.userId);
-      const { customerId } = await ensureStripeCustomer(req.userId);
+  const user = await getUserById(req.userId);
+  const { customerId } = await ensureStripeCustomer(req.userId);
 
-      const pmToUse = paymentMethodId || user.default_payment_method_id;
-      if (!pmToUse) {
-        return res.status(400).json({ error: "Aucune carte enregistrée disponible" });
-      }
+  const pmToUse = paymentMethodId || user.default_payment_method_id;
+  if (!pmToUse) {
+    return res.status(400).json({ error: "Aucune carte enregistrée disponible" });
+  }
 
-      // Attache au customer (safe)
-      try {
-        await stripe.paymentMethods.attach(pmToUse, { customer: customerId });
-      } catch (e) {
-        const msg = String(e?.message || "");
-        if (!msg.toLowerCase().includes("already") && !msg.toLowerCase().includes("attached")) {
-          throw e;
-        }
-      }
-
-      // On tente un confirm immédiat (1 clic)
-      const fullName =
-        (customer?.prenom || "") + (customer?.prenom ? " " : "") + (customer?.nom || "");
-
-      const pi = await stripe.paymentIntents.create({
-        amount: amountInCents,
-        currency: "eur",
-        customer: customerId,
-        payment_method: pmToUse,
-        confirm: true,
-        automatic_payment_methods: { enabled: true },
-        metadata: {
-          panier: JSON.stringify(panier),
-          customer_email: customer?.email || "",
-          customer_name: fullName,
-          promo_code: promoCode || "",
-          total_before_discount: String(totalBeforeDiscount),
-          discount_amount: String(discountAmount),
-          loyalty_used: loyaltyUsed ? "true" : "false",
-          saved_card: "true",
-        },
-      });
-
-      return res.json({
-        clientSecret: pi.client_secret,
-        paymentIntentId: pi.id,
-        requiresAction: pi.status === "requires_action",
-        status: pi.status,
-
-        isFree: false,
-        totalBeforeDiscount,
-        totalAfterDiscount: totalAmountEur,
-        discountAmount,
-        promo: promo
-          ? { id: promo.id, code: promo.code, type: promo.type, value: promo.value }
-          : null,
-      });
+  // Attache au customer (safe)
+  try {
+    await stripe.paymentMethods.attach(pmToUse, { customer: customerId });
+  } catch (e) {
+    const msg = String(e?.message || "");
+    if (!msg.toLowerCase().includes("already") && !msg.toLowerCase().includes("attached")) {
+      throw e;
     }
+  }
 
+  const fullName =
+    (customer?.prenom || "") + (customer?.prenom ? " " : "") + (customer?.nom || "");
+
+  try {
+    // ✅ IMPORTANT: on force "card" et on évite automatic_payment_methods ici (ça cause des cas chiants en confirm server-side)
+    const pi = await stripe.paymentIntents.create({
+      amount: amountInCents,
+      currency: "eur",
+      customer: customerId,
+      payment_method: pmToUse,
+      payment_method_types: ["card"],
+      confirm: true,
+
+      // metadata
+      metadata: {
+        panier: JSON.stringify(panier),
+        customer_email: customer?.email || "",
+        customer_name: fullName,
+        promo_code: promoCode || "",
+        total_before_discount: String(totalBeforeDiscount),
+        discount_amount: String(discountAmount),
+        loyalty_used: loyaltyUsed ? "true" : "false",
+        saved_card: "true",
+      },
+    });
+
+    return res.json({
+      clientSecret: pi.client_secret,
+      paymentIntentId: pi.id,
+      requiresAction: pi.status === "requires_action",
+      status: pi.status,
+      isFree: false,
+      totalBeforeDiscount,
+      totalAfterDiscount: totalAmountEur,
+      discountAmount,
+      promo: promo ? { id: promo.id, code: promo.code, type: promo.type, value: promo.value } : null,
+    });
+  } catch (e) {
+    // ✅ ON RENVOIE L’ERREUR STRIPE EXACTE AU FRONT (pour debug)
+    const stripeMsg =
+      e?.raw?.message || e?.message || "Erreur Stripe inconnue (saved card)";
+    console.error("❌ Stripe saved-card PI error:", stripeMsg, e?.raw || e);
+
+    return res.status(500).json({
+      error: "Stripe saved-card: " + stripeMsg,
+    });
+  }
+}
     // ==========================
     // Flow normal (inchangé)
     // ==========================
@@ -1291,9 +1300,9 @@ app.post("/api/create-deposit-intent", optionalAuthMiddleware, async (req, res) 
         currency: "eur",
         customer: customerId,
         payment_method: pmToUse,
-        confirm: true,
-        capture_method: "manual",
-        automatic_payment_methods: { enabled: true },
+payment_method_types: ["card"],
+confirm: true,
+capture_method: "manual",
         metadata: {
           type: "singbox_deposit",
           reservation_id: reservationId || "",
