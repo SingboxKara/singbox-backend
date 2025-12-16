@@ -84,11 +84,11 @@ const SLOT_DURATION_MINUTES = 90;
 // Vacances scolaires (Zone C : Toulouse) - à ajuster chaque année
 // ------------------------------------------------------
 const VACANCES_ZONE_C = [
-  { start: "2025-10-19", end: "2025-11-03", label: "Toussaint 2024" },
-  { start: "2025-12-21", end: "2026-01-05", label: "Noël 2024" },
-  { start: "2026-02-22", end: "2026-03-09", label: "Hiver 2025" },
-  { start: "2026-04-19", end: "2026-05-04", label: "Printemps 2025" },
-  { start: "2026-07-05", end: "2026-09-01", label: "Été 2025" },
+  { start: "2025-10-19", end: "2025-11-03", label: "Toussaint 2025" },
+  { start: "2025-12-21", end: "2026-01-05", label: "Noël 2025" },
+  { start: "2026-02-22", end: "2026-03-09", label: "Hiver 2026" },
+  { start: "2026-04-19", end: "2026-05-04", label: "Printemps 2026" },
+  { start: "2026-07-05", end: "2026-09-01", label: "Été 2026" },
 ];
 
 // Helper : savoir si une date ISO est dans [start, end] (inclus)
@@ -97,19 +97,13 @@ function isDateInRange(isoDate, start, end) {
 }
 
 // ------------------------------------------------------
-// Helpers (checkout profile)
+// Helpers (profil)
 // ------------------------------------------------------
 function safeText(v, max = 255) {
   if (v === undefined || v === null) return null;
   const s = String(v).trim();
   if (!s) return null;
   return s.length > max ? s.slice(0, max) : s;
-}
-
-function safeClientType(v) {
-  const s = String(v || "").toLowerCase().trim();
-  if (s === "particulier" || s === "entreprise") return s;
-  return null;
 }
 
 function safeCountry(v) {
@@ -121,22 +115,22 @@ function safeCountry(v) {
 function safeBirthdate(v) {
   if (!v) return null;
   const s = String(v).slice(0, 10); // YYYY-MM-DD
-  // simple check
   if (!/^\d{4}-\d{2}-\d{2}$/.test(s)) return null;
   return s;
 }
 
-async function upsertCheckoutInfo(userId, payload) {
+/**
+ * Met à jour le profil directement dans la table `users`
+ * (ce que tu voulais : "utiliser la table users").
+ */
+async function updateUserProfileInUsersTable(userId, payload) {
   if (!supabase) return;
 
-  const row = {
-    user_id: userId,
-    save_checkout_info: !!payload.save_checkout_info,
-    client_type: safeClientType(payload.client_type),
+  const update = {
     prenom: safeText(payload.prenom, 80),
     nom: safeText(payload.nom, 80),
     telephone: safeText(payload.telephone, 40),
-    pays: safeCountry(payload.pays),
+    pays: safeCountry(payload.pays) || "FR",
     adresse: safeText(payload.adresse, 160),
     complement: safeText(payload.complement, 160),
     cp: safeText(payload.cp, 20),
@@ -145,13 +139,8 @@ async function upsertCheckoutInfo(userId, payload) {
     updated_at: new Date().toISOString(),
   };
 
-  const { error } = await supabase.from("user_checkout_info").upsert(row, {
-    onConflict: "user_id",
-  });
-
-  if (error) {
-    console.warn("⚠️ upsert user_checkout_info error:", error.message);
-  }
+  const { error } = await supabase.from("users").update(update).eq("id", userId);
+  if (error) throw error;
 }
 
 // ------------------------------------------------------
@@ -243,7 +232,7 @@ function addDaysToDateString(dateStr, daysToAdd) {
 
 /**
  * Construit start_time / end_time à partir du slot.
- * Désormais : durée par défaut = SLOT_DURATION_MINUTES (1h30).
+ * Durée par défaut = SLOT_DURATION_MINUTES (1h30).
  */
 function buildTimesFromSlot(slot) {
   if (slot.start_time && slot.end_time) {
@@ -279,7 +268,7 @@ function buildTimesFromSlot(slot) {
     }
   }
 
-  const OFFSET = "+01:00";
+  const OFFSET = "+01:00"; // ok pour France hiver (sinon DST à gérer plus tard)
 
   const startHourStr = String(hourNum).padStart(2, "0");
   const startMinStr = String(minuteNum).padStart(2, "0");
@@ -337,9 +326,7 @@ async function sendReservationEmail(reservation) {
     const qrDataUrl = await QRCode.toDataURL(qrText);
     const base64Qr = qrDataUrl.split(",")[1];
 
-    const start = reservation.start_time
-      ? new Date(reservation.start_time)
-      : null;
+    const start = reservation.start_time ? new Date(reservation.start_time) : null;
     const end = reservation.end_time ? new Date(reservation.end_time) : null;
 
     const fmt = (d) =>
@@ -487,11 +474,7 @@ app.post(
 
     let event;
     try {
-      event = stripe.webhooks.constructEvent(
-        req.body,
-        sig,
-        STRIPE_WEBHOOK_SECRET
-      );
+      event = stripe.webhooks.constructEvent(req.body, sig, STRIPE_WEBHOOK_SECRET);
     } catch (err) {
       console.error("❌ Erreur vérification signature webhook :", err.message);
       return res.status(400).send(`Webhook Error: ${err.message}`);
@@ -568,10 +551,7 @@ app.post("/api/verify-cart", async (req, res) => {
         .gt("end_time", times.start_time);
 
       if (conflictError) {
-        console.error(
-          "Erreur vérification conflits /api/verify-cart :",
-          conflictError
-        );
+        console.error("Erreur vérification conflits /api/verify-cart :", conflictError);
         return res
           .status(500)
           .send("Erreur serveur lors de la vérification des créneaux");
@@ -580,9 +560,7 @@ app.post("/api/verify-cart", async (req, res) => {
       if (conflicts && conflicts.length > 0) {
         return res
           .status(409)
-          .send(
-            `Le créneau ${times.date} pour la box ${numericBoxId} n'est plus disponible.`
-          );
+          .send(`Le créneau ${times.date} pour la box ${numericBoxId} n'est plus disponible.`);
       }
 
       const price =
@@ -603,9 +581,7 @@ app.post("/api/verify-cart", async (req, res) => {
     return res.json({ items: normalizedItems });
   } catch (e) {
     console.error("Erreur /api/verify-cart :", e);
-    return res
-      .status(500)
-      .send("Erreur serveur lors de la vérification du panier");
+    return res.status(500).send("Erreur serveur lors de la vérification du panier");
   }
 });
 
@@ -625,9 +601,12 @@ app.post("/api/register", async (req, res) => {
 
     const hash = await bcrypt.hash(password, 10);
 
-    const { error } = await supabase
-      .from("users")
-      .insert({ email, password_hash: hash });
+    const { error } = await supabase.from("users").insert({
+      email,
+      password_hash: hash,
+      created_at: new Date().toISOString(),
+      updated_at: new Date().toISOString(),
+    });
 
     if (error) {
       console.error(error);
@@ -681,8 +660,9 @@ app.post("/api/login", async (req, res) => {
 });
 
 // ------------------------------------------------------
-// PROFIL UTILISATEUR (ENRICHI)
-// - Renvoie email, points + checkout_info (si enregistré)
+// PROFIL UTILISATEUR
+// - GET /api/me : lire le profil (table users)
+// - POST /api/me : sauvegarder le profil dès saisie (sans payer)
 // ------------------------------------------------------
 app.get("/api/me", authMiddleware, async (req, res) => {
   try {
@@ -694,30 +674,29 @@ app.get("/api/me", authMiddleware, async (req, res) => {
 
     const { data: user, error: userErr } = await supabase
       .from("users")
-      .select("email, points")
+      .select(
+        "id,email,prenom,nom,telephone,pays,adresse,complement,cp,ville,naissance,points"
+      )
       .eq("id", userId)
       .single();
 
     if (userErr) return res.status(400).json({ error: userErr.message });
 
-    // checkout info (optionnel)
-    let checkoutInfo = null;
-    try {
-      const { data: ci, error: ciErr } = await supabase
-        .from("user_checkout_info")
-        .select("*")
-        .eq("user_id", userId)
-        .maybeSingle();
-
-      if (!ciErr && ci) checkoutInfo = ci;
-    } catch (e) {
-      // table pas créée => pas bloquant
-    }
-
     return res.json({
+      id: user.id,
       email: user.email,
       points: user.points ?? 0,
-      checkout_info: checkoutInfo,
+      profile: {
+        prenom: user.prenom,
+        nom: user.nom,
+        telephone: user.telephone,
+        pays: user.pays,
+        adresse: user.adresse,
+        complement: user.complement,
+        cp: user.cp,
+        ville: user.ville,
+        naissance: user.naissance,
+      },
     });
   } catch (err) {
     console.error("Erreur me :", err);
@@ -725,44 +704,17 @@ app.get("/api/me", authMiddleware, async (req, res) => {
   }
 });
 
-// ------------------------------------------------------
-// SAUVEGARDER LES INFOS CHECKOUT (pré-remplissage)
-// POST /api/me/checkout-info
-// ------------------------------------------------------
-app.post("/api/me/checkout-info", authMiddleware, async (req, res) => {
+// ✅ Route “AJOUT 2” : enregistre le profil dès qu’ils remplissent (sans payer)
+app.post("/api/me", authMiddleware, async (req, res) => {
   try {
-    const userId = req.userId;
     if (!supabase) {
       return res.status(500).json({ error: "Supabase non configuré" });
     }
 
-    const payload = req.body || {};
-    // tu peux envoyer save_checkout_info: true/false
-    const save = !!payload.save_checkout_info;
-
-    if (!save) {
-      // si l’utilisateur décoche, on enregistre juste le flag
-      await upsertCheckoutInfo(userId, { save_checkout_info: false });
-      return res.json({ ok: true, saved: false });
-    }
-
-    await upsertCheckoutInfo(userId, {
-      save_checkout_info: true,
-      client_type: payload.client_type,
-      prenom: payload.prenom,
-      nom: payload.nom,
-      telephone: payload.telephone,
-      pays: payload.pays,
-      adresse: payload.adresse,
-      complement: payload.complement,
-      cp: payload.cp,
-      ville: payload.ville,
-      naissance: payload.naissance,
-    });
-
-    return res.json({ ok: true, saved: true });
+    await updateUserProfileInUsersTable(req.userId, req.body || {});
+    return res.json({ ok: true });
   } catch (e) {
-    console.error("Erreur /api/me/checkout-info :", e);
+    console.error("Erreur POST /api/me :", e);
     return res.status(500).json({ error: "Erreur serveur" });
   }
 });
@@ -797,9 +749,7 @@ app.get("/api/my-reservations", authMiddleware, async (req, res) => {
 
     if (error) {
       console.error("Erreur Supabase my-reservations :", error);
-      return res
-        .status(500)
-        .json({ error: "Erreur en chargeant les réservations" });
+      return res.status(500).json({ error: "Erreur en chargeant les réservations" });
     }
 
     return res.json({ reservations: reservations || [] });
@@ -902,9 +852,7 @@ app.get("/api/is-vacances", (req, res) => {
       .json({ error: "Paramètre 'date' manquant (YYYY-MM-DD)" });
   }
 
-  const matchingPeriods = VACANCES_ZONE_C.filter((p) =>
-    isDateInRange(date, p.start, p.end)
-  );
+  const matchingPeriods = VACANCES_ZONE_C.filter((p) => isDateInRange(date, p.start, p.end));
   const isHoliday = matchingPeriods.length > 0;
 
   return res.json({
@@ -926,8 +874,7 @@ app.post("/api/create-payment-intent", async (req, res) => {
     }
 
     console.log("/api/create-payment-intent appelé");
-    const { panier, customer, promoCode, finalAmountCents, loyaltyUsed } =
-      req.body || {};
+    const { panier, customer, promoCode, finalAmountCents, loyaltyUsed } = req.body || {};
 
     if (!panier || !Array.isArray(panier) || panier.length === 0) {
       return res.status(400).json({ error: "Panier vide" });
@@ -962,23 +909,11 @@ app.post("/api/create-payment-intent", async (req, res) => {
     ) {
       const frontTotal = finalAmountCents / 100;
       if (Math.abs(frontTotal - totalAmountEur) > 0.01) {
-        console.warn(
-          "⚠️ Écart entre total front et back :",
-          "front=",
-          frontTotal,
-          "back=",
-          totalAmountEur
-        );
+        console.warn("⚠️ Écart entre total front et back :", "front=", frontTotal, "back=", totalAmountEur);
       }
     }
 
-    console.log(
-      "Montant total calculé (après remise / fidélité) :",
-      totalAmountEur,
-      "€ ; remise=",
-      discountAmount,
-      "€"
-    );
+    console.log("Montant total calculé :", totalAmountEur, "€ ; remise=", discountAmount, "€");
 
     if (totalAmountEur <= 0) {
       console.log("🟢 Séance gratuite : aucun PaymentIntent Stripe créé.");
@@ -988,12 +923,7 @@ app.post("/api/create-payment-intent", async (req, res) => {
         totalAfterDiscount: 0,
         discountAmount: totalBeforeDiscount,
         promo: promo
-          ? {
-              id: promo.id,
-              code: promo.code,
-              type: promo.type,
-              value: promo.value,
-            }
+          ? { id: promo.id, code: promo.code, type: promo.type, value: promo.value }
           : null,
       });
     }
@@ -1006,8 +936,7 @@ app.post("/api/create-payment-intent", async (req, res) => {
       metadata: {
         panier: JSON.stringify(panier),
         customer_email: customer?.email || "",
-        customer_name:
-          (customer?.prenom || "") + " " + (customer?.nom || ""),
+        customer_name: (customer?.prenom || "") + " " + (customer?.nom || ""),
         promo_code: promoCode || "",
         total_before_discount: String(totalBeforeDiscount),
         discount_amount: String(discountAmount),
@@ -1045,25 +974,16 @@ app.post("/api/create-deposit-intent", async (req, res) => {
     const depositAmountEur = DEPOSIT_AMOUNT_EUR;
     const amountInCents = Math.round(depositAmountEur * 100);
 
-    console.log(
-      "/api/create-deposit-intent - création empreinte",
-      depositAmountEur,
-      "€ pour réservation",
-      reservationId
-    );
+    console.log("/api/create-deposit-intent - création empreinte", depositAmountEur, "€ pour réservation", reservationId);
 
     const fullName =
-      (customer?.prenom || "") +
-      (customer?.prenom ? " " : "") +
-      (customer?.nom || "");
+      (customer?.prenom || "") + (customer?.prenom ? " " : "") + (customer?.nom || "");
 
     const paymentIntent = await stripe.paymentIntents.create({
       amount: amountInCents,
       currency: "eur",
       capture_method: "manual",
-      automatic_payment_methods: {
-        enabled: true,
-      },
+      automatic_payment_methods: { enabled: true },
       metadata: {
         type: "singbox_deposit",
         reservation_id: reservationId || "",
@@ -1083,10 +1003,7 @@ app.post("/api/create-deposit-intent", async (req, res) => {
           })
           .eq("id", reservationId);
       } catch (e) {
-        console.warn(
-          "⚠️ Impossible de mettre à jour les infos de caution en BDD (colonnes manquantes ?):",
-          e.message
-        );
+        console.warn("⚠️ Impossible de mettre à jour les infos de caution en BDD :", e.message);
       }
     }
 
@@ -1097,9 +1014,7 @@ app.post("/api/create-deposit-intent", async (req, res) => {
     });
   } catch (err) {
     console.error("Erreur create-deposit-intent :", err);
-    return res
-      .status(500)
-      .json({ error: "Erreur serveur Stripe (caution)" });
+    return res.status(500).json({ error: "Erreur serveur Stripe (caution)" });
   }
 });
 
@@ -1109,14 +1024,7 @@ app.post("/api/create-deposit-intent", async (req, res) => {
 app.post("/api/confirm-reservation", async (req, res) => {
   try {
     console.log("/api/confirm-reservation appelé");
-    const {
-      panier,
-      customer,
-      promoCode,
-      paymentIntentId,
-      loyaltyUsed,
-      isFree,
-    } = req.body || {};
+    const { panier, customer, promoCode, paymentIntentId, loyaltyUsed, isFree } = req.body || {};
 
     const isFreeReservationFlag = !!isFree || !!loyaltyUsed;
 
@@ -1135,63 +1043,41 @@ app.post("/api/confirm-reservation", async (req, res) => {
       const pi = await stripe.paymentIntents.retrieve(paymentIntentId);
       console.log("Statut PaymentIntent :", pi.status);
       if (pi.status !== "succeeded") {
-        return res
-          .status(400)
-          .json({ error: "Paiement non validé par Stripe" });
+        return res.status(400).json({ error: "Paiement non validé par Stripe" });
       }
     } else {
       console.log("✅ Réservation confirmée en mode gratuit (isFree / fidélité).");
     }
 
     if (!supabase) {
-      console.warn(
-        "⚠️ Supabase non configuré, réservation non enregistrée en base."
-      );
+      console.warn("⚠️ Supabase non configuré, réservation non enregistrée en base.");
       return res.json({ status: "ok (sans enregistrement Supabase)" });
     }
 
+    // Récupère userId si token présent
     let userIdFromToken = null;
     try {
       const authHeader = req.headers.authorization;
-      const token = authHeader?.startsWith("Bearer ")
-        ? authHeader.split(" ")[1]
-        : null;
+      const token = authHeader?.startsWith("Bearer ") ? authHeader.split(" ")[1] : null;
       if (token) {
         const decoded = jwt.verify(token, process.env.JWT_SECRET);
         userIdFromToken = decoded.userId;
       }
     } catch (e) {
-      console.warn(
-        "⚠️ Token invalide sur /api/confirm-reservation :",
-        e.message
-      );
+      console.warn("⚠️ Token invalide sur /api/confirm-reservation :", e.message);
     }
 
-    // ✅ BONUS: si l'utilisateur est connecté et a demandé la sauvegarde
+    // ✅ Update du profil (table users) si connecté (même si pas “save_checkout_info”)
     try {
-      if (userIdFromToken && customer?.save_checkout_info === true) {
-        await upsertCheckoutInfo(userIdFromToken, {
-          save_checkout_info: true,
-          client_type: customer?.client_type,
-          prenom: customer?.prenom,
-          nom: customer?.nom,
-          telephone: customer?.telephone,
-          pays: customer?.pays,
-          adresse: customer?.adresse,
-          complement: customer?.complement,
-          cp: customer?.cp,
-          ville: customer?.ville,
-          naissance: customer?.naissance,
-        });
+      if (userIdFromToken && customer) {
+        await updateUserProfileInUsersTable(userIdFromToken, customer);
       }
     } catch (e) {
-      console.warn("⚠️ Sauvegarde checkout_info (confirm-reservation) a échoué:", e.message);
+      console.warn("⚠️ update users (confirm-reservation) a échoué:", e.message);
     }
 
     const fullName =
-      (customer?.prenom || "") +
-      (customer?.prenom ? " " : "") +
-      (customer?.nom || "");
+      (customer?.prenom || "") + (customer?.prenom ? " " : "") + (customer?.nom || "");
 
     const totalBeforeDiscount = computeCartTotalEur(panier);
     let discountAmount = 0;
@@ -1203,23 +1089,16 @@ app.post("/api/confirm-reservation", async (req, res) => {
         discountAmount = result.discountAmount;
         promo = result.promo;
       } else {
-        console.warn(
-          "Code promo non appliqué lors de confirm-reservation :",
-          result.reason
-        );
+        console.warn("Code promo non appliqué lors de confirm-reservation :", result.reason);
       }
     }
 
     const rows = panier.map((slot) => {
       const times = buildTimesFromSlot(slot);
 
-      const rawBox =
-        slot.boxId ?? slot.box_id ?? slot.box ?? slot.boxName ?? 1;
-
+      const rawBox = slot.boxId ?? slot.box_id ?? slot.box ?? slot.boxName ?? 1;
       let numericBoxId = parseInt(String(rawBox).replace(/[^0-9]/g, ""), 10);
-      if (!Number.isFinite(numericBoxId)) {
-        numericBoxId = 1;
-      }
+      if (!Number.isFinite(numericBoxId)) numericBoxId = 1;
 
       return {
         name: fullName || null,
@@ -1233,6 +1112,7 @@ app.post("/api/confirm-reservation", async (req, res) => {
       };
     });
 
+    // conflits
     for (const row of rows) {
       const { data: conflicts, error: conflictError } = await supabase
         .from("reservations")
@@ -1243,48 +1123,35 @@ app.post("/api/confirm-reservation", async (req, res) => {
 
       if (conflictError) {
         console.error("Erreur vérification conflits :", conflictError);
-        return res
-          .status(500)
-          .json({ error: "Erreur serveur (vérification conflit)" });
+        return res.status(500).json({ error: "Erreur serveur (vérification conflit)" });
       }
 
       if (conflicts && conflicts.length > 0) {
         return res.status(400).json({
-          error:
-            "Ce créneau est déjà réservé pour la box " +
-            row.box_id +
-            ". Choisissez une autre heure ou une autre box.",
+          error: "Ce créneau est déjà réservé pour la box " + row.box_id + ".",
         });
       }
     }
 
-    const { data, error } = await supabase
-      .from("reservations")
-      .insert(rows)
-      .select();
+    const { data, error } = await supabase.from("reservations").insert(rows).select();
 
     if (error) {
       console.error("Erreur Supabase insert reservations :", error);
-      return res
-        .status(500)
-        .json({ error: "Erreur en enregistrant la réservation" });
+      return res.status(500).json({ error: "Erreur en enregistrant la réservation" });
     }
 
+    // envoi emails
     try {
       await Promise.allSettled(data.map((row) => sendReservationEmail(row)));
     } catch (mailErr) {
       console.error("Erreur globale envoi mails :", mailErr);
     }
 
+    // points fidélité
     try {
-      const isFreeReservationFinal =
-        isFreeReservationFlag || (promo && promo.type === "free");
+      const isFreeReservationFinal = isFreeReservationFlag || (promo && promo.type === "free");
 
-      if (!userIdFromToken) {
-        // pas de points si pas connecté
-      } else if (isFreeReservationFinal) {
-        // pas de points si gratuit
-      } else {
+      if (userIdFromToken && !isFreeReservationFinal) {
         const pointsToAdd = panier.length * 10;
 
         const { error: pointsError } = await supabase.rpc("increment_points", {
@@ -1300,12 +1167,10 @@ app.post("/api/confirm-reservation", async (req, res) => {
       console.error("Erreur lors de l'ajout automatique des points :", pointsErr);
     }
 
+    // promo usage
     try {
       if (promo && discountAmount > 0) {
-        const totalAfterDiscount = Math.max(
-          0,
-          totalBeforeDiscount - discountAmount
-        );
+        const totalAfterDiscount = Math.max(0, totalBeforeDiscount - discountAmount);
 
         await supabase.from("promo_usages").insert({
           promo_id: promo.id,
@@ -1318,10 +1183,7 @@ app.post("/api/confirm-reservation", async (req, res) => {
         });
 
         const currentUsed = Number(promo.used_count || 0);
-        await supabase
-          .from("promo_codes")
-          .update({ used_count: currentUsed + 1 })
-          .eq("id", promo.id);
+        await supabase.from("promo_codes").update({ used_count: currentUsed + 1 }).eq("id", promo.id);
       }
     } catch (promoErr) {
       console.error("Erreur promo usages :", promoErr);
@@ -1341,9 +1203,7 @@ app.post("/api/confirm-reservation", async (req, res) => {
     });
   } catch (err) {
     console.error("Erreur confirm-reservation :", err);
-    return res
-      .status(500)
-      .json({ error: "Erreur serveur lors de la réservation" });
+    return res.status(500).json({ error: "Erreur serveur lors de la réservation" });
   }
 });
 
@@ -1359,37 +1219,26 @@ app.post("/api/capture-deposit", async (req, res) => {
     const { paymentIntentId, amountToCaptureEur, reservationId } = req.body;
 
     if (!paymentIntentId) {
-      return res
-        .status(400)
-        .json({ error: "paymentIntentId manquant pour la caution" });
+      return res.status(400).json({ error: "paymentIntentId manquant pour la caution" });
     }
 
-    let params = {};
+    const params = {};
     if (amountToCaptureEur != null) {
-      const amountToCaptureCents = Math.round(Number(amountToCaptureEur) * 100);
-      params.amount_to_capture = amountToCaptureCents;
+      params.amount_to_capture = Math.round(Number(amountToCaptureEur) * 100);
     }
 
-    const paymentIntent = await stripe.paymentIntents.capture(
-      paymentIntentId,
-      params
-    );
+    const paymentIntent = await stripe.paymentIntents.capture(paymentIntentId, params);
 
     if (supabase && reservationId) {
       try {
-        await supabase
-          .from("reservations")
-          .update({ deposit_status: "captured" })
-          .eq("id", reservationId);
+        await supabase.from("reservations").update({ deposit_status: "captured" }).eq("id", reservationId);
       } catch (e) {}
     }
 
     return res.json({ status: "captured", paymentIntent });
   } catch (err) {
     console.error("Erreur capture-deposit :", err);
-    return res.status(500).json({
-      error: "Erreur serveur lors de la capture de la caution",
-    });
+    return res.status(500).json({ error: "Erreur serveur lors de la capture de la caution" });
   }
 });
 
@@ -1405,28 +1254,21 @@ app.post("/api/cancel-deposit", async (req, res) => {
     const { paymentIntentId, reservationId } = req.body;
 
     if (!paymentIntentId) {
-      return res
-        .status(400)
-        .json({ error: "paymentIntentId manquant pour la caution" });
+      return res.status(400).json({ error: "paymentIntentId manquant pour la caution" });
     }
 
     const canceled = await stripe.paymentIntents.cancel(paymentIntentId);
 
     if (supabase && reservationId) {
       try {
-        await supabase
-          .from("reservations")
-          .update({ deposit_status: "canceled" })
-          .eq("id", reservationId);
+        await supabase.from("reservations").update({ deposit_status: "canceled" }).eq("id", reservationId);
       } catch (e) {}
     }
 
     return res.json({ status: "canceled", paymentIntent: canceled });
   } catch (err) {
     console.error("Erreur cancel-deposit :", err);
-    return res.status(500).json({
-      error: "Erreur serveur lors de l'annulation de la caution",
-    });
+    return res.status(500).json({ error: "Erreur serveur lors de l'annulation de la caution" });
   }
 });
 
@@ -1440,9 +1282,7 @@ app.get("/api/slots", async (req, res) => {
 
   const date = req.query.date;
   if (!date) {
-    return res
-      .status(400)
-      .json({ error: "Paramètre 'date' manquant (YYYY-MM-DD)" });
+    return res.status(400).json({ error: "Paramètre 'date' manquant (YYYY-MM-DD)" });
   }
 
   try {
@@ -1475,9 +1315,7 @@ app.get("/api/slots", async (req, res) => {
 // ------------------------------------------------------
 app.get("/api/check", async (req, res) => {
   if (!supabase) {
-    return res
-      .status(500)
-      .json({ valid: false, error: "Supabase non configuré" });
+    return res.status(500).json({ valid: false, error: "Supabase non configuré" });
   }
 
   try {
@@ -1506,12 +1344,8 @@ app.get("/api/check", async (req, res) => {
     const marginBeforeMinutes = 5;
     const marginBeforeEndMinutes = 5;
 
-    const startWithMargin = new Date(
-      start.getTime() - marginBeforeMinutes * 60000
-    );
-    const lastEntryTime = new Date(
-      end.getTime() - marginBeforeEndMinutes * 60000
-    );
+    const startWithMargin = new Date(start.getTime() - marginBeforeMinutes * 60000);
+    const lastEntryTime = new Date(end.getTime() - marginBeforeEndMinutes * 60000);
 
     let access = false;
     let reason = "OK";
