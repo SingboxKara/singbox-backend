@@ -200,7 +200,7 @@ async function validatePromoCode(code, totalAmountEur) {
   const value = Number(promo.value) || 0;
 
   if (type === "percent") {
-    discountAmount = Math.round(totalAmountEur * (value / 100));
+    discountAmount = totalAmountEur * (value / 100);
   } else if (type === "fixed") {
     discountAmount = Math.min(totalAmountEur, value);
   } else if (type === "free") {
@@ -1057,6 +1057,7 @@ app.get("/api/is-vacances", (req, res) => {
 // ------------------------------------------------------
 // 1) CRÉER UN PAYMENT INTENT STRIPE (paiement de la session)
 //  - FIX IMPORTANT: on force "card" pour éviter le besoin de return_url (redirect methods)
+//  - FIX IMPORTANT: en mode carte enregistrée => PAS de confirm côté backend (sinon double-confirm = 400)
 // ------------------------------------------------------
 app.post("/api/create-payment-intent", optionalAuthMiddleware, async (req, res) => {
   try {
@@ -1139,6 +1140,8 @@ app.post("/api/create-payment-intent", optionalAuthMiddleware, async (req, res) 
 
     // ==========================
     // Paiement “1-clic” avec carte enregistrée
+    // ✅ FIX: on crée le PI avec customer + pm, mais on NE confirme PAS ici.
+    // Le front fait stripe.confirmCardPayment(clientSecret, { payment_method: pmId })
     // ==========================
     if (useSavedPaymentMethod) {
       if (!req.userId) {
@@ -1174,9 +1177,9 @@ app.post("/api/create-payment-intent", optionalAuthMiddleware, async (req, res) 
           amount: amountInCents,
           currency: "eur",
           customer: customerId,
-          payment_method: pmToUse,
+          payment_method: pmToUse, // ok de le pré-remplir
           payment_method_types: ["card"],
-          confirm: true,
+          // ✅ IMPORTANT: PAS de confirm ici (sinon le front re-confirm et ça part en 400)
           metadata: {
             panier: JSON.stringify(panier),
             customer_email: customer?.email || "",
@@ -1192,8 +1195,6 @@ app.post("/api/create-payment-intent", optionalAuthMiddleware, async (req, res) 
         return res.json({
           clientSecret: pi.client_secret,
           paymentIntentId: pi.id,
-          requiresAction: pi.status === "requires_action",
-          status: pi.status,
           isFree: false,
           totalBeforeDiscount,
           totalAfterDiscount: totalAmountEur,
@@ -1212,7 +1213,7 @@ app.post("/api/create-payment-intent", optionalAuthMiddleware, async (req, res) 
     }
 
     // ==========================
-    // Flow normal (FIX: forcer card pour éviter return_url)
+    // Flow normal (forcer card pour éviter return_url)
     // ==========================
     const paymentIntent = await stripe.paymentIntents.create({
       amount: amountInCents,
@@ -1250,6 +1251,7 @@ app.post("/api/create-payment-intent", optionalAuthMiddleware, async (req, res) 
 // ------------------------------------------------------
 // 1bis) CRÉER UNE EMPREINTE DE CAUTION (250€)
 //  - FIX IMPORTANT: on force "card" aussi (sinon return_url possible)
+//  - FIX IMPORTANT: en mode carte enregistrée => PAS de confirm côté backend (sinon double-confirm = 400)
 // ------------------------------------------------------
 app.post("/api/create-deposit-intent", optionalAuthMiddleware, async (req, res) => {
   try {
@@ -1289,13 +1291,13 @@ app.post("/api/create-deposit-intent", optionalAuthMiddleware, async (req, res) 
         }
       }
 
+      // ✅ IMPORTANT: PAS de confirm ici, le front fera confirmCardPayment(clientSecret, {payment_method: pmId})
       const pi = await stripe.paymentIntents.create({
         amount: amountInCents,
         currency: "eur",
         customer: customerId,
         payment_method: pmToUse,
         payment_method_types: ["card"],
-        confirm: true,
         capture_method: "manual",
         metadata: {
           type: "singbox_deposit",
@@ -1313,7 +1315,7 @@ app.post("/api/create-deposit-intent", optionalAuthMiddleware, async (req, res) 
             .update({
               deposit_payment_intent_id: pi.id,
               deposit_amount_cents: amountInCents,
-              deposit_status: "authorized",
+              deposit_status: "created",
             })
             .eq("id", reservationId);
         } catch (e) {
@@ -1324,13 +1326,11 @@ app.post("/api/create-deposit-intent", optionalAuthMiddleware, async (req, res) 
       return res.json({
         clientSecret: pi.client_secret,
         paymentIntentId: pi.id,
-        requiresAction: pi.status === "requires_action",
-        status: pi.status,
         depositAmountEur: DEPOSIT_AMOUNT_EUR,
       });
     }
 
-    // MODE NORMAL (FIX: forcer card)
+    // MODE NORMAL (forcer card)
     const paymentIntent = await stripe.paymentIntents.create({
       amount: amountInCents,
       currency: "eur",
@@ -1351,7 +1351,7 @@ app.post("/api/create-deposit-intent", optionalAuthMiddleware, async (req, res) 
           .update({
             deposit_payment_intent_id: paymentIntent.id,
             deposit_amount_cents: amountInCents,
-            deposit_status: "authorized",
+            deposit_status: "created",
           })
           .eq("id", reservationId);
       } catch (e) {
