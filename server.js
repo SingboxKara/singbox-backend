@@ -458,7 +458,6 @@ function authMiddleware(req, res, next) {
 
 // ------------------------------------------------------
 // Middleware d'authentification JWT (optionnel)
-// (ne casse pas tes endpoints publics : si pas de token => continue)
 // ------------------------------------------------------
 function optionalAuthMiddleware(req, _res, next) {
   try {
@@ -472,8 +471,7 @@ function optionalAuthMiddleware(req, _res, next) {
     const decoded = jwt.verify(token, process.env.JWT_SECRET);
     req.userId = decoded.userId;
     return next();
-  } catch (e) {
-    // si token invalide, on ignore (pour ne pas casser)
+  } catch (_e) {
     return next();
   }
 }
@@ -745,8 +743,6 @@ app.post("/api/login", async (req, res) => {
 
 // ------------------------------------------------------
 // PROFIL UTILISATEUR
-// - GET /api/me : lire le profil (table users)
-// - POST /api/me : sauvegarder le profil dès saisie (sans payer)
 // ------------------------------------------------------
 app.get("/api/me", authMiddleware, async (req, res) => {
   try {
@@ -800,7 +796,7 @@ app.get("/api/me", authMiddleware, async (req, res) => {
   }
 });
 
-// ✅ Route “AJOUT 2” : enregistre le profil dès qu’ils remplissent (sans payer)
+// Enregistre le profil dès qu’ils remplissent (sans payer)
 app.post("/api/me", authMiddleware, async (req, res) => {
   try {
     if (!supabase) {
@@ -830,7 +826,7 @@ app.post("/api/create-setup-intent", authMiddleware, async (req, res) => {
     const setupIntent = await stripe.setupIntents.create({
       customer: customerId,
       payment_method_types: ["card"],
-      usage: "off_session", // pour faciliter les paiements futurs
+      usage: "off_session",
       metadata: { supabase_user_id: String(req.userId) },
     });
 
@@ -890,7 +886,6 @@ app.post("/api/set-default-payment-method", authMiddleware, async (req, res) => 
     try {
       await stripe.paymentMethods.attach(paymentMethodId, { customer: customerId });
     } catch (e) {
-      // si déjà attachée, on ignore
       const msg = String(e?.message || "");
       if (!msg.toLowerCase().includes("already") && !msg.toLowerCase().includes("attached")) {
         throw e;
@@ -1061,8 +1056,7 @@ app.get("/api/is-vacances", (req, res) => {
 
 // ------------------------------------------------------
 // 1) CRÉER UN PAYMENT INTENT STRIPE (paiement de la session)
-//  - CONSERVE ton flow actuel
-//  - AJOUT : si useSavedPaymentMethod=true => nécessite user connecté et utilise la carte enregistrée
+//  - FIX IMPORTANT: on force "card" pour éviter le besoin de return_url (redirect methods)
 // ------------------------------------------------------
 app.post("/api/create-payment-intent", optionalAuthMiddleware, async (req, res) => {
   try {
@@ -1144,88 +1138,86 @@ app.post("/api/create-payment-intent", optionalAuthMiddleware, async (req, res) 
     const amountInCents = Math.round(totalAmountEur * 100);
 
     // ==========================
-    // NEW : Paiement “1-clic” avec carte enregistrée
+    // Paiement “1-clic” avec carte enregistrée
     // ==========================
-if (useSavedPaymentMethod) {
-  if (!req.userId) {
-    return res.status(401).json({ error: "Connexion requise pour payer avec carte enregistrée" });
-  }
-  if (!supabase) {
-    return res.status(500).json({ error: "Supabase non configuré" });
-  }
+    if (useSavedPaymentMethod) {
+      if (!req.userId) {
+        return res.status(401).json({ error: "Connexion requise pour payer avec carte enregistrée" });
+      }
+      if (!supabase) {
+        return res.status(500).json({ error: "Supabase non configuré" });
+      }
 
-  const user = await getUserById(req.userId);
-  const { customerId } = await ensureStripeCustomer(req.userId);
+      const user = await getUserById(req.userId);
+      const { customerId } = await ensureStripeCustomer(req.userId);
 
-  const pmToUse = paymentMethodId || user.default_payment_method_id;
-  if (!pmToUse) {
-    return res.status(400).json({ error: "Aucune carte enregistrée disponible" });
-  }
+      const pmToUse = paymentMethodId || user.default_payment_method_id;
+      if (!pmToUse) {
+        return res.status(400).json({ error: "Aucune carte enregistrée disponible" });
+      }
 
-  // Attache au customer (safe)
-  try {
-    await stripe.paymentMethods.attach(pmToUse, { customer: customerId });
-  } catch (e) {
-    const msg = String(e?.message || "");
-    if (!msg.toLowerCase().includes("already") && !msg.toLowerCase().includes("attached")) {
-      throw e;
+      // Attache au customer (safe)
+      try {
+        await stripe.paymentMethods.attach(pmToUse, { customer: customerId });
+      } catch (e) {
+        const msg = String(e?.message || "");
+        if (!msg.toLowerCase().includes("already") && !msg.toLowerCase().includes("attached")) {
+          throw e;
+        }
+      }
+
+      const fullName =
+        (customer?.prenom || "") + (customer?.prenom ? " " : "") + (customer?.nom || "");
+
+      try {
+        const pi = await stripe.paymentIntents.create({
+          amount: amountInCents,
+          currency: "eur",
+          customer: customerId,
+          payment_method: pmToUse,
+          payment_method_types: ["card"],
+          confirm: true,
+          metadata: {
+            panier: JSON.stringify(panier),
+            customer_email: customer?.email || "",
+            customer_name: fullName,
+            promo_code: promoCode || "",
+            total_before_discount: String(totalBeforeDiscount),
+            discount_amount: String(discountAmount),
+            loyalty_used: loyaltyUsed ? "true" : "false",
+            saved_card: "true",
+          },
+        });
+
+        return res.json({
+          clientSecret: pi.client_secret,
+          paymentIntentId: pi.id,
+          requiresAction: pi.status === "requires_action",
+          status: pi.status,
+          isFree: false,
+          totalBeforeDiscount,
+          totalAfterDiscount: totalAmountEur,
+          discountAmount,
+          promo: promo ? { id: promo.id, code: promo.code, type: promo.type, value: promo.value } : null,
+        });
+      } catch (e) {
+        const stripeMsg =
+          e?.raw?.message || e?.message || "Erreur Stripe inconnue (saved card)";
+        console.error("❌ Stripe saved-card PI error:", stripeMsg, e?.raw || e);
+
+        return res.status(500).json({
+          error: "Stripe saved-card: " + stripeMsg,
+        });
+      }
     }
-  }
 
-  const fullName =
-    (customer?.prenom || "") + (customer?.prenom ? " " : "") + (customer?.nom || "");
-
-  try {
-    // ✅ IMPORTANT: on force "card" et on évite automatic_payment_methods ici (ça cause des cas chiants en confirm server-side)
-    const pi = await stripe.paymentIntents.create({
-      amount: amountInCents,
-      currency: "eur",
-      customer: customerId,
-      payment_method: pmToUse,
-      payment_method_types: ["card"],
-      confirm: true,
-
-      // metadata
-      metadata: {
-        panier: JSON.stringify(panier),
-        customer_email: customer?.email || "",
-        customer_name: fullName,
-        promo_code: promoCode || "",
-        total_before_discount: String(totalBeforeDiscount),
-        discount_amount: String(discountAmount),
-        loyalty_used: loyaltyUsed ? "true" : "false",
-        saved_card: "true",
-      },
-    });
-
-    return res.json({
-      clientSecret: pi.client_secret,
-      paymentIntentId: pi.id,
-      requiresAction: pi.status === "requires_action",
-      status: pi.status,
-      isFree: false,
-      totalBeforeDiscount,
-      totalAfterDiscount: totalAmountEur,
-      discountAmount,
-      promo: promo ? { id: promo.id, code: promo.code, type: promo.type, value: promo.value } : null,
-    });
-  } catch (e) {
-    // ✅ ON RENVOIE L’ERREUR STRIPE EXACTE AU FRONT (pour debug)
-    const stripeMsg =
-      e?.raw?.message || e?.message || "Erreur Stripe inconnue (saved card)";
-    console.error("❌ Stripe saved-card PI error:", stripeMsg, e?.raw || e);
-
-    return res.status(500).json({
-      error: "Stripe saved-card: " + stripeMsg,
-    });
-  }
-}
     // ==========================
-    // Flow normal (inchangé)
+    // Flow normal (FIX: forcer card pour éviter return_url)
     // ==========================
     const paymentIntent = await stripe.paymentIntents.create({
       amount: amountInCents,
       currency: "eur",
+      payment_method_types: ["card"],
       metadata: {
         panier: JSON.stringify(panier),
         customer_email: customer?.email || "",
@@ -1249,13 +1241,15 @@ if (useSavedPaymentMethod) {
         : null,
     });
   } catch (err) {
-    console.error("Erreur create-payment-intent :", err);
-    return res.status(500).json({ error: "Erreur serveur Stripe" });
+    const msg = err?.raw?.message || err?.message || "Erreur serveur Stripe";
+    console.error("Erreur create-payment-intent :", msg, err?.raw || err);
+    return res.status(500).json({ error: msg });
   }
 });
 
 // ------------------------------------------------------
 // 1bis) CRÉER UNE EMPREINTE DE CAUTION (250€)
+//  - FIX IMPORTANT: on force "card" aussi (sinon return_url possible)
 // ------------------------------------------------------
 app.post("/api/create-deposit-intent", optionalAuthMiddleware, async (req, res) => {
   try {
@@ -1268,7 +1262,7 @@ app.post("/api/create-deposit-intent", optionalAuthMiddleware, async (req, res) 
     const fullName =
       (customer?.prenom || "") + (customer?.prenom ? " " : "") + (customer?.nom || "");
 
-    // ✅ MODE CARTE ENREGISTRÉE (1-clic)
+    // MODE CARTE ENREGISTRÉE (1-clic)
     if (useSavedPaymentMethod) {
       if (!req.userId) {
         return res.status(401).json({ error: "Connexion requise pour la caution avec carte enregistrée" });
@@ -1300,9 +1294,9 @@ app.post("/api/create-deposit-intent", optionalAuthMiddleware, async (req, res) 
         currency: "eur",
         customer: customerId,
         payment_method: pmToUse,
-payment_method_types: ["card"],
-confirm: true,
-capture_method: "manual",
+        payment_method_types: ["card"],
+        confirm: true,
+        capture_method: "manual",
         metadata: {
           type: "singbox_deposit",
           reservation_id: reservationId || "",
@@ -1312,7 +1306,6 @@ capture_method: "manual",
         },
       });
 
-      // ✅ Mets à jour la réservation si possible
       if (supabase && reservationId) {
         try {
           await supabase
@@ -1337,12 +1330,12 @@ capture_method: "manual",
       });
     }
 
-    // ✅ MODE NORMAL (inchangé)
+    // MODE NORMAL (FIX: forcer card)
     const paymentIntent = await stripe.paymentIntents.create({
       amount: amountInCents,
       currency: "eur",
       capture_method: "manual",
-      automatic_payment_methods: { enabled: true },
+      payment_method_types: ["card"],
       metadata: {
         type: "singbox_deposit",
         reservation_id: reservationId || "",
@@ -1427,7 +1420,7 @@ app.post("/api/confirm-reservation", async (req, res) => {
       console.warn("⚠️ Token invalide sur /api/confirm-reservation :", e.message);
     }
 
-    // ✅ Update du profil (table users) si connecté
+    // Update du profil (table users) si connecté
     try {
       if (userIdFromToken && customer) {
         await updateUserProfileInUsersTable(userIdFromToken, customer);
