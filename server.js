@@ -1248,27 +1248,87 @@ app.post("/api/create-payment-intent", optionalAuthMiddleware, async (req, res) 
 // ------------------------------------------------------
 // 1bis) CRÉER UNE EMPREINTE DE CAUTION (250€)
 // ------------------------------------------------------
-app.post("/api/create-deposit-intent", async (req, res) => {
+app.post("/api/create-deposit-intent", optionalAuthMiddleware, async (req, res) => {
   try {
-    if (!stripe) {
-      return res.status(500).json({ error: "Stripe non configuré" });
-    }
+    if (!stripe) return res.status(500).json({ error: "Stripe non configuré" });
 
-    const { reservationId, customer } = req.body;
+    const { reservationId, customer, useSavedPaymentMethod, paymentMethodId } = req.body || {};
 
-    const depositAmountEur = DEPOSIT_AMOUNT_EUR;
-    const amountInCents = Math.round(depositAmountEur * 100);
-
-    console.log(
-      "/api/create-deposit-intent - création empreinte",
-      depositAmountEur,
-      "€ pour réservation",
-      reservationId
-    );
+    const amountInCents = Math.round(DEPOSIT_AMOUNT_EUR * 100);
 
     const fullName =
       (customer?.prenom || "") + (customer?.prenom ? " " : "") + (customer?.nom || "");
 
+    // ✅ MODE CARTE ENREGISTRÉE (1-clic)
+    if (useSavedPaymentMethod) {
+      if (!req.userId) {
+        return res.status(401).json({ error: "Connexion requise pour la caution avec carte enregistrée" });
+      }
+      if (!supabase) {
+        return res.status(500).json({ error: "Supabase non configuré" });
+      }
+
+      const user = await getUserById(req.userId);
+      const { customerId } = await ensureStripeCustomer(req.userId);
+
+      const pmToUse = paymentMethodId || user.default_payment_method_id;
+      if (!pmToUse) {
+        return res.status(400).json({ error: "Aucune carte enregistrée disponible pour la caution" });
+      }
+
+      // Attache au customer (safe)
+      try {
+        await stripe.paymentMethods.attach(pmToUse, { customer: customerId });
+      } catch (e) {
+        const msg = String(e?.message || "");
+        if (!msg.toLowerCase().includes("already") && !msg.toLowerCase().includes("attached")) {
+          throw e;
+        }
+      }
+
+      const pi = await stripe.paymentIntents.create({
+        amount: amountInCents,
+        currency: "eur",
+        customer: customerId,
+        payment_method: pmToUse,
+        confirm: true,
+        capture_method: "manual",
+        automatic_payment_methods: { enabled: true },
+        metadata: {
+          type: "singbox_deposit",
+          reservation_id: reservationId || "",
+          customer_email: customer?.email || "",
+          customer_name: fullName,
+          saved_card: "true",
+        },
+      });
+
+      // ✅ Mets à jour la réservation si possible
+      if (supabase && reservationId) {
+        try {
+          await supabase
+            .from("reservations")
+            .update({
+              deposit_payment_intent_id: pi.id,
+              deposit_amount_cents: amountInCents,
+              deposit_status: "authorized",
+            })
+            .eq("id", reservationId);
+        } catch (e) {
+          console.warn("⚠️ Impossible de mettre à jour les infos de caution en BDD :", e?.message || e);
+        }
+      }
+
+      return res.json({
+        clientSecret: pi.client_secret,
+        paymentIntentId: pi.id,
+        requiresAction: pi.status === "requires_action",
+        status: pi.status,
+        depositAmountEur: DEPOSIT_AMOUNT_EUR,
+      });
+    }
+
+    // ✅ MODE NORMAL (inchangé)
     const paymentIntent = await stripe.paymentIntents.create({
       amount: amountInCents,
       currency: "eur",
@@ -1293,18 +1353,19 @@ app.post("/api/create-deposit-intent", async (req, res) => {
           })
           .eq("id", reservationId);
       } catch (e) {
-        console.warn("⚠️ Impossible de mettre à jour les infos de caution en BDD :", e.message);
+        console.warn("⚠️ Impossible de mettre à jour les infos de caution en BDD :", e?.message || e);
       }
     }
 
     return res.json({
       clientSecret: paymentIntent.client_secret,
       paymentIntentId: paymentIntent.id,
-      depositAmountEur,
+      depositAmountEur: DEPOSIT_AMOUNT_EUR,
     });
   } catch (err) {
     console.error("Erreur create-deposit-intent :", err);
-    return res.status(500).json({ error: "Erreur serveur Stripe (caution)" });
+    const msg = err?.raw?.message || err?.message || "Erreur serveur Stripe (caution)";
+    return res.status(500).json({ error: msg });
   }
 });
 
