@@ -200,7 +200,7 @@ async function validatePromoCode(code, totalAmountEur) {
   const value = Number(promo.value) || 0;
 
   if (type === "percent") {
-    discountAmount = totalAmountEur * (value / 100);
+    discountAmount = Math.round(totalAmountEur * (value / 100));
   } else if (type === "fixed") {
     discountAmount = Math.min(totalAmountEur, value);
   } else if (type === "free") {
@@ -344,71 +344,191 @@ async function sendReservationEmail(reservation) {
     const startStr = fmt(start);
     const endStr = fmt(end);
 
-    const subject = `🎤 Confirmation de votre réservation Singbox - Box ${reservation.box_id}`;
+    // ✅ Sujet propre (comme ton visuel)
+    const subject = `Confirmation de réservation Singbox — Box ${reservation.box_id}`;
 
+    // ✅ HTML refait pour matcher ton rendu (dark + cards + sections)
     const htmlBody = `
-      <div style="margin:0;padding:24px 0;background-color:#050814;">
-        <div style="max-width:640px;margin:0 auto;background:radial-gradient(circle at 0% 0%,rgba(56,189,248,0.12),transparent 55%),radial-gradient(circle at 100% 0%,rgba(201,76,53,0.25),transparent 55%),#020617;border-radius:18px;border:1px solid rgba(148,163,184,0.3);box-shadow:0 18px 45px rgba(0,0,0,0.85);padding:24px 22px 26px;font-family:'Montserrat',system-ui,-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;color:#F9FAFB;">
-          <table width="100%" cellpadding="0" cellspacing="0" role="presentation" style="border-collapse:collapse;margin-bottom:18px;">
+<!doctype html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Confirmation Singbox</title>
+</head>
+<body style="margin:0;padding:0;background:#050814;">
+  <div style="margin:0;padding:26px 0;background:#050814;">
+    <div style="max-width:720px;margin:0 auto;padding:0 14px;">
+      <div style="
+        background:
+          radial-gradient(circle at 0% 0%, rgba(56,189,248,0.14), transparent 55%),
+          radial-gradient(circle at 100% 0%, rgba(201,76,53,0.22), transparent 55%),
+          linear-gradient(180deg, rgba(2,6,23,0.98), rgba(2,6,23,0.92));
+        border-radius:18px;
+        border:1px solid rgba(148,163,184,0.28);
+        box-shadow:0 18px 50px rgba(0,0,0,0.75);
+        overflow:hidden;
+        font-family: Arial, Helvetica, system-ui, -apple-system, Segoe UI, sans-serif;
+        color:#F9FAFB;
+      ">
+
+        <!-- Header -->
+        <div style="padding:18px 18px 10px 18px;">
+          <table width="100%" cellpadding="0" cellspacing="0" role="presentation" style="border-collapse:collapse;">
             <tr>
-              <td style="vertical-align:middle;">
-                <div>
-                  <div style="font-family:'League Spartan','Montserrat',system-ui,sans-serif;font-weight:700;letter-spacing:0.18em;text-transform:uppercase;font-size:18px;line-height:1.2;">Singbox</div>
-                  <div style="font-size:12px;color:#9CA3AF;margin-top:2px;">Karaoké box privatives · Toulouse</div>
+              <td style="vertical-align:top;">
+                <div style="font-weight:800;letter-spacing:0.22em;text-transform:uppercase;font-size:14px;line-height:1.1;">
+                  SINGBOX
+                </div>
+                <div style="margin-top:4px;font-size:11px;color:rgba(229,231,235,0.65);">
+                  Karaoké box privatives · Toulouse
                 </div>
               </td>
-              <td align="right" style="vertical-align:middle;">
-                <span style="display:inline-block;padding:6px 14px;border-radius:999px;background:rgba(15,23,42,0.85);border:1px solid rgba(148,163,184,0.45);font-size:11px;text-transform:uppercase;letter-spacing:0.12em;color:#E5E7EB;">
-                  Confirmation de réservation
-                </span>
+              <td align="right" style="vertical-align:top;">
+                <span style="
+                  display:inline-block;
+                  padding:7px 12px;
+                  border-radius:999px;
+                  background:rgba(15,23,42,0.75);
+                  border:1px solid rgba(148,163,184,0.35);
+                  font-size:10px;
+                  letter-spacing:0.14em;
+                  text-transform:uppercase;
+                  color:#E5E7EB;
+                ">CONFIRMATION DE RÉSERVATION</span>
               </td>
             </tr>
           </table>
 
-          <h1 style="margin:0 0 8px 0;font-family:'League Spartan','Montserrat',system-ui,sans-serif;font-size:22px;letter-spacing:0.06em;text-transform:uppercase;">
-            Votre session est confirmée ✅
-          </h1>
-          <p style="margin:0 0 14px 0;font-size:14px;color:rgba(249,250,251,0.88);line-height:1.6;">
-            Merci pour votre réservation chez <strong>Singbox</strong> !
+          <div style="margin-top:14px;font-weight:900;letter-spacing:0.04em;text-transform:uppercase;font-size:22px;">
+            VOTRE SESSION EST CONFIRMÉE <span style="color:#86EFAC;">✅</span>
+          </div>
+          <div style="margin-top:8px;font-size:12px;line-height:1.6;color:rgba(229,231,235,0.78);">
+            Merci pour votre réservation chez <strong style="color:#F9FAFB;">Singbox</strong> !
             Voici le récapitulatif de votre box karaoké privative.
-          </p>
-
-          <div style="margin:14px 0 16px 0;padding:14px 14px 12px 14px;border-radius:16px;background:rgba(15,23,42,0.92);border:1px solid rgba(148,163,184,0.45);">
-            <table width="100%" cellpadding="0" cellspacing="0" role="presentation" style="border-collapse:collapse;">
-              <tr>
-                <td style="font-size:13px;color:#9CA3AF;padding-bottom:6px;">Box réservée</td>
-                <td style="font-size:13px;color:#9CA3AF;padding-bottom:6px;" align="right">Horaires</td>
-              </tr>
-              <tr>
-                <td style="font-size:15px;font-weight:600;">Box ${reservation.box_id}</td>
-                <td style="font-size:14px;" align="right">${startStr} → ${endStr}</td>
-              </tr>
-            </table>
-            <p style="margin:10px 0 4px 0;font-size:13px;color:#E5E7EB;">
-              <strong>Merci d'arriver 10 minutes en avance</strong>.
-            </p>
-          </div>
-
-          <div style="text-align:center;margin:18px 0 8px 0;">
-            <p style="margin:0 0 8px 0;font-size:13px;color:#9CA3AF;">
-              Votre QR code est <strong>en pièce jointe</strong> (qr-reservation.png).
-            </p>
-          </div>
-
-          <div style="margin-top:18px;padding:14px 14px 12px 14px;border-radius:16px;background:rgba(24,24,27,0.96);border:1px solid rgba(248,113,113,0.45);">
-            <h2 style="margin:0 0 6px 0;font-size:15px;font-family:'League Spartan','Montserrat',system-ui,sans-serif;letter-spacing:0.06em;text-transform:uppercase;color:#fecaca;">
-              Empreinte bancaire de ${DEPOSIT_AMOUNT_EUR} €
-            </h2>
-            <p style="margin:0 0 6px 0;font-size:13px;color:#E5E7EB;">
-              Une <strong>empreinte bancaire de ${DEPOSIT_AMOUNT_EUR} €</strong> peut être réalisée (pas un débit).
-            </p>
-          </div>
-
-          <div style="margin-top:22px;padding-top:10px;border-top:1px solid rgba(30,64,175,0.65);font-size:11px;color:#9CA3AF;text-align:center;">
-            Instagram/TikTok : <strong>@singboxtoulouse</strong>
           </div>
         </div>
+
+        <!-- Card: réservation -->
+        <div style="padding:0 18px 10px 18px;">
+          <div style="
+            background:rgba(15,23,42,0.55);
+            border:1px solid rgba(148,163,184,0.22);
+            border-radius:14px;
+            padding:14px 14px 12px 14px;
+          ">
+            <table width="100%" cellpadding="0" cellspacing="0" role="presentation" style="border-collapse:collapse;">
+              <tr>
+                <td style="font-size:11px;color:rgba(229,231,235,0.60);padding-bottom:6px;">Box réservée</td>
+                <td align="right" style="font-size:11px;color:rgba(229,231,235,0.60);padding-bottom:6px;">Horaires</td>
+              </tr>
+              <tr>
+                <td style="font-size:13px;font-weight:800;color:#F9FAFB;">Box ${reservation.box_id}</td>
+                <td align="right" style="font-size:12px;font-weight:700;color:#F9FAFB;">${startStr} → ${endStr}</td>
+              </tr>
+            </table>
+
+            <div style="margin-top:10px;font-size:12px;color:#F9FAFB;font-weight:700;">
+              Merci d'arriver <span style="color:#38BDF8;">10 minutes</span> en avance afin de pouvoir vous installer et démarrer la session à l’heure.
+            </div>
+          </div>
+        </div>
+
+        <!-- Card: QR -->
+        <div style="padding:0 18px 12px 18px;">
+          <div style="
+            background:rgba(15,23,42,0.40);
+            border:1px solid rgba(148,163,184,0.18);
+            border-radius:14px;
+            padding:12px 14px;
+          ">
+            <div style="font-size:12px;font-weight:800;color:#F9FAFB;">
+              Votre QR code est en pièce jointe (fichier <span style="color:#38BDF8;">qr-reservation.png</span>).
+            </div>
+            <div style="margin-top:6px;font-size:11px;color:rgba(229,231,235,0.65);">
+              Présentez-le à l’accueil pour accéder à votre box.
+            </div>
+          </div>
+        </div>
+
+        <!-- Card: caution -->
+        <div style="padding:0 18px 12px 18px;">
+          <div style="
+            background:rgba(24,24,27,0.55);
+            border:1px solid rgba(248,113,113,0.45);
+            border-radius:14px;
+            padding:14px 14px 12px 14px;
+          ">
+            <div style="font-weight:900;letter-spacing:0.05em;text-transform:uppercase;font-size:12px;color:#FCA5A5;">
+              EMPRINTE BANCAIRE DE ${DEPOSIT_AMOUNT_EUR} €
+            </div>
+            <div style="margin-top:8px;font-size:11px;line-height:1.6;color:rgba(249,250,251,0.88);">
+              Pour garantir le bon déroulement de la session, une empreinte bancaire de <strong>${DEPOSIT_AMOUNT_EUR} €</strong> peut être réalisée sur votre carte bancaire.
+            </div>
+            <ul style="margin:10px 0 0 18px;padding:0;color:rgba(229,231,235,0.80);font-size:11px;line-height:1.6;">
+              <li>Il ne s’agit pas d’un débit immédiat, mais d’un blocage temporaire du montant.</li>
+              <li>L’empreinte n’est pas encaissée si la session se déroule normalement et que le règlement est respecté.</li>
+              <li>En cas de dégradations ou non-respect des règles, tout ou partie de ce montant peut être prélevé après constat par l’équipe Singbox.</li>
+            </ul>
+            <div style="margin-top:10px;font-size:10px;color:rgba(229,231,235,0.55);">
+              Les délais de libération de l’empreinte dépendent de votre banque (généralement quelques jours).
+            </div>
+          </div>
+        </div>
+
+        <!-- Sections -->
+        <div style="padding:0 18px 18px 18px;">
+          <div style="margin-top:6px;font-weight:900;letter-spacing:0.05em;text-transform:uppercase;font-size:12px;">
+            CONDITIONS D’ANNULATION
+          </div>
+          <ul style="margin:10px 0 0 18px;padding:0;color:rgba(229,231,235,0.86);font-size:11px;line-height:1.65;">
+            <li>Annulation gratuite jusqu’à <strong>24h</strong> avant le début de la session.</li>
+            <li>Passé ce délai, la réservation est considérée comme due et non remboursable.</li>
+            <li>En cas de retard important, la session pourra être écourtée sans compensation afin de respecter les créneaux suivants.</li>
+          </ul>
+
+          <div style="margin-top:16px;font-weight:900;letter-spacing:0.05em;text-transform:uppercase;font-size:12px;">
+            RÈGLEMENT INTÉRIEUR SINGBOX
+          </div>
+          <ul style="margin:10px 0 0 18px;padding:0;color:rgba(229,231,235,0.86);font-size:11px;line-height:1.65;">
+            <li><strong>Respect du matériel</strong> : micros, écrans, banquettes et équipements doivent être utilisés avec soin.</li>
+            <li><strong>Comportement</strong> : toute attitude violente, insultante ou dangereuse peut entraîner l’arrêt immédiat de la session.</li>
+            <li><strong>Alcool & drogues</strong> : l’accès pourra être refusé en cas d’état d’ivresse avancé ou de consommation de substances illicites.</li>
+            <li><strong>Fumée</strong> : il est strictement interdit de fumer dans les box.</li>
+            <li><strong>Nuisances sonores</strong> : merci de respecter les autres clients et le voisinage dans les espaces communs.</li>
+            <li><strong>Capacité maximale</strong> : le nombre de personnes par box ne doit pas dépasser la limite indiquée sur place.</li>
+          </ul>
+
+          <div style="margin-top:10px;font-size:10px;color:rgba(229,231,235,0.55);">
+            En validant votre réservation, vous acceptez le règlement intérieur de Singbox.
+          </div>
+
+          <div style="margin-top:16px;font-weight:900;letter-spacing:0.05em;text-transform:uppercase;font-size:12px;">
+            INFOS PRATIQUES
+          </div>
+          <div style="margin-top:8px;font-size:11px;line-height:1.65;color:rgba(229,231,235,0.86);">
+            <div><strong>Adresse</strong> : 66 Rue de la République, 31300 Toulouse (à adapter si besoin).</div>
+            <div style="margin-top:6px;color:rgba(229,231,235,0.65);">
+              Pensez à vérifier l’accès et le stationnement avant votre venue.
+            </div>
+          </div>
+        </div>
+
+        <!-- Footer -->
+        <div style="padding:12px 18px 16px 18px;border-top:1px solid rgba(148,163,184,0.16);text-align:center;">
+          <div style="font-size:10px;color:rgba(229,231,235,0.55);">
+            Suivez-nous sur Instagram et TikTok : <strong style="color:#E5E7EB;">@singboxtoulouse</strong>
+          </div>
+          <div style="margin-top:4px;font-size:10px;color:rgba(229,231,235,0.45);">
+            Conservez cet e-mail, il vous sera demandé à l’arrivée.
+          </div>
+        </div>
+
       </div>
+    </div>
+  </div>
+</body>
+</html>
     `;
 
     const attachments = [
@@ -1057,7 +1177,6 @@ app.get("/api/is-vacances", (req, res) => {
 // ------------------------------------------------------
 // 1) CRÉER UN PAYMENT INTENT STRIPE (paiement de la session)
 //  - FIX IMPORTANT: on force "card" pour éviter le besoin de return_url (redirect methods)
-//  - FIX IMPORTANT: en mode carte enregistrée => PAS de confirm côté backend (sinon double-confirm = 400)
 // ------------------------------------------------------
 app.post("/api/create-payment-intent", optionalAuthMiddleware, async (req, res) => {
   try {
@@ -1140,8 +1259,6 @@ app.post("/api/create-payment-intent", optionalAuthMiddleware, async (req, res) 
 
     // ==========================
     // Paiement “1-clic” avec carte enregistrée
-    // ✅ FIX: on crée le PI avec customer + pm, mais on NE confirme PAS ici.
-    // Le front fait stripe.confirmCardPayment(clientSecret, { payment_method: pmId })
     // ==========================
     if (useSavedPaymentMethod) {
       if (!req.userId) {
@@ -1177,9 +1294,9 @@ app.post("/api/create-payment-intent", optionalAuthMiddleware, async (req, res) 
           amount: amountInCents,
           currency: "eur",
           customer: customerId,
-          payment_method: pmToUse, // ok de le pré-remplir
+          payment_method: pmToUse,
           payment_method_types: ["card"],
-          // ✅ IMPORTANT: PAS de confirm ici (sinon le front re-confirm et ça part en 400)
+          confirm: true,
           metadata: {
             panier: JSON.stringify(panier),
             customer_email: customer?.email || "",
@@ -1195,6 +1312,8 @@ app.post("/api/create-payment-intent", optionalAuthMiddleware, async (req, res) 
         return res.json({
           clientSecret: pi.client_secret,
           paymentIntentId: pi.id,
+          requiresAction: pi.status === "requires_action",
+          status: pi.status,
           isFree: false,
           totalBeforeDiscount,
           totalAfterDiscount: totalAmountEur,
@@ -1213,7 +1332,7 @@ app.post("/api/create-payment-intent", optionalAuthMiddleware, async (req, res) 
     }
 
     // ==========================
-    // Flow normal (forcer card pour éviter return_url)
+    // Flow normal (FIX: forcer card pour éviter return_url)
     // ==========================
     const paymentIntent = await stripe.paymentIntents.create({
       amount: amountInCents,
@@ -1251,7 +1370,6 @@ app.post("/api/create-payment-intent", optionalAuthMiddleware, async (req, res) 
 // ------------------------------------------------------
 // 1bis) CRÉER UNE EMPREINTE DE CAUTION (250€)
 //  - FIX IMPORTANT: on force "card" aussi (sinon return_url possible)
-//  - FIX IMPORTANT: en mode carte enregistrée => PAS de confirm côté backend (sinon double-confirm = 400)
 // ------------------------------------------------------
 app.post("/api/create-deposit-intent", optionalAuthMiddleware, async (req, res) => {
   try {
@@ -1291,13 +1409,13 @@ app.post("/api/create-deposit-intent", optionalAuthMiddleware, async (req, res) 
         }
       }
 
-      // ✅ IMPORTANT: PAS de confirm ici, le front fera confirmCardPayment(clientSecret, {payment_method: pmId})
       const pi = await stripe.paymentIntents.create({
         amount: amountInCents,
         currency: "eur",
         customer: customerId,
         payment_method: pmToUse,
         payment_method_types: ["card"],
+        confirm: true,
         capture_method: "manual",
         metadata: {
           type: "singbox_deposit",
@@ -1315,7 +1433,7 @@ app.post("/api/create-deposit-intent", optionalAuthMiddleware, async (req, res) 
             .update({
               deposit_payment_intent_id: pi.id,
               deposit_amount_cents: amountInCents,
-              deposit_status: "created",
+              deposit_status: "authorized",
             })
             .eq("id", reservationId);
         } catch (e) {
@@ -1326,11 +1444,13 @@ app.post("/api/create-deposit-intent", optionalAuthMiddleware, async (req, res) 
       return res.json({
         clientSecret: pi.client_secret,
         paymentIntentId: pi.id,
+        requiresAction: pi.status === "requires_action",
+        status: pi.status,
         depositAmountEur: DEPOSIT_AMOUNT_EUR,
       });
     }
 
-    // MODE NORMAL (forcer card)
+    // MODE NORMAL (FIX: forcer card)
     const paymentIntent = await stripe.paymentIntents.create({
       amount: amountInCents,
       currency: "eur",
@@ -1351,7 +1471,7 @@ app.post("/api/create-deposit-intent", optionalAuthMiddleware, async (req, res) 
           .update({
             deposit_payment_intent_id: paymentIntent.id,
             deposit_amount_cents: amountInCents,
-            deposit_status: "created",
+            deposit_status: "authorized",
           })
           .eq("id", reservationId);
       } catch (e) {
