@@ -346,6 +346,10 @@ function buildSlotIsoRange(dateStr, slotHourFloat) {
   return { startIso, endIso };
 }
 
+function roundMoney(value) {
+  return Number(Number(value || 0).toFixed(2));
+}
+
 // ------------------------------------------------------
 // Helpers fidélité / pricing
 // ------------------------------------------------------
@@ -451,6 +455,31 @@ function computeCartPricing(panier, options = {}) {
     totalBeforeDiscount: Number(totalBeforeDiscount.toFixed(2)),
     loyaltyDiscount: Number(loyaltyDiscount.toFixed(2)),
     totalCashDue: Number(totalCashDue.toFixed(2)),
+  };
+}
+
+function computeReservationTargetAmount({ reservation, targetStart, targetPersons }) {
+  const loyaltyUsed = !!reservation.loyalty_used;
+
+  return computeSessionCashAmount(targetStart, targetPersons, {
+    loyaltyUsed,
+  });
+}
+
+function computeModificationDelta({ reservation, targetStart, targetPersons }) {
+  const oldAmount = roundMoney(reservation?.montant || 0);
+  const newAmount = roundMoney(
+    computeReservationTargetAmount({
+      reservation,
+      targetStart,
+      targetPersons,
+    })
+  );
+
+  return {
+    oldAmount,
+    newAmount,
+    deltaAmount: roundMoney(newAmount - oldAmount),
   };
 }
 
@@ -717,6 +746,197 @@ async function updateReservationById(reservationId, payload) {
   return data;
 }
 
+function getReservationPaymentIntentCandidates(reservation) {
+  return [
+    reservation?.latest_payment_intent_id,
+    reservation?.payment_intent_id,
+    reservation?.original_payment_intent_id,
+  ].filter(Boolean);
+}
+
+async function attemptStripePartialRefund(
+  paymentIntentId,
+  amountEur,
+  reason = "requested_by_customer"
+) {
+  if (!stripe || !paymentIntentId || !amountEur || amountEur <= 0) {
+    return { success: false, skipped: true };
+  }
+
+  const refund = await stripe.refunds.create({
+    payment_intent: paymentIntentId,
+    amount: Math.round(Number(amountEur) * 100),
+    reason,
+  });
+
+  return { success: true, refund };
+}
+
+async function attemptAutomaticRefundAcrossPaymentIntents(reservation, refundAmountEur) {
+  if (!stripe) throw new Error("Stripe non configuré");
+
+  const candidates = getReservationPaymentIntentCandidates(reservation);
+  if (!candidates.length || refundAmountEur <= 0) {
+    return {
+      success: false,
+      skipped: true,
+      reason: "Aucun payment_intent_id exploitable pour remboursement",
+    };
+  }
+
+  let remaining = Math.round(refundAmountEur * 100);
+  const refunds = [];
+
+  for (const paymentIntentId of candidates) {
+    if (remaining <= 0) break;
+
+    try {
+      const charges = await stripe.charges.list({
+        payment_intent: paymentIntentId,
+        limit: 100,
+      });
+
+      const chargeList = charges?.data || [];
+      const totalCaptured = chargeList.reduce((sum, charge) => {
+        return sum + Number(charge.amount_captured || charge.amount || 0);
+      }, 0);
+
+      const totalRefunded = chargeList.reduce((sum, charge) => {
+        return sum + Number(charge.amount_refunded || 0);
+      }, 0);
+
+      const refundable = Math.max(0, totalCaptured - totalRefunded);
+      if (refundable <= 0) continue;
+
+      const refundNow = Math.min(remaining, refundable);
+
+      if (refundNow > 0) {
+        const refund = await stripe.refunds.create({
+          payment_intent: paymentIntentId,
+          amount: refundNow,
+          reason: "requested_by_customer",
+        });
+
+        refunds.push(refund);
+        remaining -= refundNow;
+      }
+    } catch (e) {
+      console.warn("⚠️ Refund automatique impossible sur PI", paymentIntentId, e.message);
+    }
+  }
+
+  if (remaining > 0) {
+    return {
+      success: false,
+      skipped: false,
+      partial: refunds.length > 0,
+      refundedAmountEur: roundMoney((Math.round(refundAmountEur * 100) - remaining) / 100),
+      reason: "Remboursement partiel ou impossible sur tous les paiements",
+      refunds,
+    };
+  }
+
+  return {
+    success: true,
+    refundedAmountEur: refundAmountEur,
+    refunds,
+  };
+}
+
+async function refundPointsToUser(userId, pointsToRefund) {
+  if (!supabase) throw new Error("Supabase non configuré");
+  if (!pointsToRefund || pointsToRefund <= 0) return;
+
+  const user = await getUserById(userId);
+  const currentPoints = Number(user.points || 0);
+
+  const { error } = await supabase
+    .from("users")
+    .update({
+      points: currentPoints + pointsToRefund,
+      updated_at: new Date().toISOString(),
+    })
+    .eq("id", userId);
+
+  if (error) throw error;
+}
+
+async function attemptAutomaticSavedCardCharge({
+  userId,
+  customer,
+  amountEur,
+  metadata = {},
+}) {
+  if (!stripe) throw new Error("Stripe non configuré");
+  if (!supabase) throw new Error("Supabase non configuré");
+
+  const user = await getUserById(userId);
+  const { customerId } = await ensureStripeCustomer(userId);
+
+  const pmToUse = user.default_payment_method_id;
+  if (!pmToUse) {
+    return {
+      success: false,
+      requiresAdditionalPayment: true,
+      reason: "Aucune carte enregistrée disponible",
+    };
+  }
+
+  try {
+    await stripe.paymentMethods.attach(pmToUse, { customer: customerId });
+  } catch (e) {
+    const msg = String(e?.message || "");
+    if (!msg.toLowerCase().includes("already") && !msg.toLowerCase().includes("attached")) {
+      throw e;
+    }
+  }
+
+  const fullName =
+    (customer?.prenom || "") + (customer?.prenom ? " " : "") + (customer?.nom || "");
+
+  try {
+    const pi = await stripe.paymentIntents.create({
+      amount: Math.round(Number(amountEur) * 100),
+      currency: "eur",
+      customer: customerId,
+      payment_method: pmToUse,
+      payment_method_types: ["card"],
+      confirm: true,
+      off_session: true,
+      metadata: {
+        customer_email: customer?.email || user.email || "",
+        customer_name: fullName,
+        auto_modification_charge: "true",
+        ...metadata,
+      },
+    });
+
+    return {
+      success: true,
+      paymentIntent: pi,
+    };
+  } catch (e) {
+    const code = e?.code || "";
+    const paymentIntent = e?.raw?.payment_intent || null;
+
+    if (
+      code === "authentication_required" ||
+      code === "card_declined" ||
+      paymentIntent?.client_secret
+    ) {
+      return {
+        success: false,
+        requiresAdditionalPayment: true,
+        clientSecret: paymentIntent?.client_secret || null,
+        paymentIntentId: paymentIntent?.id || null,
+        reason: e?.message || "Authentification ou nouvelle carte requise",
+      };
+    }
+
+    throw e;
+  }
+}
+
 // ------------------------------------------------------
 // Envoi d'email avec QR code pour une réservation
 // ------------------------------------------------------
@@ -907,7 +1127,7 @@ async function sendReservationEmail(reservation) {
 }
 
 // ------------------------------------------------------
-// Middleware d'authentification JWT
+// Middleware JWT
 // ------------------------------------------------------
 function authMiddleware(req, res, next) {
   const authHeader = req.headers.authorization;
@@ -1004,7 +1224,7 @@ app.use(bodyParser.json());
 console.log("🌍 CORS + JSON configurés");
 
 // ------------------------------------------------------
-// Vérifier le panier avant paiement
+// Vérifier panier
 // ------------------------------------------------------
 app.post("/api/verify-cart", async (req, res) => {
   try {
@@ -1206,7 +1426,7 @@ app.post("/api/me", authMiddleware, async (req, res) => {
 });
 
 // ------------------------------------------------------
-// SetupIntent / cartes enregistrées
+// Setup intent + cartes enregistrées
 // ------------------------------------------------------
 app.post("/api/create-setup-intent", authMiddleware, async (req, res) => {
   try {
@@ -1459,7 +1679,7 @@ app.get("/api/is-vacances", (req, res) => {
 });
 
 // ------------------------------------------------------
-// CRÉER UN PAYMENT INTENT STRIPE
+// PAYMENT INTENT
 // ------------------------------------------------------
 app.post("/api/create-payment-intent", optionalAuthMiddleware, async (req, res) => {
   try {
@@ -1755,7 +1975,7 @@ app.post("/api/create-deposit-intent", optionalAuthMiddleware, async (req, res) 
 });
 
 // ------------------------------------------------------
-// CONFIRMER LA RÉSERVATION
+// CONFIRM RESERVATION
 // ------------------------------------------------------
 app.post("/api/confirm-reservation", async (req, res) => {
   try {
@@ -1846,6 +2066,8 @@ app.post("/api/confirm-reservation", async (req, res) => {
       date: slot.date,
       end_time: slot.end_time,
       payment_intent_id: paymentIntentId || null,
+      original_payment_intent_id: paymentIntentId || null,
+      latest_payment_intent_id: paymentIntentId || null,
       deposit_payment_intent_id: null,
       deposit_amount_cents: 0,
       deposit_status: null,
@@ -1856,6 +2078,8 @@ app.post("/api/confirm-reservation", async (req, res) => {
       loyalty_used: !!loyaltyUsed,
       points_spent: loyaltyUsed ? LOYALTY_POINTS_COST : 0,
       promo_code: promo?.code || null,
+      refunded_amount: 0,
+      last_auto_charge_amount: 0,
       updated_at: new Date().toISOString(),
     }));
 
@@ -2123,14 +2347,16 @@ app.post("/api/modify-reservation", authMiddleware, async (req, res) => {
     }
 
     const loyaltyUsed = !!reservation.loyalty_used;
-    const oldAmount = getReservationAmountPaid(reservation);
-    const newAmount = computeSessionCashAmount(targetStart, safePersons, {
-      loyaltyUsed,
-    });
-    const deltaAmount = Number((newAmount - oldAmount).toFixed(2));
 
-    let modificationPaymentIntentId = null;
+    const { oldAmount, newAmount, deltaAmount } = computeModificationDelta({
+      reservation,
+      targetStart,
+      targetPersons: safePersons,
+    });
+
+    let autoChargeDone = false;
     let refundDone = false;
+    let newPaymentIntentId = null;
 
     if (deltaAmount > 0) {
       const autoCharge = await attemptAutomaticSavedCardCharge({
@@ -2140,6 +2366,7 @@ app.post("/api/modify-reservation", authMiddleware, async (req, res) => {
         metadata: {
           reservation_id: String(reservation.id),
           modification_delta_amount: String(deltaAmount),
+          modification_type: "increase",
         },
       });
 
@@ -2147,7 +2374,9 @@ app.post("/api/modify-reservation", authMiddleware, async (req, res) => {
         return res.status(409).json({
           success: false,
           requiresAdditionalPayment: true,
-          error: autoCharge.reason || "Paiement complémentaire requis",
+          error:
+            autoCharge.reason ||
+            "Le débit automatique a échoué. Une authentification ou une nouvelle carte est requise.",
           clientSecret: autoCharge.clientSecret || null,
           paymentIntentId: autoCharge.paymentIntentId || null,
           financial: {
@@ -2159,18 +2388,33 @@ app.post("/api/modify-reservation", authMiddleware, async (req, res) => {
         });
       }
 
-      modificationPaymentIntentId = autoCharge.paymentIntent?.id || null;
+      autoChargeDone = true;
+      newPaymentIntentId = autoCharge.paymentIntent?.id || null;
     }
 
     if (deltaAmount < 0) {
       const refundAmount = Math.abs(deltaAmount);
-      const refundResult = await attemptRefundUsingReservationPaymentIntents(reservation, refundAmount);
+
+      const refundResult = await attemptAutomaticRefundAcrossPaymentIntents(
+        reservation,
+        refundAmount
+      );
 
       if (!refundResult.success) {
-        console.warn("⚠️ Remboursement Stripe partiel non effectué :", refundResult.reason || "non disponible");
-      } else {
-        refundDone = true;
+        return res.status(500).json({
+          error:
+            refundResult.reason ||
+            "Impossible d’effectuer automatiquement le remboursement Stripe.",
+          financial: {
+            oldAmount,
+            newAmount,
+            deltaAmount,
+            loyaltyUsed,
+          },
+        });
       }
+
+      refundDone = true;
     }
 
     const updatedReservation = await updateReservationById(reservation.id, {
@@ -2182,13 +2426,23 @@ app.post("/api/modify-reservation", authMiddleware, async (req, res) => {
       persons: safePersons,
       billable_persons: getBillablePersons(safePersons),
       montant: newAmount,
-      payment_intent_id:
-        modificationPaymentIntentId ||
-        reservation.payment_intent_id ||
-        null,
       free_session: newAmount <= 0,
       loyalty_used: loyaltyUsed,
       points_spent: loyaltyUsed ? LOYALTY_POINTS_COST : 0,
+      latest_payment_intent_id:
+        newPaymentIntentId ||
+        reservation.latest_payment_intent_id ||
+        reservation.payment_intent_id ||
+        reservation.original_payment_intent_id ||
+        null,
+      original_payment_intent_id:
+        reservation.original_payment_intent_id ||
+        reservation.payment_intent_id ||
+        null,
+      refunded_amount: roundMoney(
+        Number(reservation.refunded_amount || 0) + (deltaAmount < 0 ? Math.abs(deltaAmount) : 0)
+      ),
+      last_auto_charge_amount: deltaAmount > 0 ? deltaAmount : 0,
       updated_at: new Date().toISOString(),
     });
 
@@ -2196,16 +2450,17 @@ app.post("/api/modify-reservation", authMiddleware, async (req, res) => {
       success: true,
       message:
         deltaAmount > 0
-          ? "Réservation modifiée avec paiement complémentaire validé."
+          ? "Réservation modifiée avec débit automatique du supplément."
           : deltaAmount < 0
-            ? "Réservation modifiée et remboursement déclenché."
-            : "Réservation modifiée avec succès.",
+            ? "Réservation modifiée avec remboursement automatique."
+            : "Réservation modifiée sans supplément ni remboursement.",
       reservation: updatedReservation,
       financial: {
         oldAmount,
         newAmount,
         deltaAmount,
         loyaltyUsed,
+        autoChargeDone,
         refundDone,
       },
     });
@@ -2254,7 +2509,7 @@ app.post("/api/refund-reservation", authMiddleware, async (req, res) => {
     let loyaltyRefundDone = false;
 
     if (cashAmountToRefund > 0) {
-      const refundResult = await attemptRefundUsingReservationPaymentIntents(
+      const refundResult = await attemptAutomaticRefundAcrossPaymentIntents(
         reservation,
         cashAmountToRefund
       );
@@ -2273,6 +2528,9 @@ app.post("/api/refund-reservation", authMiddleware, async (req, res) => {
 
     const updatedReservation = await updateReservationById(reservation.id, {
       status: "cancelled",
+      refunded_amount: roundMoney(
+        Number(reservation.refunded_amount || 0) + cashAmountToRefund
+      ),
       updated_at: new Date().toISOString(),
     });
 
@@ -2299,7 +2557,7 @@ app.post("/api/refund-reservation", authMiddleware, async (req, res) => {
 });
 
 // ------------------------------------------------------
-// CAPTURER LA CAUTION
+// CAPTURE CAUTION
 // ------------------------------------------------------
 app.post("/api/capture-deposit", async (req, res) => {
   try {
@@ -2335,7 +2593,7 @@ app.post("/api/capture-deposit", async (req, res) => {
 });
 
 // ------------------------------------------------------
-// ANNULER / RELÂCHER LA CAUTION
+// ANNULER CAUTION
 // ------------------------------------------------------
 app.post("/api/cancel-deposit", async (req, res) => {
   try {
@@ -2366,7 +2624,7 @@ app.post("/api/cancel-deposit", async (req, res) => {
 });
 
 // ------------------------------------------------------
-// SLOTS : planning
+// SLOTS
 // ------------------------------------------------------
 app.get("/api/slots", async (req, res) => {
   if (!supabase) {
