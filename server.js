@@ -71,8 +71,6 @@ const DEPOSIT_AMOUNT_EUR = 250;
 const SLOT_DURATION_MINUTES = 90;
 const MODIFICATION_DEADLINE_HOURS = 6;
 
-const STANDARD_SLOT_STARTS = [4, 5.5, 7, 8.5, 10, 11.5, 13, 14.5, 16, 17.5, 19, 20.5, 22];
-
 const MIN_ALLOWED_PERSONS = 1;
 const MAX_ALLOWED_PERSONS = 8;
 const MIN_BILLABLE_PERSONS = 2;
@@ -84,6 +82,17 @@ const OFF_PEAK_START_HOUR = 4;
 const OFF_PEAK_END_HOUR = 14;
 const OFF_PEAK_RATE = 7.9;
 const STANDARD_RATE = 9.9;
+
+const CONFIRMED_STATUSES = [
+  "confirmed",
+  "confirmé",
+  "confirmée",
+  "confirme",
+  "confirmee",
+];
+
+// de 00:00 à 22:30 toutes les 1h30
+const STANDARD_SLOT_STARTS = generateStandardSlotStarts();
 
 // ------------------------------------------------------
 // Vacances scolaires (Zone C : Toulouse)
@@ -195,15 +204,48 @@ function hoursBeforeDate(isoValue) {
   return (d.getTime() - Date.now()) / (1000 * 60 * 60);
 }
 
+function normalizeReservationStatus(statusRaw) {
+  return String(statusRaw || "")
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .trim()
+    .toLowerCase();
+}
+
+function isReservationStatusConfirmed(statusRaw) {
+  const s = normalizeReservationStatus(statusRaw);
+  return CONFIRMED_STATUSES.map(normalizeReservationStatus).includes(s);
+}
+
 function isReservationStatusModifiable(statusRaw) {
-  const s = String(statusRaw || "").toLowerCase();
-  return s.includes("confirme") || s === "confirmed";
+  return isReservationStatusConfirmed(statusRaw);
 }
 
 function isWithinModificationWindow(startTimeIso) {
   const diff = hoursBeforeDate(startTimeIso);
   if (diff === null) return false;
   return diff >= MODIFICATION_DEADLINE_HOURS;
+}
+
+function generateStandardSlotStarts() {
+  const slots = [];
+  for (let mins = 0; mins <= 22 * 60 + 30; mins += SLOT_DURATION_MINUTES) {
+    const hour = Math.floor(mins / 60);
+    const minute = mins % 60;
+    slots.push(hour + minute / 60);
+  }
+  return slots;
+}
+
+function areTimeRangesOverlapping(startA, endA, startB, endB) {
+  const aStart = parseDateOrNull(startA);
+  const aEnd = parseDateOrNull(endA);
+  const bStart = parseDateOrNull(startB);
+  const bEnd = parseDateOrNull(endB);
+
+  if (!aStart || !aEnd || !bStart || !bEnd) return false;
+
+  return aStart.getTime() < bEnd.getTime() && aEnd.getTime() > bStart.getTime();
 }
 
 function buildTimesFromSlot(slot) {
@@ -429,7 +471,9 @@ function computeCartPricing(panier, options = {}) {
     const startDate = new Date(times.start_time);
     const rawBox = slot.boxId ?? slot.box_id ?? slot.box ?? slot.boxName ?? 1;
     const numericBoxId = getNumericBoxId(rawBox);
-    const persons = clampPersons(slot.persons || slot.nb_personnes || slot.participants || 2);
+    const persons = clampPersons(
+      slot.persons || slot.nb_personnes || slot.participants || 2
+    );
 
     const theoreticalFullAmount = computeSessionCashAmount(startDate, persons, {
       loyaltyUsed: false,
@@ -681,21 +725,28 @@ async function saveDefaultCardToUsersTable(userId, paymentMethod) {
 // ------------------------------------------------------
 // Helpers conflits / updates
 // ------------------------------------------------------
-async function hasReservationConflict({
+async function getPotentiallyConflictingReservations({
   boxId,
-  startTime,
-  endTime,
+  localDate,
   excludeReservationId = null,
 }) {
   if (!supabase) throw new Error("Supabase non configuré");
 
+  const candidateDates = [];
+  if (localDate) {
+    candidateDates.push(localDate);
+    candidateDates.push(addDaysToDateString(localDate, -1));
+    candidateDates.push(addDaysToDateString(localDate, 1));
+  }
+
   let query = supabase
     .from("reservations")
-    .select("id")
-    .eq("box_id", boxId)
-    .eq("status", "confirmed")
-    .lt("start_time", endTime)
-    .gt("end_time", startTime);
+    .select("id, box_id, start_time, end_time, status, date")
+    .eq("box_id", boxId);
+
+  if (candidateDates.length > 0) {
+    query = query.in("date", [...new Set(candidateDates)]);
+  }
 
   if (excludeReservationId) {
     query = query.neq("id", excludeReservationId);
@@ -705,7 +756,25 @@ async function hasReservationConflict({
 
   if (error) throw error;
 
-  return Array.isArray(data) && data.length > 0;
+  return (data || []).filter((row) => isReservationStatusConfirmed(row.status));
+}
+
+async function hasReservationConflict({
+  boxId,
+  startTime,
+  endTime,
+  localDate = null,
+  excludeReservationId = null,
+}) {
+  const reservations = await getPotentiallyConflictingReservations({
+    boxId,
+    localDate,
+    excludeReservationId,
+  });
+
+  return reservations.some((row) =>
+    areTimeRangesOverlapping(row.start_time, row.end_time, startTime, endTime)
+  );
 }
 
 async function tryUpdateReservationWithFallbacks(reservationId, payloadVariants) {
@@ -762,7 +831,11 @@ async function refundPointsToUser(userId, pointsToRefund) {
   if (error) throw error;
 }
 
-async function attemptStripePartialRefund(paymentIntentId, amountEur, reason = "requested_by_customer") {
+async function attemptStripePartialRefund(
+  paymentIntentId,
+  amountEur,
+  reason = "requested_by_customer"
+) {
   if (!stripe || !paymentIntentId || !amountEur || amountEur <= 0) {
     return { success: false, skipped: true };
   }
@@ -784,7 +857,11 @@ async function attemptRefundUsingReservationPaymentIntents(reservation, amountEu
   ].filter(Boolean);
 
   if (!candidates.length) {
-    return { success: false, skipped: true, reason: "Aucun payment_intent_id disponible" };
+    return {
+      success: false,
+      skipped: true,
+      reason: "Aucun payment_intent_id disponible",
+    };
   }
 
   let lastError = null;
@@ -1118,20 +1195,14 @@ app.post("/api/verify-cart", async (req, res) => {
       const rawBox = slot.boxId ?? slot.box_id ?? slot.box ?? slot.boxName ?? 1;
       const numericBoxId = getNumericBoxId(rawBox);
 
-      const { data: conflicts, error: conflictError } = await supabase
-        .from("reservations")
-        .select("id")
-        .eq("box_id", numericBoxId)
-        .eq("status", "confirmed")
-        .lt("start_time", times.end_time)
-        .gt("end_time", times.start_time);
+      const hasConflict = await hasReservationConflict({
+        boxId: numericBoxId,
+        startTime: times.start_time,
+        endTime: times.end_time,
+        localDate: times.date,
+      });
 
-      if (conflictError) {
-        console.error("Erreur vérification conflits /api/verify-cart :", conflictError);
-        return res.status(500).send("Erreur serveur lors de la vérification des créneaux");
-      }
-
-      if (conflicts && conflicts.length > 0) {
+      if (hasConflict) {
         return res
           .status(409)
           .send(`Le créneau ${times.date} pour la box ${numericBoxId} n'est plus disponible.`);
@@ -1511,6 +1582,7 @@ app.post("/api/reservation-modification-options", authMiddleware, async (req, re
         boxId,
         startTime: startIso,
         endTime: endIso,
+        localDate: reservationDate,
         excludeReservationId: reservation.id,
       });
 
@@ -1535,6 +1607,7 @@ app.post("/api/reservation-modification-options", authMiddleware, async (req, re
       loyaltyUsed,
       currentPersons,
       loyaltyPointsUsed: getReservationLoyaltyPointsUsed(reservation),
+      slotStarts: STANDARD_SLOT_STARTS,
     });
   } catch (e) {
     console.error("Erreur /api/reservation-modification-options :", e);
@@ -1551,7 +1624,14 @@ app.post("/api/modify-reservation", authMiddleware, async (req, res) => {
       return res.status(500).json({ error: "Supabase non configuré" });
     }
 
-    const { reservationId, newStartTime, newEndTime, newPersons, boxId, customer } = req.body || {};
+    const {
+      reservationId,
+      newStartTime,
+      newEndTime,
+      newPersons,
+      boxId,
+      customer,
+    } = req.body || {};
 
     if (!reservationId) {
       return res.status(400).json({ error: "reservationId manquant" });
@@ -1590,11 +1670,13 @@ app.post("/api/modify-reservation", authMiddleware, async (req, res) => {
     }
 
     const targetBoxId = Number(boxId || reservation.box_id || 1);
+    const targetLocalDate = formatDateToYYYYMMDD(targetStart);
 
     const conflict = await hasReservationConflict({
       boxId: targetBoxId,
       startTime: targetStart.toISOString(),
       endTime: targetEnd.toISOString(),
+      localDate: targetLocalDate,
       excludeReservationId: reservation.id,
     });
 
@@ -1653,12 +1735,10 @@ app.post("/api/modify-reservation", authMiddleware, async (req, res) => {
       }
     }
 
-    const newDateStr = formatDateToYYYYMMDD(targetStart);
-
     const richPayload = {
       start_time: targetStart.toISOString(),
       end_time: targetEnd.toISOString(),
-      date: newDateStr,
+      date: targetLocalDate,
       datetime: targetStart.toISOString(),
       box_id: targetBoxId,
       persons: safePersons,
@@ -1668,15 +1748,20 @@ app.post("/api/modify-reservation", authMiddleware, async (req, res) => {
       montant: newAmount,
       total: newAmount,
       total_price: newAmount,
-      latest_payment_intent_id: modificationPaymentIntentId || reservation.latest_payment_intent_id || reservation.payment_intent_id || null,
-      modification_payment_intent_id: modificationPaymentIntentId || reservation.modification_payment_intent_id || null,
+      latest_payment_intent_id:
+        modificationPaymentIntentId ||
+        reservation.latest_payment_intent_id ||
+        reservation.payment_intent_id ||
+        null,
+      modification_payment_intent_id:
+        modificationPaymentIntentId || reservation.modification_payment_intent_id || null,
       updated_at: new Date().toISOString(),
     };
 
     const mediumPayload = {
       start_time: targetStart.toISOString(),
       end_time: targetEnd.toISOString(),
-      date: newDateStr,
+      date: targetLocalDate,
       datetime: targetStart.toISOString(),
       box_id: targetBoxId,
       persons: safePersons,
@@ -1691,7 +1776,7 @@ app.post("/api/modify-reservation", authMiddleware, async (req, res) => {
     const basePayload = {
       start_time: targetStart.toISOString(),
       end_time: targetEnd.toISOString(),
-      date: newDateStr,
+      date: targetLocalDate,
       datetime: targetStart.toISOString(),
       box_id: targetBoxId,
       updated_at: new Date().toISOString(),
@@ -2219,21 +2304,15 @@ app.post("/api/confirm-reservation", async (req, res) => {
     }));
 
     for (const row of rowsBase) {
-      const { data: conflicts, error: conflictError } = await supabase
-        .from("reservations")
-        .select("id")
-        .eq("box_id", row.box_id)
-        .eq("status", "confirmed")
-        .lt("start_time", row.end_time)
-        .gt("end_time", row.start_time);
+      const hasConflict = await hasReservationConflict({
+        boxId: row.box_id,
+        startTime: row.start_time,
+        endTime: row.end_time,
+        localDate: row.date,
+      });
 
-      if (conflictError) {
-        console.error("Erreur vérification conflits :", conflictError);
-        return res.status(500).json({ error: "Erreur serveur (vérification conflit)" });
-      }
-
-      if (conflicts && conflicts.length > 0) {
-        return res.status(400).json({
+      if (hasConflict) {
+        return res.status(409).json({
           error: "Ce créneau est déjà réservé pour la box " + row.box_id + ".",
         });
       }
@@ -2550,25 +2629,35 @@ app.get("/api/slots", async (req, res) => {
   }
 
   try {
-    const dayStartLocal = new Date(`${date}T00:00:00`);
-    const dayEndLocal = new Date(`${date}T23:59:59`);
-
-    const dayStartIso = dayStartLocal.toISOString();
-    const dayEndIso = dayEndLocal.toISOString();
+    const previousDate = addDaysToDateString(date, -1);
 
     const { data, error } = await supabase
       .from("reservations")
-      .select("id, box_id, start_time, end_time, status")
-      .eq("status", "confirmed")
-      .gte("start_time", dayStartIso)
-      .lte("start_time", dayEndIso);
+      .select("id, box_id, start_time, end_time, status, date")
+      .in("date", [date, previousDate]);
 
     if (error) {
       console.error("Erreur /api/slots Supabase :", error);
       return res.status(500).json({ error: "Erreur serveur Supabase" });
     }
 
-    return res.json({ reservations: data || [] });
+    const dayStart = new Date(`${date}T00:00:00+01:00`);
+    const dayEnd = new Date(`${date}T23:59:59+01:00`);
+
+    const reservations = (data || []).filter((row) => {
+      if (!isReservationStatusConfirmed(row.status)) return false;
+
+      const start = parseDateOrNull(row.start_time);
+      const end = parseDateOrNull(row.end_time);
+      if (!start || !end) return false;
+
+      return start.getTime() <= dayEnd.getTime() && end.getTime() > dayStart.getTime();
+    });
+
+    return res.json({
+      reservations,
+      slotStarts: STANDARD_SLOT_STARTS,
+    });
   } catch (e) {
     console.error("Erreur /api/slots :", e);
     return res.status(500).json({ error: "Erreur serveur" });
@@ -2621,7 +2710,7 @@ app.get("/api/check", async (req, res) => {
     } else if (now > lastEntryTime) {
       access = false;
       reason = "Créneau terminé, accès refusé.";
-    } else if (data.status !== "confirmed") {
+    } else if (!isReservationStatusConfirmed(data.status)) {
       access = false;
       reason = `Statut invalide : ${data.status}`;
     } else {
