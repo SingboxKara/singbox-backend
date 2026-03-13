@@ -80,6 +80,12 @@ const DEPOSIT_AMOUNT_EUR = 250;
 // Durée d’un créneau en minutes (1h30)
 const SLOT_DURATION_MINUTES = 90;
 
+// Fenêtre de modification
+const MODIFICATION_DEADLINE_HOURS = 6;
+
+// Créneaux standards Singbox (1h30)
+const STANDARD_SLOT_STARTS = [4, 5.5, 7, 8.5, 10, 11.5, 13, 14.5, 16, 17.5, 19, 20.5, 22];
+
 // ------------------------------------------------------
 // Vacances scolaires (Zone C : Toulouse) - à ajuster chaque année
 // ------------------------------------------------------
@@ -299,6 +305,258 @@ function buildTimesFromSlot(slot) {
 }
 
 // ------------------------------------------------------
+// Helpers modification de réservation
+// ------------------------------------------------------
+function getUserEmailOrThrow(user) {
+  const email = String(user?.email || "").trim();
+  if (!email) {
+    throw new Error("Email utilisateur introuvable");
+  }
+  return email;
+}
+
+async function getAuthenticatedUserById(userId) {
+  if (!supabase) throw new Error("Supabase non configuré");
+
+  const { data, error } = await supabase
+    .from("users")
+    .select("id,email")
+    .eq("id", userId)
+    .single();
+
+  if (error || !data) {
+    throw new Error("Utilisateur introuvable");
+  }
+
+  return data;
+}
+
+async function getReservationOwnedByUser(reservationId, userId) {
+  if (!supabase) throw new Error("Supabase non configuré");
+
+  const user = await getAuthenticatedUserById(userId);
+  const email = getUserEmailOrThrow(user);
+
+  const { data, error } = await supabase
+    .from("reservations")
+    .select("*")
+    .eq("id", reservationId)
+    .eq("email", email)
+    .single();
+
+  if (error || !data) {
+    return null;
+  }
+
+  return data;
+}
+
+function parseDateOrNull(value) {
+  if (!value) return null;
+  const d = new Date(value);
+  return Number.isNaN(d.getTime()) ? null : d;
+}
+
+function hoursBeforeDate(isoValue) {
+  const d = parseDateOrNull(isoValue);
+  if (!d) return null;
+  return (d.getTime() - Date.now()) / (1000 * 60 * 60);
+}
+
+function isReservationStatusModifiable(statusRaw) {
+  const s = String(statusRaw || "").toLowerCase();
+  return s.includes("confirme") || s === "confirmed";
+}
+
+function isWithinModificationWindow(startTimeIso) {
+  const diff = hoursBeforeDate(startTimeIso);
+  if (diff === null) return false;
+  return diff >= MODIFICATION_DEADLINE_HOURS;
+}
+
+function getReservationPersons(reservation) {
+  const candidates = [
+    reservation?.persons,
+    reservation?.nb_personnes,
+    reservation?.participants,
+    reservation?.people_count,
+  ];
+
+  for (const candidate of candidates) {
+    const n = Number(candidate);
+    if (Number.isFinite(n) && n >= 1 && n <= 8) {
+      return n;
+    }
+  }
+
+  return 2;
+}
+
+function getReservationAmountPaid(reservation) {
+  const candidates = [
+    reservation?.montant,
+    reservation?.total,
+    reservation?.total_price,
+    reservation?.amount_paid,
+    reservation?.amountPaid,
+    reservation?.paid_amount,
+  ];
+
+  for (const candidate of candidates) {
+    const n = Number(candidate);
+    if (Number.isFinite(n)) {
+      return n;
+    }
+  }
+
+  return 0;
+}
+
+function isReservationFreeLike(reservation) {
+  const explicitFlags = [
+    reservation?.paid_with_loyalty,
+    reservation?.used_loyalty_reward,
+    reservation?.loyalty_reward_used,
+    reservation?.free_session,
+    reservation?.is_free_session,
+    reservation?.used_points,
+    reservation?.offered_by_loyalty,
+  ];
+
+  if (explicitFlags.some(Boolean)) {
+    return true;
+  }
+
+  const paymentMode = String(
+    reservation?.payment_mode ||
+    reservation?.paymentMode ||
+    reservation?.payment_type ||
+    ""
+  ).toLowerCase();
+
+  if (
+    paymentMode.includes("fidel") ||
+    paymentMode.includes("loyalty") ||
+    paymentMode.includes("reward") ||
+    paymentMode.includes("gratuit") ||
+    paymentMode.includes("offert") ||
+    paymentMode.includes("points")
+  ) {
+    return true;
+  }
+
+  return getReservationAmountPaid(reservation) <= 0;
+}
+
+function getPerPersonRateForDate(dateObj) {
+  const hour = dateObj.getHours();
+  const day = dateObj.getDay();
+  const weekend = day === 0 || day === 6;
+
+  if (weekend) {
+    return STANDARD_RATE;
+  }
+
+  if (hour >= OFF_PEAK_START_HOUR && hour < OFF_PEAK_END_HOUR) {
+    return OFF_PEAK_RATE;
+  }
+
+  return STANDARD_RATE;
+}
+
+function getBillablePersonsForModification(persons) {
+  const n = Number(persons);
+  if (!Number.isFinite(n)) return MIN_BILLABLE_PERSONS;
+  return Math.max(n, MIN_BILLABLE_PERSONS);
+}
+
+function computeReservationTheoreticalAmount(startDate, persons, reservation = null) {
+  if (reservation && isReservationFreeLike(reservation)) {
+    return 0;
+  }
+
+  const rate = getPerPersonRateForDate(startDate);
+  const billable = getBillablePersonsForModification(persons);
+  return Number((rate * billable).toFixed(2));
+}
+
+function formatDateToYYYYMMDD(dateObj) {
+  const y = dateObj.getFullYear();
+  const m = String(dateObj.getMonth() + 1).padStart(2, "0");
+  const d = String(dateObj.getDate()).padStart(2, "0");
+  return `${y}-${m}-${d}`;
+}
+
+function buildSlotIsoRange(dateStr, slotHourFloat) {
+  const hourNum = Math.floor(slotHourFloat);
+  const minuteNum = Math.round((slotHourFloat - hourNum) * 60);
+
+  const OFFSET = "+01:00";
+  const hh = String(hourNum).padStart(2, "0");
+  const mm = String(minuteNum).padStart(2, "0");
+
+  const startIso = `${dateStr}T${hh}:${mm}:00${OFFSET}`;
+
+  const startDate = new Date(startIso);
+  const endDate = new Date(startDate.getTime() + SLOT_DURATION_MINUTES * 60 * 1000);
+
+  const endY = endDate.getFullYear();
+  const endM = String(endDate.getMonth() + 1).padStart(2, "0");
+  const endD = String(endDate.getDate()).padStart(2, "0");
+  const endH = String(endDate.getHours()).padStart(2, "0");
+  const endMin = String(endDate.getMinutes()).padStart(2, "0");
+
+  const endIso = `${endY}-${endM}-${endD}T${endH}:${endMin}:00${OFFSET}`;
+
+  return { startIso, endIso };
+}
+
+async function hasReservationConflict({ boxId, startTime, endTime, excludeReservationId = null }) {
+  if (!supabase) throw new Error("Supabase non configuré");
+
+  let query = supabase
+    .from("reservations")
+    .select("id")
+    .eq("box_id", boxId)
+    .lt("start_time", endTime)
+    .gt("end_time", startTime);
+
+  if (excludeReservationId) {
+    query = query.neq("id", excludeReservationId);
+  }
+
+  const { data, error } = await query;
+
+  if (error) {
+    throw error;
+  }
+
+  return Array.isArray(data) && data.length > 0;
+}
+
+async function tryUpdateReservationWithFallbacks(reservationId, payloadVariants) {
+  let lastError = null;
+
+  for (const payload of payloadVariants) {
+    const { data, error } = await supabase
+      .from("reservations")
+      .update(payload)
+      .eq("id", reservationId)
+      .select()
+      .single();
+
+    if (!error) {
+      return data;
+    }
+
+    lastError = error;
+    console.warn("⚠️ Fallback update reservations :", error.message);
+  }
+
+  throw lastError || new Error("Impossible de mettre à jour la réservation");
+}
+
+// ------------------------------------------------------
 // Envoi d'email avec QR code pour une réservation (via Resend)
 // ------------------------------------------------------
 async function sendReservationEmail(reservation) {
@@ -346,7 +604,6 @@ async function sendReservationEmail(reservation) {
 
     const subject = `Confirmation de votre réservation Singbox - Box ${reservation.box_id}`;
 
-    // ✅ HTML refait pour coller à ta capture (structure + sections + style)
     const htmlBody = `
       <div style="margin:0;padding:22px 0;background:#050814;">
         <div style="max-width:720px;margin:0 auto;background:#020617;border-radius:18px;border:1px solid rgba(148,163,184,0.35);box-shadow:0 18px 45px rgba(0,0,0,0.85);overflow:hidden;">
@@ -374,7 +631,6 @@ async function sendReservationEmail(reservation) {
               </div>
             </div>
 
-            <!-- Bloc Box + Horaires -->
             <div style="margin-top:16px;padding:14px 14px 12px 14px;border-radius:14px;background:rgba(15,23,42,0.75);border:1px solid rgba(148,163,184,0.38);">
               <table width="100%" cellpadding="0" cellspacing="0" role="presentation" style="border-collapse:collapse;">
                 <tr>
@@ -391,7 +647,6 @@ async function sendReservationEmail(reservation) {
               </div>
             </div>
 
-            <!-- QR -->
             <div style="margin-top:12px;padding:12px 14px;border-radius:14px;background:rgba(15,23,42,0.55);border:1px solid rgba(148,163,184,0.30);">
               <div style="font-size:12.5px;color:#E5E7EB;font-weight:700;">
                 Votre QR code est en pièce jointe (fichier <span style="font-weight:900;">qr-reservation.png</span>).
@@ -401,7 +656,6 @@ async function sendReservationEmail(reservation) {
               </div>
             </div>
 
-            <!-- Empreinte -->
             <div style="margin-top:12px;padding:14px 14px 12px 14px;border-radius:14px;background:rgba(8,12,22,0.65);border:1px solid rgba(248,113,113,0.45);">
               <div style="font-size:12.5px;font-weight:900;letter-spacing:0.08em;text-transform:uppercase;color:#FCA5A5;">
                 EMPREINTE BANCAIRE DE ${DEPOSIT_AMOUNT_EUR} €
@@ -421,7 +675,6 @@ async function sendReservationEmail(reservation) {
               </div>
             </div>
 
-            <!-- Conditions d'annulation -->
             <div style="margin-top:16px;">
               <div style="font-size:12.5px;font-weight:900;letter-spacing:0.08em;text-transform:uppercase;color:#E5E7EB;">
                 CONDITIONS D’ANNULATION
@@ -433,7 +686,6 @@ async function sendReservationEmail(reservation) {
               </ul>
             </div>
 
-            <!-- Règlement intérieur -->
             <div style="margin-top:14px;">
               <div style="font-size:12.5px;font-weight:900;letter-spacing:0.08em;text-transform:uppercase;color:#E5E7EB;">
                 RÈGLEMENT INTÉRIEUR SINGBOX
@@ -452,7 +704,6 @@ async function sendReservationEmail(reservation) {
               </div>
             </div>
 
-            <!-- Infos pratiques -->
             <div style="margin-top:14px;">
               <div style="font-size:12.5px;font-weight:900;letter-spacing:0.08em;text-transform:uppercase;color:#E5E7EB;">
                 INFOS PRATIQUES
@@ -943,7 +1194,6 @@ app.post("/api/set-default-payment-method", authMiddleware, async (req, res) => 
 
     const { customerId } = await ensureStripeCustomer(req.userId);
 
-    // Attache la carte au customer (si pas déjà attachée)
     try {
       await stripe.paymentMethods.attach(paymentMethodId, { customer: customerId });
     } catch (e) {
@@ -953,12 +1203,10 @@ app.post("/api/set-default-payment-method", authMiddleware, async (req, res) => 
       }
     }
 
-    // Set défaut côté Stripe
     await stripe.customers.update(customerId, {
       invoice_settings: { default_payment_method: paymentMethodId },
     });
 
-    // Récupère la carte pour stocker brand/last4/exp dans Supabase
     const pm = await stripe.paymentMethods.retrieve(paymentMethodId);
 
     await saveDefaultCardToUsersTable(req.userId, pm);
@@ -1007,6 +1255,269 @@ app.get("/api/my-reservations", authMiddleware, async (req, res) => {
   } catch (e) {
     console.error("Erreur /api/my-reservations :", e);
     return res.status(500).json({ error: "Erreur serveur" });
+  }
+});
+
+// ------------------------------------------------------
+// Détail d'une réservation du compte
+// ------------------------------------------------------
+app.get("/api/my-reservations/:id", authMiddleware, async (req, res) => {
+  try {
+    if (!supabase) {
+      return res.status(500).json({ error: "Supabase non configuré" });
+    }
+
+    const reservationId = req.params.id;
+    const reservation = await getReservationOwnedByUser(reservationId, req.userId);
+
+    if (!reservation) {
+      return res.status(404).json({ error: "Réservation introuvable" });
+    }
+
+    return res.json({ reservation });
+  } catch (e) {
+    console.error("Erreur /api/my-reservations/:id :", e);
+    return res.status(500).json({ error: "Erreur serveur" });
+  }
+});
+
+// ------------------------------------------------------
+// Options de modification de réservation
+// Même box, même date, créneaux alternatifs réels
+// ------------------------------------------------------
+app.post("/api/reservation-modification-options", authMiddleware, async (req, res) => {
+  try {
+    if (!supabase) {
+      return res.status(500).json({ error: "Supabase non configuré" });
+    }
+
+    const { reservationId } = req.body || {};
+
+    if (!reservationId) {
+      return res.status(400).json({ error: "reservationId manquant" });
+    }
+
+    const reservation = await getReservationOwnedByUser(reservationId, req.userId);
+    if (!reservation) {
+      return res.status(404).json({ error: "Réservation introuvable" });
+    }
+
+    if (!isReservationStatusModifiable(reservation.status)) {
+      return res.status(400).json({ error: "Statut de réservation non modifiable" });
+    }
+
+    if (!isWithinModificationWindow(reservation.start_time)) {
+      return res.status(400).json({
+        error: `Modification impossible à moins de ${MODIFICATION_DEADLINE_HOURS}h avant la séance`,
+      });
+    }
+
+    const currentStart = parseDateOrNull(reservation.start_time);
+    if (!currentStart) {
+      return res.status(400).json({ error: "Date de réservation invalide" });
+    }
+
+    const reservationDate = reservation.date || formatDateToYYYYMMDD(currentStart);
+    const boxId = reservation.box_id;
+    const currentPersons = getReservationPersons(reservation);
+
+    const options = [];
+
+    for (const slotHour of STANDARD_SLOT_STARTS) {
+      const { startIso, endIso } = buildSlotIsoRange(reservationDate, slotHour);
+      const startDate = new Date(startIso);
+
+      if (Math.abs(startDate.getTime() - currentStart.getTime()) < 60 * 1000) {
+        continue;
+      }
+
+      if (!isWithinModificationWindow(startIso)) {
+        continue;
+      }
+
+      const conflict = await hasReservationConflict({
+        boxId,
+        startTime: startIso,
+        endTime: endIso,
+        excludeReservationId: reservation.id,
+      });
+
+      if (conflict) {
+        continue;
+      }
+
+      options.push({
+        startTime: startIso,
+        endTime: endIso,
+        boxId,
+        boxName: `Box ${boxId}`,
+        estimatedAmount: computeReservationTheoreticalAmount(startDate, currentPersons, reservation),
+      });
+    }
+
+    return res.json({
+      reservationId: reservation.id,
+      options,
+      freeLike: isReservationFreeLike(reservation),
+      currentPersons,
+    });
+  } catch (e) {
+    console.error("Erreur /api/reservation-modification-options :", e);
+    return res.status(500).json({ error: "Erreur serveur" });
+  }
+});
+
+// ------------------------------------------------------
+// Modifier une réservation
+// - vérifie propriété
+// - vérifie délai 6h
+// - vérifie conflit réel
+// - bloque si complément nécessaire (sauf réservation gratuite/fidélité)
+// ------------------------------------------------------
+app.post("/api/modify-reservation", authMiddleware, async (req, res) => {
+  try {
+    if (!supabase) {
+      return res.status(500).json({ error: "Supabase non configuré" });
+    }
+
+    const {
+      reservationId,
+      newStartTime,
+      newEndTime,
+      newPersons,
+      boxId,
+    } = req.body || {};
+
+    if (!reservationId) {
+      return res.status(400).json({ error: "reservationId manquant" });
+    }
+
+    const reservation = await getReservationOwnedByUser(reservationId, req.userId);
+    if (!reservation) {
+      return res.status(404).json({ error: "Réservation introuvable" });
+    }
+
+    if (!isReservationStatusModifiable(reservation.status)) {
+      return res.status(400).json({ error: "Statut de réservation non modifiable" });
+    }
+
+    if (!isWithinModificationWindow(reservation.start_time)) {
+      return res.status(400).json({
+        error: `Modification impossible à moins de ${MODIFICATION_DEADLINE_HOURS}h avant la séance`,
+      });
+    }
+
+    const oldStart = parseDateOrNull(reservation.start_time);
+    const oldEnd =
+      parseDateOrNull(reservation.end_time) ||
+      new Date(oldStart.getTime() + SLOT_DURATION_MINUTES * 60 * 1000);
+
+    const safePersons = Math.max(
+      1,
+      Math.min(8, Number(newPersons || getReservationPersons(reservation)))
+    );
+
+    const targetStart = parseDateOrNull(newStartTime || reservation.start_time);
+    const targetEnd =
+      parseDateOrNull(newEndTime) ||
+      new Date(targetStart.getTime() + SLOT_DURATION_MINUTES * 60 * 1000);
+
+    if (!targetStart || !targetEnd) {
+      return res.status(400).json({ error: "Nouveau créneau invalide" });
+    }
+
+    if (!isWithinModificationWindow(targetStart.toISOString())) {
+      return res.status(400).json({
+        error: `Le nouveau créneau doit aussi être à plus de ${MODIFICATION_DEADLINE_HOURS}h de l'heure actuelle`,
+      });
+    }
+
+    const targetBoxId = Number(boxId || reservation.box_id || 1);
+    const conflict = await hasReservationConflict({
+      boxId: targetBoxId,
+      startTime: targetStart.toISOString(),
+      endTime: targetEnd.toISOString(),
+      excludeReservationId: reservation.id,
+    });
+
+    if (conflict) {
+      return res.status(409).json({ error: "Le nouveau créneau n’est plus disponible" });
+    }
+
+    const oldAmount = getReservationAmountPaid(reservation);
+    const freeLike = isReservationFreeLike(reservation);
+    const newAmount = computeReservationTheoreticalAmount(targetStart, safePersons, reservation);
+    const deltaAmount = freeLike ? 0 : Number((newAmount - oldAmount).toFixed(2));
+
+    if (!freeLike && deltaAmount > 0) {
+      return res.status(409).json({
+        success: false,
+        requiresAdditionalPayment: true,
+        error:
+          "Cette modification augmente le montant de la réservation. Le paiement complémentaire n'est pas encore branché côté backend.",
+        financial: {
+          oldAmount,
+          newAmount,
+          deltaAmount,
+          freeLike: false,
+        },
+      });
+    }
+
+    const newDateStr = formatDateToYYYYMMDD(targetStart);
+
+    const richPayload = {
+      start_time: targetStart.toISOString(),
+      end_time: targetEnd.toISOString(),
+      date: newDateStr,
+      datetime: targetStart.toISOString(),
+      box_id: targetBoxId,
+      persons: safePersons,
+      nb_personnes: safePersons,
+      participants: safePersons,
+      montant: newAmount,
+      total: newAmount,
+      total_price: newAmount,
+      updated_at: new Date().toISOString(),
+    };
+
+    const mediumPayload = {
+      start_time: targetStart.toISOString(),
+      end_time: targetEnd.toISOString(),
+      date: newDateStr,
+      datetime: targetStart.toISOString(),
+      box_id: targetBoxId,
+      persons: safePersons,
+    };
+
+    const basePayload = {
+      start_time: targetStart.toISOString(),
+      end_time: targetEnd.toISOString(),
+      date: newDateStr,
+      datetime: targetStart.toISOString(),
+      box_id: targetBoxId,
+    };
+
+    const updatedReservation = await tryUpdateReservationWithFallbacks(reservation.id, [
+      richPayload,
+      mediumPayload,
+      basePayload,
+    ]);
+
+    return res.json({
+      success: true,
+      message: "Réservation modifiée avec succès",
+      reservation: updatedReservation,
+      financial: {
+        oldAmount,
+        newAmount,
+        deltaAmount,
+        freeLike,
+      },
+    });
+  } catch (e) {
+    console.error("Erreur /api/modify-reservation :", e);
+    return res.status(500).json({ error: "Erreur serveur lors de la modification" });
   }
 });
 
@@ -1117,8 +1628,6 @@ app.get("/api/is-vacances", (req, res) => {
 
 // ------------------------------------------------------
 // 1) CRÉER UN PAYMENT INTENT STRIPE (paiement de la session)
-//  - FIX IMPORTANT: on force "card" pour éviter le besoin de return_url (redirect methods)
-//  - FIX IMPORTANT: en mode carte enregistrée => PAS de confirm côté backend (sinon double-confirm = 400)
 // ------------------------------------------------------
 app.post("/api/create-payment-intent", optionalAuthMiddleware, async (req, res) => {
   try {
@@ -1133,8 +1642,6 @@ app.post("/api/create-payment-intent", optionalAuthMiddleware, async (req, res) 
       promoCode,
       finalAmountCents,
       loyaltyUsed,
-
-      // NEW (ne casse rien si absent)
       useSavedPaymentMethod,
       paymentMethodId,
     } = req.body || {};
@@ -1199,10 +1706,6 @@ app.post("/api/create-payment-intent", optionalAuthMiddleware, async (req, res) 
 
     const amountInCents = Math.round(totalAmountEur * 100);
 
-    // ==========================
-    // Paiement “1-clic” avec carte enregistrée
-    // ✅ FIX: on crée le PI avec customer + pm, mais on NE confirme PAS ici.
-    // ==========================
     if (useSavedPaymentMethod) {
       if (!req.userId) {
         return res.status(401).json({ error: "Connexion requise pour payer avec carte enregistrée" });
@@ -1219,7 +1722,6 @@ app.post("/api/create-payment-intent", optionalAuthMiddleware, async (req, res) 
         return res.status(400).json({ error: "Aucune carte enregistrée disponible" });
       }
 
-      // Attache au customer (safe)
       try {
         await stripe.paymentMethods.attach(pmToUse, { customer: customerId });
       } catch (e) {
@@ -1271,9 +1773,6 @@ app.post("/api/create-payment-intent", optionalAuthMiddleware, async (req, res) 
       }
     }
 
-    // ==========================
-    // Flow normal (forcer card pour éviter return_url)
-    // ==========================
     const paymentIntent = await stripe.paymentIntents.create({
       amount: amountInCents,
       currency: "eur",
@@ -1309,8 +1808,6 @@ app.post("/api/create-payment-intent", optionalAuthMiddleware, async (req, res) 
 
 // ------------------------------------------------------
 // 1bis) CRÉER UNE EMPREINTE DE CAUTION (250€)
-//  - FIX IMPORTANT: on force "card" aussi (sinon return_url possible)
-//  - FIX IMPORTANT: en mode carte enregistrée => PAS de confirm côté backend (sinon double-confirm = 400)
 // ------------------------------------------------------
 app.post("/api/create-deposit-intent", optionalAuthMiddleware, async (req, res) => {
   try {
@@ -1323,7 +1820,6 @@ app.post("/api/create-deposit-intent", optionalAuthMiddleware, async (req, res) 
     const fullName =
       (customer?.prenom || "") + (customer?.prenom ? " " : "") + (customer?.nom || "");
 
-    // MODE CARTE ENREGISTRÉE (1-clic)
     if (useSavedPaymentMethod) {
       if (!req.userId) {
         return res.status(401).json({ error: "Connexion requise pour la caution avec carte enregistrée" });
@@ -1340,7 +1836,6 @@ app.post("/api/create-deposit-intent", optionalAuthMiddleware, async (req, res) 
         return res.status(400).json({ error: "Aucune carte enregistrée disponible pour la caution" });
       }
 
-      // Attache au customer (safe)
       try {
         await stripe.paymentMethods.attach(pmToUse, { customer: customerId });
       } catch (e) {
@@ -1350,7 +1845,6 @@ app.post("/api/create-deposit-intent", optionalAuthMiddleware, async (req, res) 
         }
       }
 
-      // ✅ IMPORTANT: PAS de confirm ici
       const pi = await stripe.paymentIntents.create({
         amount: amountInCents,
         currency: "eur",
@@ -1389,7 +1883,6 @@ app.post("/api/create-deposit-intent", optionalAuthMiddleware, async (req, res) 
       });
     }
 
-    // MODE NORMAL (forcer card)
     const paymentIntent = await stripe.paymentIntents.create({
       amount: amountInCents,
       currency: "eur",
@@ -1466,7 +1959,6 @@ app.post("/api/confirm-reservation", async (req, res) => {
       return res.json({ status: "ok (sans enregistrement Supabase)" });
     }
 
-    // Récupère userId si token présent
     let userIdFromToken = null;
     try {
       const authHeader = req.headers.authorization;
@@ -1479,7 +1971,6 @@ app.post("/api/confirm-reservation", async (req, res) => {
       console.warn("⚠️ Token invalide sur /api/confirm-reservation :", e.message);
     }
 
-    // Update du profil (table users) si connecté
     try {
       if (userIdFromToken && customer) {
         await updateUserProfileInUsersTable(userIdFromToken, customer);
@@ -1515,6 +2006,12 @@ app.post("/api/confirm-reservation", async (req, res) => {
       let numericBoxId = parseInt(String(rawBox).replace(/[^0-9]/g, ""), 10);
       if (!Number.isFinite(numericBoxId)) numericBoxId = 1;
 
+      const personsValue = Number(slot.persons || slot.nb_personnes || 2);
+      const priceValue =
+        typeof slot.price === "number" && !Number.isNaN(slot.price)
+          ? slot.price
+          : PRICE_PER_SLOT_EUR;
+
       return {
         name: fullName || null,
         email: customer?.email || null,
@@ -1524,10 +2021,25 @@ app.post("/api/confirm-reservation", async (req, res) => {
         date: times.date,
         datetime: times.datetime,
         status: "confirmed",
+
+        // champs ajoutés sans casser le reste
+        persons: personsValue,
+        nb_personnes: personsValue,
+        participants: personsValue,
+
+        montant: isFreeReservationFlag ? 0 : priceValue,
+        total: isFreeReservationFlag ? 0 : priceValue,
+        total_price: isFreeReservationFlag ? 0 : priceValue,
+
+        paid_with_loyalty: !!loyaltyUsed,
+        used_loyalty_reward: !!loyaltyUsed,
+        loyalty_reward_used: !!loyaltyUsed,
+        free_session: !!isFreeReservationFlag,
+        is_free_session: !!isFreeReservationFlag,
+        payment_mode: loyaltyUsed ? "loyalty" : (isFree ? "free" : "paid"),
       };
     });
 
-    // conflits
     for (const row of rows) {
       const { data: conflicts, error: conflictError } = await supabase
         .from("reservations")
@@ -1555,14 +2067,12 @@ app.post("/api/confirm-reservation", async (req, res) => {
       return res.status(500).json({ error: "Erreur en enregistrant la réservation" });
     }
 
-    // envoi emails
     try {
       await Promise.allSettled(data.map((row) => sendReservationEmail(row)));
     } catch (mailErr) {
       console.error("Erreur globale envoi mails :", mailErr);
     }
 
-    // points fidélité
     try {
       const isFreeReservationFinal = isFreeReservationFlag || (promo && promo.type === "free");
 
@@ -1582,7 +2092,6 @@ app.post("/api/confirm-reservation", async (req, res) => {
       console.error("Erreur lors de l'ajout automatique des points :", pointsErr);
     }
 
-    // promo usage
     try {
       if (promo && discountAmount > 0) {
         const totalAfterDiscount = Math.max(0, totalBeforeDiscount - discountAmount);
