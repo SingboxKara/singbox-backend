@@ -96,7 +96,6 @@ const CONFIRMED_STATUSES = [
 ];
 
 const STANDARD_SLOT_STARTS = generateStandardSlotStarts();
-const reservationsUnknownColumnsCache = new Set();
 
 // ------------------------------------------------------
 // Vacances scolaires (Zone C : Toulouse)
@@ -347,182 +346,30 @@ function buildSlotIsoRange(dateStr, slotHourFloat) {
   return { startIso, endIso };
 }
 
-function getUnknownColumnFromSupabaseError(error) {
-  const msg = String(error?.message || "");
-  const match = msg.match(/Could not find the '([^']+)' column/i);
-  return match?.[1] || null;
-}
-
-function sanitizeReservationPayload(payload) {
-  const cleaned = {};
-
-  for (const [key, value] of Object.entries(payload || {})) {
-    if (value === undefined) continue;
-    if (reservationsUnknownColumnsCache.has(key)) continue;
-    cleaned[key] = value;
-  }
-
-  return cleaned;
-}
-
-async function executeReservationUpdateResilient(reservationId, payload) {
-  if (!supabase) throw new Error("Supabase non configuré");
-
-  let workingPayload = sanitizeReservationPayload(payload);
-
-  while (true) {
-    const keys = Object.keys(workingPayload);
-    if (keys.length === 0) {
-      return { data: null, skipped: true };
-    }
-
-    const { data, error } = await supabase
-      .from("reservations")
-      .update(workingPayload)
-      .eq("id", reservationId)
-      .select()
-      .single();
-
-    if (!error) {
-      return { data, skipped: false };
-    }
-
-    const unknownColumn = getUnknownColumnFromSupabaseError(error);
-    if (!unknownColumn) {
-      throw error;
-    }
-
-    reservationsUnknownColumnsCache.add(unknownColumn);
-    delete workingPayload[unknownColumn];
-    console.warn(`⚠️ Colonne absente ignorée automatiquement sur reservations : ${unknownColumn}`);
-  }
-}
-
-async function executeReservationInsertResilient(row) {
-  if (!supabase) throw new Error("Supabase non configuré");
-
-  let workingRow = sanitizeReservationPayload(row);
-
-  while (true) {
-    const keys = Object.keys(workingRow);
-    if (keys.length === 0) {
-      throw new Error("Insert réservation impossible : plus aucune colonne valide");
-    }
-
-    const { data, error } = await supabase
-      .from("reservations")
-      .insert(workingRow)
-      .select()
-      .single();
-
-    if (!error) {
-      return data;
-    }
-
-    const unknownColumn = getUnknownColumnFromSupabaseError(error);
-    if (!unknownColumn) {
-      throw error;
-    }
-
-    reservationsUnknownColumnsCache.add(unknownColumn);
-    delete workingRow[unknownColumn];
-    console.warn(`⚠️ Colonne absente ignorée automatiquement sur insert reservations : ${unknownColumn}`);
-  }
-}
-
-async function executeReservationInsertManyBaseRows(rows) {
-  const inserted = [];
-  for (const row of rows) {
-    const data = await executeReservationInsertResilient(row);
-    inserted.push(data);
-  }
-  return inserted;
-}
-
 // ------------------------------------------------------
 // Helpers fidélité / pricing
 // ------------------------------------------------------
 function isReservationPaidWithLoyalty(reservation) {
-  const explicitFlags = [
-    reservation?.paid_with_loyalty,
-    reservation?.used_loyalty_reward,
-    reservation?.loyalty_reward_used,
-    reservation?.used_points,
-    reservation?.offered_by_loyalty,
-  ];
-
-  if (explicitFlags.some(Boolean)) return true;
-
-  const paymentMode = String(
-    reservation?.payment_mode ||
-      reservation?.paymentMode ||
-      reservation?.payment_type ||
-      ""
-  ).toLowerCase();
-
-  return (
-    paymentMode.includes("fidel") ||
-    paymentMode.includes("loyalty") ||
-    paymentMode.includes("reward") ||
-    paymentMode.includes("points")
-  );
+  return !!reservation?.loyalty_used;
 }
 
 function getReservationLoyaltyPointsUsed(reservation) {
-  const candidates = [
-    reservation?.loyalty_points_used,
-    reservation?.points_used,
-    reservation?.used_points_count,
-  ];
-
-  for (const candidate of candidates) {
-    const n = Number(candidate);
-    if (Number.isFinite(n) && n > 0) return n;
-  }
-
+  const n = Number(reservation?.points_spent);
+  if (Number.isFinite(n) && n > 0) return n;
   return isReservationPaidWithLoyalty(reservation) ? LOYALTY_POINTS_COST : 0;
 }
 
 function getReservationPersons(reservation) {
-  const candidates = [
-    reservation?.persons,
-    reservation?.nb_personnes,
-    reservation?.participants,
-    reservation?.people_count,
-    reservation?.person_count,
-    reservation?.persons_count,
-    reservation?.guests,
-  ];
-
-  for (const candidate of candidates) {
-    const n = Number(candidate);
-    if (Number.isFinite(n) && n >= 1 && n <= 8) {
-      return n;
-    }
+  const n = Number(reservation?.persons);
+  if (Number.isFinite(n) && n >= 1 && n <= 8) {
+    return n;
   }
-
   return 2;
 }
 
 function getReservationAmountPaid(reservation) {
-  const candidates = [
-    reservation?.amount_paid,
-    reservation?.montant,
-    reservation?.total,
-    reservation?.total_price,
-    reservation?.amountPaid,
-    reservation?.paid_amount,
-    reservation?.amount,
-    reservation?.price,
-  ];
-
-  for (const candidate of candidates) {
-    const n = Number(candidate);
-    if (Number.isFinite(n)) {
-      return n;
-    }
-  }
-
+  const n = Number(reservation?.montant);
+  if (Number.isFinite(n)) return n;
   return 0;
 }
 
@@ -555,6 +402,8 @@ function computeCartPricing(panier, options = {}) {
       slot.persons || slot.nb_personnes || slot.participants || 2
     );
 
+    const billablePersons = getBillablePersons(persons);
+
     const theoreticalFullAmount = computeSessionCashAmount(startDate, persons, {
       loyaltyUsed: false,
     });
@@ -571,8 +420,7 @@ function computeCartPricing(panier, options = {}) {
       ...slot,
       box_id: numericBoxId,
       persons,
-      nb_personnes: persons,
-      participants: persons,
+      billablePersons,
       start_time: times.start_time,
       end_time: times.end_time,
       date: times.date,
@@ -603,77 +451,6 @@ function computeCartPricing(panier, options = {}) {
     totalBeforeDiscount: Number(totalBeforeDiscount.toFixed(2)),
     loyaltyDiscount: Number(loyaltyDiscount.toFixed(2)),
     totalCashDue: Number(totalCashDue.toFixed(2)),
-  };
-}
-
-function buildReservationMetadataPayload({
-  slot,
-  loyaltyUsed,
-  isFreeReservationFlag,
-  paymentIntentId,
-}) {
-  return {
-    persons: slot.persons,
-    nb_personnes: slot.persons,
-    participants: slot.persons,
-    people_count: slot.persons,
-    person_count: slot.persons,
-    amount_paid: slot.cashAmountDue,
-    montant: slot.cashAmountDue,
-    total: slot.cashAmountDue,
-    total_price: slot.cashAmountDue,
-    amount: slot.cashAmountDue,
-    price: slot.cashAmountDue,
-    payment_mode: loyaltyUsed ? "loyalty" : isFreeReservationFlag ? "free" : "paid",
-    payment_intent_id: paymentIntentId || null,
-    latest_payment_intent_id: paymentIntentId || null,
-    paid_with_loyalty: !!loyaltyUsed,
-    used_loyalty_reward: !!loyaltyUsed,
-    loyalty_reward_used: !!loyaltyUsed,
-    loyalty_points_used: loyaltyUsed ? LOYALTY_POINTS_COST : 0,
-    points_used: loyaltyUsed ? LOYALTY_POINTS_COST : 0,
-    loyalty_free_people_count: loyaltyUsed ? LOYALTY_FREE_BILLABLE_PERSONS : 0,
-    free_session: slot.cashAmountDue <= 0,
-    is_free_session: slot.cashAmountDue <= 0,
-    updated_at: new Date().toISOString(),
-  };
-}
-
-function buildModificationFinancialPayload({
-  targetStartIso,
-  targetEndIso,
-  targetLocalDate,
-  targetBoxId,
-  safePersons,
-  newAmount,
-  modificationPaymentIntentId,
-  reservation,
-}) {
-  return {
-    start_time: targetStartIso,
-    end_time: targetEndIso,
-    date: targetLocalDate,
-    datetime: targetStartIso,
-    box_id: targetBoxId,
-    persons: safePersons,
-    nb_personnes: safePersons,
-    participants: safePersons,
-    people_count: safePersons,
-    person_count: safePersons,
-    amount_paid: newAmount,
-    montant: newAmount,
-    total: newAmount,
-    total_price: newAmount,
-    amount: newAmount,
-    price: newAmount,
-    latest_payment_intent_id:
-      modificationPaymentIntentId ||
-      reservation.latest_payment_intent_id ||
-      reservation.payment_intent_id ||
-      null,
-    modification_payment_intent_id:
-      modificationPaymentIntentId || reservation.modification_payment_intent_id || null,
-    updated_at: new Date().toISOString(),
   };
 }
 
@@ -928,187 +705,20 @@ async function hasReservationConflict({
   );
 }
 
-async function tryUpdateReservationWithFallbacks(reservationId, payloadVariants) {
-  let lastError = null;
-
-  for (const payload of payloadVariants) {
-    try {
-      const result = await executeReservationUpdateResilient(reservationId, payload);
-      if (!result.skipped) {
-        return result.data;
-      }
-    } catch (error) {
-      lastError = error;
-      console.warn("⚠️ Fallback update reservations :", error.message);
-    }
-  }
-
-  throw lastError || new Error("Impossible de mettre à jour la réservation");
-}
-
-async function updateInsertedReservationMetadata(reservationId, payloadVariants) {
-  for (const payload of payloadVariants) {
-    try {
-      await executeReservationUpdateResilient(reservationId, payload);
-      return true;
-    } catch (error) {
-      console.warn("⚠️ Fallback metadata reservation :", error.message);
-    }
-  }
-
-  return false;
-}
-
-async function refundPointsToUser(userId, pointsToRefund) {
-  if (!supabase) throw new Error("Supabase non configuré");
-  if (!pointsToRefund || pointsToRefund <= 0) return;
-
-  const user = await getUserById(userId);
-  const currentPoints = Number(user.points || 0);
-
-  const { error } = await supabase
-    .from("users")
-    .update({
-      points: currentPoints + pointsToRefund,
-      updated_at: new Date().toISOString(),
-    })
-    .eq("id", userId);
+async function updateReservationById(reservationId, payload) {
+  const { data, error } = await supabase
+    .from("reservations")
+    .update(payload)
+    .eq("id", reservationId)
+    .select()
+    .single();
 
   if (error) throw error;
-}
-
-async function attemptStripePartialRefund(
-  paymentIntentId,
-  amountEur,
-  reason = "requested_by_customer"
-) {
-  if (!stripe || !paymentIntentId || !amountEur || amountEur <= 0) {
-    return { success: false, skipped: true };
-  }
-
-  const refund = await stripe.refunds.create({
-    payment_intent: paymentIntentId,
-    amount: Math.round(Number(amountEur) * 100),
-    reason,
-  });
-
-  return { success: true, refund };
-}
-
-async function attemptRefundUsingReservationPaymentIntents(reservation, amountEur) {
-  const candidates = [
-    reservation?.modification_payment_intent_id,
-    reservation?.latest_payment_intent_id,
-    reservation?.payment_intent_id,
-  ].filter(Boolean);
-
-  if (!candidates.length) {
-    return {
-      success: false,
-      skipped: true,
-      reason: "Aucun payment_intent_id disponible",
-    };
-  }
-
-  let lastError = null;
-
-  for (const paymentIntentId of candidates) {
-    try {
-      const result = await attemptStripePartialRefund(paymentIntentId, amountEur);
-      if (result.success) {
-        return { success: true, paymentIntentId, refund: result.refund };
-      }
-    } catch (e) {
-      lastError = e;
-      console.warn("⚠️ Refund fallback Stripe :", e.message);
-    }
-  }
-
-  return {
-    success: false,
-    skipped: false,
-    reason: lastError?.message || "Impossible de rembourser via Stripe",
-  };
-}
-
-async function attemptAutomaticSavedCardCharge({
-  userId,
-  customer,
-  amountEur,
-  metadata = {},
-}) {
-  if (!stripe) throw new Error("Stripe non configuré");
-  if (!supabase) throw new Error("Supabase non configuré");
-
-  const user = await getUserById(userId);
-  const { customerId } = await ensureStripeCustomer(userId);
-
-  const pmToUse = user.default_payment_method_id;
-  if (!pmToUse) {
-    return {
-      success: false,
-      requiresAdditionalPayment: true,
-      reason: "Aucune carte enregistrée disponible",
-    };
-  }
-
-  try {
-    await stripe.paymentMethods.attach(pmToUse, { customer: customerId });
-  } catch (e) {
-    const msg = String(e?.message || "");
-    if (!msg.toLowerCase().includes("already") && !msg.toLowerCase().includes("attached")) {
-      throw e;
-    }
-  }
-
-  const fullName =
-    (customer?.prenom || "") + (customer?.prenom ? " " : "") + (customer?.nom || "");
-
-  try {
-    const pi = await stripe.paymentIntents.create({
-      amount: Math.round(Number(amountEur) * 100),
-      currency: "eur",
-      customer: customerId,
-      payment_method: pmToUse,
-      payment_method_types: ["card"],
-      confirm: true,
-      off_session: true,
-      metadata: {
-        customer_email: customer?.email || user.email || "",
-        customer_name: fullName,
-        auto_modification_charge: "true",
-        ...metadata,
-      },
-    });
-
-    return {
-      success: true,
-      paymentIntent: pi,
-    };
-  } catch (e) {
-    const code = e?.code || "";
-    const paymentIntent = e?.raw?.payment_intent || null;
-
-    if (
-      code === "authentication_required" ||
-      code === "card_declined" ||
-      paymentIntent?.client_secret
-    ) {
-      return {
-        success: false,
-        requiresAdditionalPayment: true,
-        clientSecret: paymentIntent?.client_secret || null,
-        paymentIntentId: paymentIntent?.id || null,
-        reason: e?.message || "Authentification ou nouvelle carte requise",
-      };
-    }
-
-    throw e;
-  }
+  return data;
 }
 
 // ------------------------------------------------------
-// Envoi d'email avec QR code pour une réservation (via Resend)
+// Envoi d'email avec QR code pour une réservation
 // ------------------------------------------------------
 async function sendReservationEmail(reservation) {
   if (!mailEnabled || !resend) {
@@ -1182,7 +792,6 @@ async function sendReservationEmail(reservation) {
               </div>
             </div>
 
-            <!-- Bloc Box + Horaires -->
             <div style="margin-top:16px;padding:14px 14px 12px 14px;border-radius:14px;background:rgba(15,23,42,0.75);border:1px solid rgba(148,163,184,0.38);">
               <table width="100%" cellpadding="0" cellspacing="0" role="presentation" style="border-collapse:collapse;">
                 <tr>
@@ -1199,7 +808,6 @@ async function sendReservationEmail(reservation) {
               </div>
             </div>
 
-            <!-- QR -->
             <div style="margin-top:12px;padding:12px 14px;border-radius:14px;background:rgba(15,23,42,0.55);border:1px solid rgba(148,163,184,0.30);">
               <div style="font-size:12.5px;color:#E5E7EB;font-weight:700;">
                 Votre QR code est en pièce jointe (fichier <span style="font-weight:900;">qr-reservation.png</span>).
@@ -1209,7 +817,6 @@ async function sendReservationEmail(reservation) {
               </div>
             </div>
 
-            <!-- Empreinte -->
             <div style="margin-top:12px;padding:14px 14px 12px 14px;border-radius:14px;background:rgba(8,12,22,0.65);border:1px solid rgba(248,113,113,0.45);">
               <div style="font-size:12.5px;font-weight:900;letter-spacing:0.08em;text-transform:uppercase;color:#FCA5A5;">
                 EMPREINTE BANCAIRE DE ${DEPOSIT_AMOUNT_EUR} €
@@ -1229,7 +836,6 @@ async function sendReservationEmail(reservation) {
               </div>
             </div>
 
-            <!-- Conditions d'annulation -->
             <div style="margin-top:16px;">
               <div style="font-size:12.5px;font-weight:900;letter-spacing:0.08em;text-transform:uppercase;color:#E5E7EB;">
                 CONDITIONS D’ANNULATION
@@ -1241,7 +847,6 @@ async function sendReservationEmail(reservation) {
               </ul>
             </div>
 
-            <!-- Règlement intérieur -->
             <div style="margin-top:14px;">
               <div style="font-size:12.5px;font-weight:900;letter-spacing:0.08em;text-transform:uppercase;color:#E5E7EB;">
                 RÈGLEMENT INTÉRIEUR SINGBOX
@@ -1260,7 +865,6 @@ async function sendReservationEmail(reservation) {
               </div>
             </div>
 
-            <!-- Infos pratiques -->
             <div style="margin-top:14px;">
               <div style="font-size:12.5px;font-weight:900;letter-spacing:0.08em;text-transform:uppercase;color:#E5E7EB;">
                 INFOS PRATIQUES
@@ -1303,7 +907,7 @@ async function sendReservationEmail(reservation) {
 }
 
 // ------------------------------------------------------
-// Middleware JWT
+// Middleware d'authentification JWT
 // ------------------------------------------------------
 function authMiddleware(req, res, next) {
   const authHeader = req.headers.authorization;
@@ -1400,7 +1004,7 @@ app.use(bodyParser.json());
 console.log("🌍 CORS + JSON configurés");
 
 // ------------------------------------------------------
-// Vérifier panier
+// Vérifier le panier avant paiement
 // ------------------------------------------------------
 app.post("/api/verify-cart", async (req, res) => {
   try {
@@ -1445,8 +1049,6 @@ app.post("/api/verify-cart", async (req, res) => {
         price,
         box_id: numericBoxId,
         persons,
-        nb_personnes: persons,
-        participants: persons,
         start_time: times.start_time,
         end_time: times.end_time,
         date: times.date,
@@ -1604,7 +1206,7 @@ app.post("/api/me", authMiddleware, async (req, res) => {
 });
 
 // ------------------------------------------------------
-// Setup intent + cartes enregistrées
+// SetupIntent / cartes enregistrées
 // ------------------------------------------------------
 app.post("/api/create-setup-intent", authMiddleware, async (req, res) => {
   try {
@@ -1750,6 +1352,613 @@ app.get("/api/my-reservations/:id", authMiddleware, async (req, res) => {
   } catch (e) {
     console.error("Erreur /api/my-reservations/:id :", e);
     return res.status(500).json({ error: "Erreur serveur" });
+  }
+});
+
+// ------------------------------------------------------
+// POINTS FIDÉLITÉ
+// ------------------------------------------------------
+app.post("/api/add-points", authMiddleware, async (req, res) => {
+  try {
+    const userId = req.userId;
+    const { points } = req.body;
+
+    if (!points) {
+      return res.status(400).json({ error: "Nombre de points manquant" });
+    }
+
+    if (!supabase) {
+      return res.status(500).json({ error: "Supabase non configuré" });
+    }
+
+    const { error } = await supabase.rpc("increment_points", {
+      user_id: userId,
+      points_to_add: points,
+    });
+
+    if (error) {
+      console.error(error);
+      return res.status(400).json({ error: error.message });
+    }
+
+    res.json({ message: "Points ajoutés !" });
+  } catch (err) {
+    console.error("Erreur add-points :", err);
+    res.status(500).json({ error: "Erreur serveur" });
+  }
+});
+
+app.post("/api/use-loyalty", authMiddleware, async (req, res) => {
+  try {
+    const userId = req.userId;
+
+    if (!supabase) {
+      return res.status(500).json({ error: "Supabase non configuré" });
+    }
+
+    const { data: user, error } = await supabase
+      .from("users")
+      .select("points")
+      .eq("id", userId)
+      .single();
+
+    if (error || !user) {
+      return res.status(400).json({ error: "Utilisateur introuvable" });
+    }
+
+    if (user.points < LOYALTY_POINTS_COST) {
+      return res.status(400).json({ error: "Pas assez de points" });
+    }
+
+    const { error: updateErr } = await supabase
+      .from("users")
+      .update({
+        points: user.points - LOYALTY_POINTS_COST,
+        updated_at: new Date().toISOString(),
+      })
+      .eq("id", userId);
+
+    if (updateErr) {
+      console.error(updateErr);
+      return res.status(500).json({ error: "Impossible de retirer les points" });
+    }
+
+    return res.json({ success: true, message: `${LOYALTY_POINTS_COST} points utilisés` });
+  } catch (e) {
+    console.error("Erreur /api/use-loyalty :", e);
+    return res.status(500).json({ error: "Erreur serveur" });
+  }
+});
+
+// ------------------------------------------------------
+// TEST
+// ------------------------------------------------------
+app.get("/", (req, res) => {
+  res.send("API Singbox OK");
+});
+
+// ------------------------------------------------------
+// Vacances
+// ------------------------------------------------------
+app.get("/api/is-vacances", (req, res) => {
+  const date = req.query.date;
+  if (!date) {
+    return res.status(400).json({ error: "Paramètre 'date' manquant (YYYY-MM-DD)" });
+  }
+
+  const matchingPeriods = VACANCES_ZONE_C.filter((p) => isDateInRange(date, p.start, p.end));
+  const isHoliday = matchingPeriods.length > 0;
+
+  return res.json({
+    vacances: isHoliday,
+    is_vacances: isHoliday,
+    zone: "C",
+    date,
+    periods: matchingPeriods,
+  });
+});
+
+// ------------------------------------------------------
+// CRÉER UN PAYMENT INTENT STRIPE
+// ------------------------------------------------------
+app.post("/api/create-payment-intent", optionalAuthMiddleware, async (req, res) => {
+  try {
+    if (!stripe) {
+      return res.status(500).json({ error: "Stripe non configuré" });
+    }
+
+    console.log("/api/create-payment-intent appelé");
+    const {
+      panier,
+      customer,
+      promoCode,
+      finalAmountCents,
+      loyaltyUsed,
+      useSavedPaymentMethod,
+      paymentMethodId,
+    } = req.body || {};
+
+    if (!panier || !Array.isArray(panier) || panier.length === 0) {
+      return res.status(400).json({ error: "Panier vide" });
+    }
+
+    const pricing = computeCartPricing(panier, { loyaltyUsed: !!loyaltyUsed });
+    const theoreticalTotal = pricing.totalBeforeDiscount;
+    const loyaltyDiscount = pricing.loyaltyDiscount;
+    let totalAmountEur = pricing.totalCashDue;
+    let promoDiscountAmount = 0;
+    let promo = null;
+
+    if (promoCode) {
+      const result = await validatePromoCode(promoCode, totalAmountEur);
+      if (result.ok) {
+        totalAmountEur = result.newTotal;
+        promoDiscountAmount = result.discountAmount;
+        promo = result.promo;
+      } else {
+        console.warn("Code promo non appliqué :", result.reason);
+      }
+    }
+
+    if (
+      typeof finalAmountCents === "number" &&
+      finalAmountCents >= 0 &&
+      Number.isFinite(finalAmountCents)
+    ) {
+      const frontTotal = finalAmountCents / 100;
+      if (Math.abs(frontTotal - totalAmountEur) > 0.01) {
+        console.warn(
+          "⚠️ Écart entre total front et back :",
+          "front=",
+          frontTotal,
+          "back=",
+          totalAmountEur
+        );
+      }
+    }
+
+    console.log(
+      "Montant théorique :",
+      theoreticalTotal,
+      "€ ; remise fidélité =",
+      loyaltyDiscount,
+      "€ ; remise promo =",
+      promoDiscountAmount,
+      "€ ; total cash dû =",
+      totalAmountEur,
+      "€"
+    );
+
+    if (totalAmountEur <= 0) {
+      console.log("🟢 Séance gratuite : aucun PaymentIntent Stripe créé.");
+      return res.json({
+        isFree: true,
+        totalBeforeDiscount: theoreticalTotal,
+        loyaltyDiscount,
+        promoDiscountAmount,
+        totalAfterDiscount: 0,
+        promo: promo
+          ? { id: promo.id, code: promo.code, type: promo.type, value: promo.value }
+          : null,
+      });
+    }
+
+    const amountInCents = Math.round(totalAmountEur * 100);
+
+    if (useSavedPaymentMethod) {
+      if (!req.userId) {
+        return res.status(401).json({ error: "Connexion requise pour payer avec carte enregistrée" });
+      }
+      if (!supabase) {
+        return res.status(500).json({ error: "Supabase non configuré" });
+      }
+
+      const user = await getUserById(req.userId);
+      const { customerId } = await ensureStripeCustomer(req.userId);
+
+      const pmToUse = paymentMethodId || user.default_payment_method_id;
+      if (!pmToUse) {
+        return res.status(400).json({ error: "Aucune carte enregistrée disponible" });
+      }
+
+      try {
+        await stripe.paymentMethods.attach(pmToUse, { customer: customerId });
+      } catch (e) {
+        const msg = String(e?.message || "");
+        if (!msg.toLowerCase().includes("already") && !msg.toLowerCase().includes("attached")) {
+          throw e;
+        }
+      }
+
+      const fullName =
+        (customer?.prenom || "") + (customer?.prenom ? " " : "") + (customer?.nom || "");
+
+      try {
+        const pi = await stripe.paymentIntents.create({
+          amount: amountInCents,
+          currency: "eur",
+          customer: customerId,
+          payment_method: pmToUse,
+          payment_method_types: ["card"],
+          metadata: {
+            panier: JSON.stringify(pricing.normalizedItems),
+            customer_email: customer?.email || "",
+            customer_name: fullName,
+            promo_code: promoCode || "",
+            total_before_discount: String(theoreticalTotal),
+            loyalty_discount_amount: String(loyaltyDiscount),
+            promo_discount_amount: String(promoDiscountAmount),
+            loyalty_used: loyaltyUsed ? "true" : "false",
+            saved_card: "true",
+          },
+        });
+
+        return res.json({
+          clientSecret: pi.client_secret,
+          paymentIntentId: pi.id,
+          isFree: false,
+          totalBeforeDiscount: theoreticalTotal,
+          loyaltyDiscount,
+          promoDiscountAmount,
+          totalAfterDiscount: totalAmountEur,
+          promo: promo ? { id: promo.id, code: promo.code, type: promo.type, value: promo.value } : null,
+        });
+      } catch (e) {
+        const stripeMsg =
+          e?.raw?.message || e?.message || "Erreur Stripe inconnue (saved card)";
+        console.error("❌ Stripe saved-card PI error:", stripeMsg, e?.raw || e);
+
+        return res.status(500).json({
+          error: "Stripe saved-card: " + stripeMsg,
+        });
+      }
+    }
+
+    const paymentIntent = await stripe.paymentIntents.create({
+      amount: amountInCents,
+      currency: "eur",
+      payment_method_types: ["card"],
+      metadata: {
+        panier: JSON.stringify(pricing.normalizedItems),
+        customer_email: customer?.email || "",
+        customer_name: (customer?.prenom || "") + " " + (customer?.nom || ""),
+        promo_code: promoCode || "",
+        total_before_discount: String(theoreticalTotal),
+        loyalty_discount_amount: String(loyaltyDiscount),
+        promo_discount_amount: String(promoDiscountAmount),
+        loyalty_used: loyaltyUsed ? "true" : "false",
+      },
+    });
+
+    return res.json({
+      clientSecret: paymentIntent.client_secret,
+      paymentIntentId: paymentIntent.id,
+      isFree: false,
+      totalBeforeDiscount: theoreticalTotal,
+      loyaltyDiscount,
+      promoDiscountAmount,
+      totalAfterDiscount: totalAmountEur,
+      promo: promo
+        ? { id: promo.id, code: promo.code, type: promo.type, value: promo.value }
+        : null,
+    });
+  } catch (err) {
+    const msg = err?.raw?.message || err?.message || "Erreur serveur Stripe";
+    console.error("Erreur create-payment-intent :", msg, err?.raw || err);
+    return res.status(500).json({ error: msg });
+  }
+});
+
+// ------------------------------------------------------
+// EMPREINTE DE CAUTION
+// ------------------------------------------------------
+app.post("/api/create-deposit-intent", optionalAuthMiddleware, async (req, res) => {
+  try {
+    if (!stripe) return res.status(500).json({ error: "Stripe non configuré" });
+
+    const { reservationId, customer, useSavedPaymentMethod, paymentMethodId } = req.body || {};
+
+    const amountInCents = Math.round(DEPOSIT_AMOUNT_EUR * 100);
+
+    const fullName =
+      (customer?.prenom || "") + (customer?.prenom ? " " : "") + (customer?.nom || "");
+
+    if (useSavedPaymentMethod) {
+      if (!req.userId) {
+        return res.status(401).json({ error: "Connexion requise pour la caution avec carte enregistrée" });
+      }
+      if (!supabase) {
+        return res.status(500).json({ error: "Supabase non configuré" });
+      }
+
+      const user = await getUserById(req.userId);
+      const { customerId } = await ensureStripeCustomer(req.userId);
+
+      const pmToUse = paymentMethodId || user.default_payment_method_id;
+      if (!pmToUse) {
+        return res.status(400).json({ error: "Aucune carte enregistrée disponible pour la caution" });
+      }
+
+      try {
+        await stripe.paymentMethods.attach(pmToUse, { customer: customerId });
+      } catch (e) {
+        const msg = String(e?.message || "");
+        if (!msg.toLowerCase().includes("already") && !msg.toLowerCase().includes("attached")) {
+          throw e;
+        }
+      }
+
+      const pi = await stripe.paymentIntents.create({
+        amount: amountInCents,
+        currency: "eur",
+        customer: customerId,
+        payment_method: pmToUse,
+        payment_method_types: ["card"],
+        capture_method: "manual",
+        metadata: {
+          type: "singbox_deposit",
+          reservation_id: reservationId || "",
+          customer_email: customer?.email || "",
+          customer_name: fullName,
+          saved_card: "true",
+        },
+      });
+
+      if (supabase && reservationId) {
+        await updateReservationById(reservationId, {
+          deposit_payment_intent_id: pi.id,
+          deposit_amount_cents: amountInCents,
+          deposit_status: "created",
+          updated_at: new Date().toISOString(),
+        });
+      }
+
+      return res.json({
+        clientSecret: pi.client_secret,
+        paymentIntentId: pi.id,
+        depositAmountEur: DEPOSIT_AMOUNT_EUR,
+      });
+    }
+
+    const paymentIntent = await stripe.paymentIntents.create({
+      amount: amountInCents,
+      currency: "eur",
+      capture_method: "manual",
+      payment_method_types: ["card"],
+      metadata: {
+        type: "singbox_deposit",
+        reservation_id: reservationId || "",
+        customer_email: customer?.email || "",
+        customer_name: fullName,
+      },
+    });
+
+    if (supabase && reservationId) {
+      await updateReservationById(reservationId, {
+        deposit_payment_intent_id: paymentIntent.id,
+        deposit_amount_cents: amountInCents,
+        deposit_status: "created",
+        updated_at: new Date().toISOString(),
+      });
+    }
+
+    return res.json({
+      clientSecret: paymentIntent.client_secret,
+      paymentIntentId: paymentIntent.id,
+      depositAmountEur: DEPOSIT_AMOUNT_EUR,
+    });
+  } catch (err) {
+    console.error("Erreur create-deposit-intent :", err);
+    const msg = err?.raw?.message || err?.message || "Erreur serveur Stripe (caution)";
+    return res.status(500).json({ error: msg });
+  }
+});
+
+// ------------------------------------------------------
+// CONFIRMER LA RÉSERVATION
+// ------------------------------------------------------
+app.post("/api/confirm-reservation", async (req, res) => {
+  try {
+    console.log("/api/confirm-reservation appelé");
+    const { panier, customer, promoCode, paymentIntentId, loyaltyUsed, isFree } = req.body || {};
+
+    if (!panier || !Array.isArray(panier) || panier.length === 0) {
+      return res.status(400).json({ error: "Panier vide" });
+    }
+
+    const pricing = computeCartPricing(panier, { loyaltyUsed: !!loyaltyUsed });
+    const theoreticalTotal = pricing.totalBeforeDiscount;
+    const loyaltyDiscount = pricing.loyaltyDiscount;
+    let totalCashDue = pricing.totalCashDue;
+
+    let promoDiscountAmount = 0;
+    let promo = null;
+
+    if (promoCode) {
+      const result = await validatePromoCode(promoCode, totalCashDue);
+      if (result.ok) {
+        totalCashDue = result.newTotal;
+        promoDiscountAmount = result.discountAmount;
+        promo = result.promo;
+      } else {
+        console.warn(
+          "Code promo non appliqué lors de confirm-reservation :",
+          result.reason
+        );
+      }
+    }
+
+    const isFreeReservationFlag = !!isFree || totalCashDue <= 0;
+
+    if (!isFreeReservationFlag) {
+      if (!paymentIntentId) {
+        return res.status(400).json({ error: "paymentIntentId manquant" });
+      }
+      if (!stripe) {
+        return res.status(500).json({ error: "Stripe non configuré" });
+      }
+
+      const pi = await stripe.paymentIntents.retrieve(paymentIntentId);
+      console.log("Statut PaymentIntent :", pi.status);
+      if (pi.status !== "succeeded") {
+        return res.status(400).json({ error: "Paiement non validé par Stripe" });
+      }
+    } else {
+      console.log("✅ Réservation confirmée en mode gratuit.");
+    }
+
+    if (!supabase) {
+      console.warn("⚠️ Supabase non configuré, réservation non enregistrée en base.");
+      return res.json({ status: "ok (sans enregistrement Supabase)" });
+    }
+
+    let userIdFromToken = null;
+    try {
+      const authHeader = req.headers.authorization;
+      const token = authHeader?.startsWith("Bearer ") ? authHeader.split(" ")[1] : null;
+      if (token) {
+        const decoded = jwt.verify(token, process.env.JWT_SECRET);
+        userIdFromToken = decoded.userId;
+      }
+    } catch (e) {
+      console.warn("⚠️ Token invalide sur /api/confirm-reservation :", e.message);
+    }
+
+    try {
+      if (userIdFromToken && customer) {
+        await updateUserProfileInUsersTable(userIdFromToken, customer);
+      }
+    } catch (e) {
+      console.warn("⚠️ update users (confirm-reservation) a échoué:", e.message);
+    }
+
+    const fullName =
+      (customer?.prenom || "") + (customer?.prenom ? " " : "") + (customer?.nom || "");
+
+    const rows = pricing.normalizedItems.map((slot) => ({
+      name: fullName || null,
+      email: customer?.email || null,
+      datetime: slot.datetime,
+      created_at: new Date().toISOString(),
+      start_time: slot.start_time,
+      box_id: slot.box_id,
+      status: "confirmed",
+      date: slot.date,
+      end_time: slot.end_time,
+      payment_intent_id: paymentIntentId || null,
+      deposit_payment_intent_id: null,
+      deposit_amount_cents: 0,
+      deposit_status: null,
+      persons: slot.persons,
+      billable_persons: slot.billablePersons,
+      montant: slot.cashAmountDue,
+      free_session: slot.cashAmountDue <= 0,
+      loyalty_used: !!loyaltyUsed,
+      points_spent: loyaltyUsed ? LOYALTY_POINTS_COST : 0,
+      promo_code: promo?.code || null,
+      updated_at: new Date().toISOString(),
+    }));
+
+    for (const row of rows) {
+      const hasConflict = await hasReservationConflict({
+        boxId: row.box_id,
+        startTime: row.start_time,
+        endTime: row.end_time,
+        localDate: row.date,
+      });
+
+      if (hasConflict) {
+        return res.status(409).json({
+          error: "Ce créneau est déjà réservé pour la box " + row.box_id + ".",
+        });
+      }
+    }
+
+    const insertedReservations = [];
+    for (const row of rows) {
+      const { data, error } = await supabase
+        .from("reservations")
+        .insert(row)
+        .select()
+        .single();
+
+      if (error) {
+        console.error("Erreur Supabase insert reservations :", error);
+        return res.status(500).json({ error: "Erreur en enregistrant la réservation" });
+      }
+
+      insertedReservations.push(data);
+    }
+
+    try {
+      await Promise.allSettled(insertedReservations.map((row) => sendReservationEmail(row)));
+    } catch (mailErr) {
+      console.error("Erreur globale envoi mails :", mailErr);
+    }
+
+    try {
+      const isActuallyFree = totalCashDue <= 0;
+      if (userIdFromToken && !isActuallyFree) {
+        const pointsToAdd = panier.length * 10;
+
+        const { error: pointsError } = await supabase.rpc("increment_points", {
+          user_id: userIdFromToken,
+          points_to_add: pointsToAdd,
+        });
+
+        if (pointsError) {
+          console.error("Erreur ajout points fidélité :", pointsError);
+        }
+      }
+    } catch (pointsErr) {
+      console.error("Erreur lors de l'ajout automatique des points :", pointsErr);
+    }
+
+    try {
+      if (promo && promoDiscountAmount > 0) {
+        const totalAfterDiscount = Math.max(0, totalCashDue);
+
+        await supabase.from("promo_usages").insert({
+          promo_id: promo.id,
+          code: promo.code,
+          email: customer?.email || null,
+          payment_intent_id: paymentIntentId || null,
+          total_before: pricing.totalCashDue,
+          total_after: totalAfterDiscount,
+          discount_amount: promoDiscountAmount,
+        });
+
+        const currentUsed = Number(promo.used_count || 0);
+        await supabase
+          .from("promo_codes")
+          .update({ used_count: currentUsed + 1 })
+          .eq("id", promo.id);
+      }
+    } catch (promoErr) {
+      console.error("Erreur promo usages :", promoErr);
+    }
+
+    return res.json({
+      status: "ok",
+      reservations: insertedReservations,
+      pricing: {
+        totalBeforeDiscount: theoreticalTotal,
+        loyaltyDiscount,
+        promoDiscountAmount,
+        totalAfterDiscount: totalCashDue,
+      },
+      promo: promo
+        ? {
+            code: promo.code,
+            discountAmount: promoDiscountAmount,
+            totalBefore: pricing.totalCashDue,
+            totalAfter: totalCashDue,
+          }
+        : null,
+    });
+  } catch (err) {
+    console.error("Erreur confirm-reservation :", err);
+    return res.status(500).json({ error: "Erreur serveur lors de la réservation" });
   }
 });
 
@@ -1913,7 +2122,7 @@ app.post("/api/modify-reservation", authMiddleware, async (req, res) => {
       return res.status(409).json({ error: "Le nouveau créneau n’est plus disponible" });
     }
 
-    const loyaltyUsed = isReservationPaidWithLoyalty(reservation);
+    const loyaltyUsed = !!reservation.loyalty_used;
     const oldAmount = getReservationAmountPaid(reservation);
     const newAmount = computeSessionCashAmount(targetStart, safePersons, {
       loyaltyUsed,
@@ -1964,46 +2173,24 @@ app.post("/api/modify-reservation", authMiddleware, async (req, res) => {
       }
     }
 
-    const richPayload = buildModificationFinancialPayload({
-      targetStartIso: targetStart.toISOString(),
-      targetEndIso: targetEnd.toISOString(),
-      targetLocalDate,
-      targetBoxId,
-      safePersons,
-      newAmount,
-      modificationPaymentIntentId,
-      reservation,
-    });
-
-    const mediumPayload = {
+    const updatedReservation = await updateReservationById(reservation.id, {
       start_time: targetStart.toISOString(),
       end_time: targetEnd.toISOString(),
       date: targetLocalDate,
       datetime: targetStart.toISOString(),
       box_id: targetBoxId,
       persons: safePersons,
-      participants: safePersons,
-      people_count: safePersons,
+      billable_persons: getBillablePersons(safePersons),
       montant: newAmount,
-      total: newAmount,
-      total_price: newAmount,
+      payment_intent_id:
+        modificationPaymentIntentId ||
+        reservation.payment_intent_id ||
+        null,
+      free_session: newAmount <= 0,
+      loyalty_used: loyaltyUsed,
+      points_spent: loyaltyUsed ? LOYALTY_POINTS_COST : 0,
       updated_at: new Date().toISOString(),
-    };
-
-    const basePayload = {
-      start_time: targetStart.toISOString(),
-      end_time: targetEnd.toISOString(),
-      date: targetLocalDate,
-      datetime: targetStart.toISOString(),
-      box_id: targetBoxId,
-      updated_at: new Date().toISOString(),
-    };
-
-    const updatedReservation = await tryUpdateReservationWithFallbacks(reservation.id, [
-      richPayload,
-      mediumPayload,
-      basePayload,
-    ]);
+    });
 
     return res.json({
       success: true,
@@ -2025,613 +2212,6 @@ app.post("/api/modify-reservation", authMiddleware, async (req, res) => {
   } catch (e) {
     console.error("Erreur /api/modify-reservation :", e);
     return res.status(500).json({ error: "Erreur serveur lors de la modification" });
-  }
-});
-
-// ------------------------------------------------------
-// POINTS FIDÉLITÉ
-// ------------------------------------------------------
-app.post("/api/add-points", authMiddleware, async (req, res) => {
-  try {
-    const userId = req.userId;
-    const { points } = req.body;
-
-    if (!points) {
-      return res.status(400).json({ error: "Nombre de points manquant" });
-    }
-
-    if (!supabase) {
-      return res.status(500).json({ error: "Supabase non configuré" });
-    }
-
-    const { error } = await supabase.rpc("increment_points", {
-      user_id: userId,
-      points_to_add: points,
-    });
-
-    if (error) {
-      console.error(error);
-      return res.status(400).json({ error: error.message });
-    }
-
-    res.json({ message: "Points ajoutés !" });
-  } catch (err) {
-    console.error("Erreur add-points :", err);
-    res.status(500).json({ error: "Erreur serveur" });
-  }
-});
-
-app.post("/api/use-loyalty", authMiddleware, async (req, res) => {
-  try {
-    const userId = req.userId;
-
-    if (!supabase) {
-      return res.status(500).json({ error: "Supabase non configuré" });
-    }
-
-    const { data: user, error } = await supabase
-      .from("users")
-      .select("points")
-      .eq("id", userId)
-      .single();
-
-    if (error || !user) {
-      return res.status(400).json({ error: "Utilisateur introuvable" });
-    }
-
-    if (user.points < LOYALTY_POINTS_COST) {
-      return res.status(400).json({ error: "Pas assez de points" });
-    }
-
-    const { error: updateErr } = await supabase
-      .from("users")
-      .update({
-        points: user.points - LOYALTY_POINTS_COST,
-        updated_at: new Date().toISOString(),
-      })
-      .eq("id", userId);
-
-    if (updateErr) {
-      console.error(updateErr);
-      return res.status(500).json({ error: "Impossible de retirer les points" });
-    }
-
-    return res.json({ success: true, message: `${LOYALTY_POINTS_COST} points utilisés` });
-  } catch (e) {
-    console.error("Erreur /api/use-loyalty :", e);
-    return res.status(500).json({ error: "Erreur serveur" });
-  }
-});
-
-// ------------------------------------------------------
-// TEST
-// ------------------------------------------------------
-app.get("/", (req, res) => {
-  res.send("API Singbox OK");
-});
-
-// ------------------------------------------------------
-// Vacances
-// ------------------------------------------------------
-app.get("/api/is-vacances", (req, res) => {
-  const date = req.query.date;
-  if (!date) {
-    return res.status(400).json({ error: "Paramètre 'date' manquant (YYYY-MM-DD)" });
-  }
-
-  const matchingPeriods = VACANCES_ZONE_C.filter((p) => isDateInRange(date, p.start, p.end));
-  const isHoliday = matchingPeriods.length > 0;
-
-  return res.json({
-    vacances: isHoliday,
-    is_vacances: isHoliday,
-    zone: "C",
-    date,
-    periods: matchingPeriods,
-  });
-});
-
-// ------------------------------------------------------
-// PAYMENT INTENT
-// ------------------------------------------------------
-app.post("/api/create-payment-intent", optionalAuthMiddleware, async (req, res) => {
-  try {
-    if (!stripe) {
-      return res.status(500).json({ error: "Stripe non configuré" });
-    }
-
-    console.log("/api/create-payment-intent appelé");
-    const {
-      panier,
-      customer,
-      promoCode,
-      finalAmountCents,
-      loyaltyUsed,
-      useSavedPaymentMethod,
-      paymentMethodId,
-    } = req.body || {};
-
-    if (!panier || !Array.isArray(panier) || panier.length === 0) {
-      return res.status(400).json({ error: "Panier vide" });
-    }
-
-    const pricing = computeCartPricing(panier, { loyaltyUsed: !!loyaltyUsed });
-    const theoreticalTotal = pricing.totalBeforeDiscount;
-    const loyaltyDiscount = pricing.loyaltyDiscount;
-    let totalAmountEur = pricing.totalCashDue;
-    let promoDiscountAmount = 0;
-    let promo = null;
-
-    if (promoCode) {
-      const result = await validatePromoCode(promoCode, totalAmountEur);
-      if (result.ok) {
-        totalAmountEur = result.newTotal;
-        promoDiscountAmount = result.discountAmount;
-        promo = result.promo;
-      } else {
-        console.warn("Code promo non appliqué :", result.reason);
-      }
-    }
-
-    if (
-      typeof finalAmountCents === "number" &&
-      finalAmountCents >= 0 &&
-      Number.isFinite(finalAmountCents)
-    ) {
-      const frontTotal = finalAmountCents / 100;
-      if (Math.abs(frontTotal - totalAmountEur) > 0.01) {
-        console.warn("⚠️ Écart entre total front et back :", "front=", frontTotal, "back=", totalAmountEur);
-      }
-    }
-
-    console.log(
-      "Montant théorique :",
-      theoreticalTotal,
-      "€ ; remise fidélité =",
-      loyaltyDiscount,
-      "€ ; remise promo =",
-      promoDiscountAmount,
-      "€ ; total cash dû =",
-      totalAmountEur,
-      "€"
-    );
-
-    if (totalAmountEur <= 0) {
-      console.log("🟢 Séance gratuite : aucun PaymentIntent Stripe créé.");
-      return res.json({
-        isFree: true,
-        totalBeforeDiscount: theoreticalTotal,
-        loyaltyDiscount,
-        promoDiscountAmount,
-        totalAfterDiscount: 0,
-        promo: promo
-          ? { id: promo.id, code: promo.code, type: promo.type, value: promo.value }
-          : null,
-      });
-    }
-
-    const amountInCents = Math.round(totalAmountEur * 100);
-
-    if (useSavedPaymentMethod) {
-      if (!req.userId) {
-        return res.status(401).json({ error: "Connexion requise pour payer avec carte enregistrée" });
-      }
-      if (!supabase) {
-        return res.status(500).json({ error: "Supabase non configuré" });
-      }
-
-      const user = await getUserById(req.userId);
-      const { customerId } = await ensureStripeCustomer(req.userId);
-
-      const pmToUse = paymentMethodId || user.default_payment_method_id;
-      if (!pmToUse) {
-        return res.status(400).json({ error: "Aucune carte enregistrée disponible" });
-      }
-
-      try {
-        await stripe.paymentMethods.attach(pmToUse, { customer: customerId });
-      } catch (e) {
-        const msg = String(e?.message || "");
-        if (!msg.toLowerCase().includes("already") && !msg.toLowerCase().includes("attached")) {
-          throw e;
-        }
-      }
-
-      const fullName =
-        (customer?.prenom || "") + (customer?.prenom ? " " : "") + (customer?.nom || "");
-
-      try {
-        const pi = await stripe.paymentIntents.create({
-          amount: amountInCents,
-          currency: "eur",
-          customer: customerId,
-          payment_method: pmToUse,
-          payment_method_types: ["card"],
-          metadata: {
-            panier: JSON.stringify(pricing.normalizedItems),
-            customer_email: customer?.email || "",
-            customer_name: fullName,
-            promo_code: promoCode || "",
-            total_before_discount: String(theoreticalTotal),
-            loyalty_discount_amount: String(loyaltyDiscount),
-            promo_discount_amount: String(promoDiscountAmount),
-            loyalty_used: loyaltyUsed ? "true" : "false",
-            saved_card: "true",
-          },
-        });
-
-        return res.json({
-          clientSecret: pi.client_secret,
-          paymentIntentId: pi.id,
-          isFree: false,
-          totalBeforeDiscount: theoreticalTotal,
-          loyaltyDiscount,
-          promoDiscountAmount,
-          totalAfterDiscount: totalAmountEur,
-          promo: promo ? { id: promo.id, code: promo.code, type: promo.type, value: promo.value } : null,
-        });
-      } catch (e) {
-        const stripeMsg = e?.raw?.message || e?.message || "Erreur Stripe inconnue (saved card)";
-        console.error("❌ Stripe saved-card PI error:", stripeMsg, e?.raw || e);
-
-        return res.status(500).json({
-          error: "Stripe saved-card: " + stripeMsg,
-        });
-      }
-    }
-
-    const paymentIntent = await stripe.paymentIntents.create({
-      amount: amountInCents,
-      currency: "eur",
-      payment_method_types: ["card"],
-      metadata: {
-        panier: JSON.stringify(pricing.normalizedItems),
-        customer_email: customer?.email || "",
-        customer_name: (customer?.prenom || "") + " " + (customer?.nom || ""),
-        promo_code: promoCode || "",
-        total_before_discount: String(theoreticalTotal),
-        loyalty_discount_amount: String(loyaltyDiscount),
-        promo_discount_amount: String(promoDiscountAmount),
-        loyalty_used: loyaltyUsed ? "true" : "false",
-      },
-    });
-
-    return res.json({
-      clientSecret: paymentIntent.client_secret,
-      paymentIntentId: paymentIntent.id,
-      isFree: false,
-      totalBeforeDiscount: theoreticalTotal,
-      loyaltyDiscount,
-      promoDiscountAmount,
-      totalAfterDiscount: totalAmountEur,
-      promo: promo
-        ? { id: promo.id, code: promo.code, type: promo.type, value: promo.value }
-        : null,
-    });
-  } catch (err) {
-    const msg = err?.raw?.message || err?.message || "Erreur serveur Stripe";
-    console.error("Erreur create-payment-intent :", msg, err?.raw || err);
-    return res.status(500).json({ error: msg });
-  }
-});
-
-// ------------------------------------------------------
-// CAUTION
-// ------------------------------------------------------
-app.post("/api/create-deposit-intent", optionalAuthMiddleware, async (req, res) => {
-  try {
-    if (!stripe) return res.status(500).json({ error: "Stripe non configuré" });
-
-    const { reservationId, customer, useSavedPaymentMethod, paymentMethodId } = req.body || {};
-    const amountInCents = Math.round(DEPOSIT_AMOUNT_EUR * 100);
-
-    const fullName =
-      (customer?.prenom || "") + (customer?.prenom ? " " : "") + (customer?.nom || "");
-
-    if (useSavedPaymentMethod) {
-      if (!req.userId) {
-        return res.status(401).json({ error: "Connexion requise pour la caution avec carte enregistrée" });
-      }
-      if (!supabase) {
-        return res.status(500).json({ error: "Supabase non configuré" });
-      }
-
-      const user = await getUserById(req.userId);
-      const { customerId } = await ensureStripeCustomer(req.userId);
-
-      const pmToUse = paymentMethodId || user.default_payment_method_id;
-      if (!pmToUse) {
-        return res.status(400).json({ error: "Aucune carte enregistrée disponible pour la caution" });
-      }
-
-      try {
-        await stripe.paymentMethods.attach(pmToUse, { customer: customerId });
-      } catch (e) {
-        const msg = String(e?.message || "");
-        if (!msg.toLowerCase().includes("already") && !msg.toLowerCase().includes("attached")) {
-          throw e;
-        }
-      }
-
-      const pi = await stripe.paymentIntents.create({
-        amount: amountInCents,
-        currency: "eur",
-        customer: customerId,
-        payment_method: pmToUse,
-        payment_method_types: ["card"],
-        capture_method: "manual",
-        metadata: {
-          type: "singbox_deposit",
-          reservation_id: reservationId || "",
-          customer_email: customer?.email || "",
-          customer_name: fullName,
-          saved_card: "true",
-        },
-      });
-
-      if (supabase && reservationId) {
-        try {
-          await executeReservationUpdateResilient(reservationId, {
-            deposit_payment_intent_id: pi.id,
-            deposit_amount_cents: amountInCents,
-            deposit_status: "created",
-            updated_at: new Date().toISOString(),
-          });
-        } catch (e) {
-          console.warn("⚠️ Impossible de mettre à jour les infos de caution :", e?.message || e);
-        }
-      }
-
-      return res.json({
-        clientSecret: pi.client_secret,
-        paymentIntentId: pi.id,
-        depositAmountEur: DEPOSIT_AMOUNT_EUR,
-      });
-    }
-
-    const paymentIntent = await stripe.paymentIntents.create({
-      amount: amountInCents,
-      currency: "eur",
-      capture_method: "manual",
-      payment_method_types: ["card"],
-      metadata: {
-        type: "singbox_deposit",
-        reservation_id: reservationId || "",
-        customer_email: customer?.email || "",
-        customer_name: fullName,
-      },
-    });
-
-    if (supabase && reservationId) {
-      try {
-        await executeReservationUpdateResilient(reservationId, {
-          deposit_payment_intent_id: paymentIntent.id,
-          deposit_amount_cents: amountInCents,
-          deposit_status: "created",
-          updated_at: new Date().toISOString(),
-        });
-      } catch (e) {
-        console.warn("⚠️ Impossible de mettre à jour les infos de caution :", e?.message || e);
-      }
-    }
-
-    return res.json({
-      clientSecret: paymentIntent.client_secret,
-      paymentIntentId: paymentIntent.id,
-      depositAmountEur: DEPOSIT_AMOUNT_EUR,
-    });
-  } catch (err) {
-    console.error("Erreur create-deposit-intent :", err);
-    const msg = err?.raw?.message || err?.message || "Erreur serveur Stripe (caution)";
-    return res.status(500).json({ error: msg });
-  }
-});
-
-// ------------------------------------------------------
-// CONFIRM RESERVATION
-// ------------------------------------------------------
-app.post("/api/confirm-reservation", async (req, res) => {
-  try {
-    console.log("/api/confirm-reservation appelé");
-    const { panier, customer, promoCode, paymentIntentId, loyaltyUsed, isFree } = req.body || {};
-
-    if (!panier || !Array.isArray(panier) || panier.length === 0) {
-      return res.status(400).json({ error: "Panier vide" });
-    }
-
-    const pricing = computeCartPricing(panier, { loyaltyUsed: !!loyaltyUsed });
-    const theoreticalTotal = pricing.totalBeforeDiscount;
-    const loyaltyDiscount = pricing.loyaltyDiscount;
-    let totalCashDue = pricing.totalCashDue;
-
-    let promoDiscountAmount = 0;
-    let promo = null;
-
-    if (promoCode) {
-      const result = await validatePromoCode(promoCode, totalCashDue);
-      if (result.ok) {
-        totalCashDue = result.newTotal;
-        promoDiscountAmount = result.discountAmount;
-        promo = result.promo;
-      } else {
-        console.warn("Code promo non appliqué lors de confirm-reservation :", result.reason);
-      }
-    }
-
-    const isFreeReservationFlag = !!isFree || totalCashDue <= 0;
-
-    if (!isFreeReservationFlag) {
-      if (!paymentIntentId) {
-        return res.status(400).json({ error: "paymentIntentId manquant" });
-      }
-      if (!stripe) {
-        return res.status(500).json({ error: "Stripe non configuré" });
-      }
-
-      const pi = await stripe.paymentIntents.retrieve(paymentIntentId);
-      console.log("Statut PaymentIntent :", pi.status);
-      if (pi.status !== "succeeded") {
-        return res.status(400).json({ error: "Paiement non validé par Stripe" });
-      }
-    } else {
-      console.log("✅ Réservation confirmée en mode gratuit.");
-    }
-
-    if (!supabase) {
-      console.warn("⚠️ Supabase non configuré, réservation non enregistrée en base.");
-      return res.json({ status: "ok (sans enregistrement Supabase)" });
-    }
-
-    let userIdFromToken = null;
-    try {
-      const authHeader = req.headers.authorization;
-      const token = authHeader?.startsWith("Bearer ") ? authHeader.split(" ")[1] : null;
-      if (token) {
-        const decoded = jwt.verify(token, process.env.JWT_SECRET);
-        userIdFromToken = decoded.userId;
-      }
-    } catch (e) {
-      console.warn("⚠️ Token invalide sur /api/confirm-reservation :", e.message);
-    }
-
-    try {
-      if (userIdFromToken && customer) {
-        await updateUserProfileInUsersTable(userIdFromToken, customer);
-      }
-    } catch (e) {
-      console.warn("⚠️ update users (confirm-reservation) a échoué:", e.message);
-    }
-
-    const fullName =
-      (customer?.prenom || "") + (customer?.prenom ? " " : "") + (customer?.nom || "");
-
-    const rowsBase = pricing.normalizedItems.map((slot) => ({
-      name: fullName || null,
-      email: customer?.email || null,
-      box_id: slot.box_id,
-      start_time: slot.start_time,
-      end_time: slot.end_time,
-      date: slot.date,
-      datetime: slot.datetime,
-      status: "confirmed",
-    }));
-
-    for (const row of rowsBase) {
-      const hasConflict = await hasReservationConflict({
-        boxId: row.box_id,
-        startTime: row.start_time,
-        endTime: row.end_time,
-        localDate: row.date,
-      });
-
-      if (hasConflict) {
-        return res.status(409).json({
-          error: "Ce créneau est déjà réservé pour la box " + row.box_id + ".",
-        });
-      }
-    }
-
-    const data = await executeReservationInsertManyBaseRows(rowsBase);
-
-    for (let i = 0; i < data.length; i += 1) {
-      const insertedReservation = data[i];
-      const slot = pricing.normalizedItems[i];
-
-      const payload = buildReservationMetadataPayload({
-        slot,
-        loyaltyUsed: !!loyaltyUsed,
-        isFreeReservationFlag,
-        paymentIntentId,
-      });
-
-      await updateInsertedReservationMetadata(insertedReservation.id, [
-        payload,
-        {
-          persons: slot.persons,
-          participants: slot.persons,
-          people_count: slot.persons,
-          montant: slot.cashAmountDue,
-          total: slot.cashAmountDue,
-          total_price: slot.cashAmountDue,
-          payment_mode: loyaltyUsed ? "loyalty" : isFreeReservationFlag ? "free" : "paid",
-          payment_intent_id: paymentIntentId || null,
-          updated_at: new Date().toISOString(),
-        },
-        {
-          updated_at: new Date().toISOString(),
-        },
-      ]);
-    }
-
-    try {
-      await Promise.allSettled(data.map((row) => sendReservationEmail(row)));
-    } catch (mailErr) {
-      console.error("Erreur globale envoi mails :", mailErr);
-    }
-
-    try {
-      const isActuallyFree = totalCashDue <= 0;
-      if (userIdFromToken && !isActuallyFree) {
-        const pointsToAdd = panier.length * 10;
-
-        const { error: pointsError } = await supabase.rpc("increment_points", {
-          user_id: userIdFromToken,
-          points_to_add: pointsToAdd,
-        });
-
-        if (pointsError) {
-          console.error("Erreur ajout points fidélité :", pointsError);
-        }
-      }
-    } catch (pointsErr) {
-      console.error("Erreur lors de l'ajout automatique des points :", pointsErr);
-    }
-
-    try {
-      if (promo && promoDiscountAmount > 0) {
-        const totalAfterDiscount = Math.max(0, totalCashDue);
-
-        await supabase.from("promo_usages").insert({
-          promo_id: promo.id,
-          code: promo.code,
-          email: customer?.email || null,
-          payment_intent_id: paymentIntentId || null,
-          total_before: pricing.totalCashDue,
-          total_after: totalAfterDiscount,
-          discount_amount: promoDiscountAmount,
-        });
-
-        const currentUsed = Number(promo.used_count || 0);
-        await supabase
-          .from("promo_codes")
-          .update({ used_count: currentUsed + 1 })
-          .eq("id", promo.id);
-      }
-    } catch (promoErr) {
-      console.error("Erreur promo usages :", promoErr);
-    }
-
-    return res.json({
-      status: "ok",
-      reservations: data,
-      pricing: {
-        totalBeforeDiscount: theoreticalTotal,
-        loyaltyDiscount,
-        promoDiscountAmount,
-        totalAfterDiscount: totalCashDue,
-      },
-      promo: promo
-        ? {
-            code: promo.code,
-            discountAmount: promoDiscountAmount,
-            totalBefore: pricing.totalCashDue,
-            totalAfter: totalCashDue,
-          }
-        : null,
-    });
-  } catch (err) {
-    console.error("Erreur confirm-reservation :", err);
-    return res.status(500).json({ error: "Erreur serveur lors de la réservation" });
   }
 });
 
@@ -2666,9 +2246,9 @@ app.post("/api/refund-reservation", authMiddleware, async (req, res) => {
       });
     }
 
-    const loyaltyUsed = isReservationPaidWithLoyalty(reservation);
-    const loyaltyPointsToRefund = loyaltyUsed ? getReservationLoyaltyPointsUsed(reservation) : 0;
-    const cashAmountToRefund = getReservationAmountPaid(reservation);
+    const loyaltyUsed = !!reservation.loyalty_used;
+    const loyaltyPointsToRefund = loyaltyUsed ? Number(reservation.points_spent || 0) : 0;
+    const cashAmountToRefund = Number(reservation.montant || 0);
 
     let stripeRefundDone = false;
     let loyaltyRefundDone = false;
@@ -2691,22 +2271,10 @@ app.post("/api/refund-reservation", authMiddleware, async (req, res) => {
       loyaltyRefundDone = true;
     }
 
-    const updatedReservation = await tryUpdateReservationWithFallbacks(reservation.id, [
-      {
-        status: "cancelled",
-        refunded_at: new Date().toISOString(),
-        refund_amount: cashAmountToRefund,
-        loyalty_refunded_points: loyaltyPointsToRefund,
-        updated_at: new Date().toISOString(),
-      },
-      {
-        status: "cancelled",
-        updated_at: new Date().toISOString(),
-      },
-      {
-        status: "cancelled",
-      },
-    ]);
+    const updatedReservation = await updateReservationById(reservation.id, {
+      status: "cancelled",
+      updated_at: new Date().toISOString(),
+    });
 
     return res.json({
       success: true,
@@ -2731,7 +2299,7 @@ app.post("/api/refund-reservation", authMiddleware, async (req, res) => {
 });
 
 // ------------------------------------------------------
-// CAPTURE CAUTION
+// CAPTURER LA CAUTION
 // ------------------------------------------------------
 app.post("/api/capture-deposit", async (req, res) => {
   try {
@@ -2753,12 +2321,10 @@ app.post("/api/capture-deposit", async (req, res) => {
     const paymentIntent = await stripe.paymentIntents.capture(paymentIntentId, params);
 
     if (supabase && reservationId) {
-      try {
-        await executeReservationUpdateResilient(reservationId, {
-          deposit_status: "captured",
-          updated_at: new Date().toISOString(),
-        });
-      } catch (_e) {}
+      await updateReservationById(reservationId, {
+        deposit_status: "captured",
+        updated_at: new Date().toISOString(),
+      });
     }
 
     return res.json({ status: "captured", paymentIntent });
@@ -2769,7 +2335,7 @@ app.post("/api/capture-deposit", async (req, res) => {
 });
 
 // ------------------------------------------------------
-// ANNULER CAUTION
+// ANNULER / RELÂCHER LA CAUTION
 // ------------------------------------------------------
 app.post("/api/cancel-deposit", async (req, res) => {
   try {
@@ -2786,12 +2352,10 @@ app.post("/api/cancel-deposit", async (req, res) => {
     const canceled = await stripe.paymentIntents.cancel(paymentIntentId);
 
     if (supabase && reservationId) {
-      try {
-        await executeReservationUpdateResilient(reservationId, {
-          deposit_status: "canceled",
-          updated_at: new Date().toISOString(),
-        });
-      } catch (_e) {}
+      await updateReservationById(reservationId, {
+        deposit_status: "canceled",
+        updated_at: new Date().toISOString(),
+      });
     }
 
     return res.json({ status: "canceled", paymentIntent: canceled });
@@ -2802,7 +2366,7 @@ app.post("/api/cancel-deposit", async (req, res) => {
 });
 
 // ------------------------------------------------------
-// SLOTS
+// SLOTS : planning
 // ------------------------------------------------------
 app.get("/api/slots", async (req, res) => {
   if (!supabase) {
