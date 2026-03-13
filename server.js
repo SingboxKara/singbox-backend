@@ -31,14 +31,10 @@ if (!SUPABASE_URL || !SUPABASE_SERVICE_ROLE_KEY) {
   );
 }
 if (!RESEND_API_KEY) {
-  console.warn(
-    "⚠️ RESEND_API_KEY manquante : l'envoi d'email sera désactivé"
-  );
+  console.warn("⚠️ RESEND_API_KEY manquante : l'envoi d'email sera désactivé");
 }
 if (!STRIPE_WEBHOOK_SECRET) {
-  console.warn(
-    "⚠️ STRIPE_WEBHOOK_SECRET manquant : les webhooks Stripe ne seront pas vérifiés"
-  );
+  console.warn("⚠️ STRIPE_WEBHOOK_SECRET manquant : les webhooks Stripe ne seront pas vérifiés");
 }
 if (!process.env.JWT_SECRET) {
   console.warn("⚠️ JWT_SECRET manquant : l'auth (login/register) va échouer");
@@ -80,6 +76,9 @@ const STANDARD_SLOT_STARTS = [4, 5.5, 7, 8.5, 10, 11.5, 13, 14.5, 16, 17.5, 19, 
 const MIN_ALLOWED_PERSONS = 1;
 const MAX_ALLOWED_PERSONS = 8;
 const MIN_BILLABLE_PERSONS = 2;
+
+const LOYALTY_POINTS_COST = 100;
+const LOYALTY_FREE_BILLABLE_PERSONS = 2;
 
 const OFF_PEAK_START_HOUR = 4;
 const OFF_PEAK_END_HOUR = 14;
@@ -160,7 +159,7 @@ function clampPersons(value) {
   return n;
 }
 
-function getBillablePersonsForModification(persons) {
+function getBillablePersons(persons) {
   const n = Number(persons);
   if (!Number.isFinite(n)) return MIN_BILLABLE_PERSONS;
   return Math.max(n, MIN_BILLABLE_PERSONS);
@@ -190,26 +189,6 @@ function getPerPersonRateForDate(dateObj) {
   return STANDARD_RATE;
 }
 
-function computeReservationTheoreticalAmount(startDate, persons, reservation = null) {
-  if (reservation && isReservationFreeLike(reservation)) {
-    return 0;
-  }
-
-  const rate = getPerPersonRateForDate(startDate);
-  const billable = getBillablePersonsForModification(persons);
-  return Number((rate * billable).toFixed(2));
-}
-
-function computeCartTotalEur(panier) {
-  return panier.reduce((sum, item) => {
-    const price =
-      typeof item.price === "number" && !Number.isNaN(item.price)
-        ? item.price
-        : PRICE_PER_SLOT_EUR;
-    return sum + price;
-  }, 0);
-}
-
 function hoursBeforeDate(isoValue) {
   const d = parseDateOrNull(isoValue);
   if (!d) return null;
@@ -225,80 +204,6 @@ function isWithinModificationWindow(startTimeIso) {
   const diff = hoursBeforeDate(startTimeIso);
   if (diff === null) return false;
   return diff >= MODIFICATION_DEADLINE_HOURS;
-}
-
-function getReservationPersons(reservation) {
-  const candidates = [
-    reservation?.persons,
-    reservation?.nb_personnes,
-    reservation?.participants,
-    reservation?.people_count,
-  ];
-
-  for (const candidate of candidates) {
-    const n = Number(candidate);
-    if (Number.isFinite(n) && n >= 1 && n <= 8) {
-      return n;
-    }
-  }
-
-  return 2;
-}
-
-function getReservationAmountPaid(reservation) {
-  const candidates = [
-    reservation?.montant,
-    reservation?.total,
-    reservation?.total_price,
-    reservation?.amount_paid,
-    reservation?.amountPaid,
-    reservation?.paid_amount,
-  ];
-
-  for (const candidate of candidates) {
-    const n = Number(candidate);
-    if (Number.isFinite(n)) {
-      return n;
-    }
-  }
-
-  return 0;
-}
-
-function isReservationFreeLike(reservation) {
-  const explicitFlags = [
-    reservation?.paid_with_loyalty,
-    reservation?.used_loyalty_reward,
-    reservation?.loyalty_reward_used,
-    reservation?.free_session,
-    reservation?.is_free_session,
-    reservation?.used_points,
-    reservation?.offered_by_loyalty,
-  ];
-
-  if (explicitFlags.some(Boolean)) {
-    return true;
-  }
-
-  const paymentMode = String(
-    reservation?.payment_mode ||
-      reservation?.paymentMode ||
-      reservation?.payment_type ||
-      ""
-  ).toLowerCase();
-
-  if (
-    paymentMode.includes("fidel") ||
-    paymentMode.includes("loyalty") ||
-    paymentMode.includes("reward") ||
-    paymentMode.includes("gratuit") ||
-    paymentMode.includes("offert") ||
-    paymentMode.includes("points")
-  ) {
-    return true;
-  }
-
-  return getReservationAmountPaid(reservation) <= 0;
 }
 
 function buildTimesFromSlot(slot) {
@@ -384,6 +289,197 @@ function buildSlotIsoRange(dateStr, slotHourFloat) {
   const endIso = `${endY}-${endM}-${endD}T${endH}:${endMin}:00${OFFSET}`;
 
   return { startIso, endIso };
+}
+
+// ------------------------------------------------------
+// Helpers fidélité / pricing
+// ------------------------------------------------------
+function isReservationPaidWithLoyalty(reservation) {
+  const explicitFlags = [
+    reservation?.paid_with_loyalty,
+    reservation?.used_loyalty_reward,
+    reservation?.loyalty_reward_used,
+    reservation?.used_points,
+    reservation?.offered_by_loyalty,
+  ];
+
+  if (explicitFlags.some(Boolean)) return true;
+
+  const paymentMode = String(
+    reservation?.payment_mode ||
+      reservation?.paymentMode ||
+      reservation?.payment_type ||
+      ""
+  ).toLowerCase();
+
+  return (
+    paymentMode.includes("fidel") ||
+    paymentMode.includes("loyalty") ||
+    paymentMode.includes("reward") ||
+    paymentMode.includes("points")
+  );
+}
+
+function getReservationLoyaltyPointsUsed(reservation) {
+  const candidates = [
+    reservation?.loyalty_points_used,
+    reservation?.points_used,
+    reservation?.used_points_count,
+  ];
+
+  for (const candidate of candidates) {
+    const n = Number(candidate);
+    if (Number.isFinite(n) && n > 0) return n;
+  }
+
+  return isReservationPaidWithLoyalty(reservation) ? LOYALTY_POINTS_COST : 0;
+}
+
+function isReservationFreeLike(reservation) {
+  if (isReservationPaidWithLoyalty(reservation)) {
+    const amount = getReservationAmountPaid(reservation);
+    return amount <= 0;
+  }
+
+  const explicitFlags = [
+    reservation?.free_session,
+    reservation?.is_free_session,
+  ];
+
+  if (explicitFlags.some(Boolean)) return true;
+
+  const paymentMode = String(
+    reservation?.payment_mode ||
+      reservation?.paymentMode ||
+      reservation?.payment_type ||
+      ""
+  ).toLowerCase();
+
+  if (
+    paymentMode.includes("gratuit") ||
+    paymentMode.includes("free") ||
+    paymentMode.includes("offert")
+  ) {
+    return true;
+  }
+
+  return getReservationAmountPaid(reservation) <= 0;
+}
+
+function getReservationPersons(reservation) {
+  const candidates = [
+    reservation?.persons,
+    reservation?.nb_personnes,
+    reservation?.participants,
+    reservation?.people_count,
+  ];
+
+  for (const candidate of candidates) {
+    const n = Number(candidate);
+    if (Number.isFinite(n) && n >= 1 && n <= 8) {
+      return n;
+    }
+  }
+
+  return 2;
+}
+
+function getReservationAmountPaid(reservation) {
+  const candidates = [
+    reservation?.amount_paid,
+    reservation?.montant,
+    reservation?.total,
+    reservation?.total_price,
+    reservation?.amountPaid,
+    reservation?.paid_amount,
+  ];
+
+  for (const candidate of candidates) {
+    const n = Number(candidate);
+    if (Number.isFinite(n)) {
+      return n;
+    }
+  }
+
+  return 0;
+}
+
+function computeSessionCashAmount(startDate, persons, options = {}) {
+  const billablePersons = getBillablePersons(persons);
+  const perPersonRate = getPerPersonRateForDate(startDate);
+  const loyaltyUsed = !!options.loyaltyUsed;
+
+  if (!loyaltyUsed) {
+    return Number((billablePersons * perPersonRate).toFixed(2));
+  }
+
+  const extraBillablePersons = Math.max(
+    0,
+    billablePersons - LOYALTY_FREE_BILLABLE_PERSONS
+  );
+
+  return Number((extraBillablePersons * perPersonRate).toFixed(2));
+}
+
+function computeCartPricing(panier, options = {}) {
+  const loyaltyUsed = !!options.loyaltyUsed;
+
+  const normalizedItems = panier.map((slot) => {
+    const times = buildTimesFromSlot(slot);
+    const startDate = new Date(times.start_time);
+    const rawBox = slot.boxId ?? slot.box_id ?? slot.box ?? slot.boxName ?? 1;
+    const numericBoxId = getNumericBoxId(rawBox);
+    const persons = clampPersons(slot.persons || slot.nb_personnes || slot.participants || 2);
+
+    const theoreticalFullAmount = computeSessionCashAmount(startDate, persons, {
+      loyaltyUsed: false,
+    });
+
+    const cashAmountDue = computeSessionCashAmount(startDate, persons, {
+      loyaltyUsed,
+    });
+
+    const loyaltyDiscountAmount = Number(
+      (theoreticalFullAmount - cashAmountDue).toFixed(2)
+    );
+
+    return {
+      ...slot,
+      box_id: numericBoxId,
+      persons,
+      nb_personnes: persons,
+      participants: persons,
+      start_time: times.start_time,
+      end_time: times.end_time,
+      date: times.date,
+      datetime: times.datetime,
+      theoreticalFullAmount,
+      cashAmountDue,
+      loyaltyDiscountAmount,
+    };
+  });
+
+  const totalBeforeDiscount = normalizedItems.reduce(
+    (sum, item) => sum + item.theoreticalFullAmount,
+    0
+  );
+
+  const loyaltyDiscount = normalizedItems.reduce(
+    (sum, item) => sum + item.loyaltyDiscountAmount,
+    0
+  );
+
+  const totalCashDue = normalizedItems.reduce(
+    (sum, item) => sum + item.cashAmountDue,
+    0
+  );
+
+  return {
+    normalizedItems,
+    totalBeforeDiscount: Number(totalBeforeDiscount.toFixed(2)),
+    loyaltyDiscount: Number(loyaltyDiscount.toFixed(2)),
+    totalCashDue: Number(totalCashDue.toFixed(2)),
+  };
 }
 
 // ------------------------------------------------------
@@ -634,6 +730,20 @@ async function tryUpdateReservationWithFallbacks(reservationId, payloadVariants)
   throw lastError || new Error("Impossible de mettre à jour la réservation");
 }
 
+async function updateInsertedReservationMetadata(reservationId, payloadVariants) {
+  for (const payload of payloadVariants) {
+    const { error } = await supabase
+      .from("reservations")
+      .update(payload)
+      .eq("id", reservationId);
+
+    if (!error) return true;
+    console.warn("⚠️ Fallback metadata reservation :", error.message);
+  }
+
+  return false;
+}
+
 async function refundPointsToUser(userId, pointsToRefund) {
   if (!supabase) throw new Error("Supabase non configuré");
   if (!pointsToRefund || pointsToRefund <= 0) return;
@@ -650,6 +760,128 @@ async function refundPointsToUser(userId, pointsToRefund) {
     .eq("id", userId);
 
   if (error) throw error;
+}
+
+async function attemptStripePartialRefund(paymentIntentId, amountEur, reason = "requested_by_customer") {
+  if (!stripe || !paymentIntentId || !amountEur || amountEur <= 0) {
+    return { success: false, skipped: true };
+  }
+
+  const refund = await stripe.refunds.create({
+    payment_intent: paymentIntentId,
+    amount: Math.round(Number(amountEur) * 100),
+    reason,
+  });
+
+  return { success: true, refund };
+}
+
+async function attemptRefundUsingReservationPaymentIntents(reservation, amountEur) {
+  const candidates = [
+    reservation?.modification_payment_intent_id,
+    reservation?.latest_payment_intent_id,
+    reservation?.payment_intent_id,
+  ].filter(Boolean);
+
+  if (!candidates.length) {
+    return { success: false, skipped: true, reason: "Aucun payment_intent_id disponible" };
+  }
+
+  let lastError = null;
+
+  for (const paymentIntentId of candidates) {
+    try {
+      const result = await attemptStripePartialRefund(paymentIntentId, amountEur);
+      if (result.success) {
+        return { success: true, paymentIntentId, refund: result.refund };
+      }
+    } catch (e) {
+      lastError = e;
+      console.warn("⚠️ Refund fallback Stripe :", e.message);
+    }
+  }
+
+  return {
+    success: false,
+    skipped: false,
+    reason: lastError?.message || "Impossible de rembourser via Stripe",
+  };
+}
+
+async function attemptAutomaticSavedCardCharge({
+  userId,
+  customer,
+  amountEur,
+  metadata = {},
+}) {
+  if (!stripe) throw new Error("Stripe non configuré");
+  if (!supabase) throw new Error("Supabase non configuré");
+
+  const user = await getUserById(userId);
+  const { customerId } = await ensureStripeCustomer(userId);
+
+  const pmToUse = user.default_payment_method_id;
+  if (!pmToUse) {
+    return {
+      success: false,
+      requiresAdditionalPayment: true,
+      reason: "Aucune carte enregistrée disponible",
+    };
+  }
+
+  try {
+    await stripe.paymentMethods.attach(pmToUse, { customer: customerId });
+  } catch (e) {
+    const msg = String(e?.message || "");
+    if (!msg.toLowerCase().includes("already") && !msg.toLowerCase().includes("attached")) {
+      throw e;
+    }
+  }
+
+  const fullName =
+    (customer?.prenom || "") + (customer?.prenom ? " " : "") + (customer?.nom || "");
+
+  try {
+    const pi = await stripe.paymentIntents.create({
+      amount: Math.round(Number(amountEur) * 100),
+      currency: "eur",
+      customer: customerId,
+      payment_method: pmToUse,
+      payment_method_types: ["card"],
+      confirm: true,
+      off_session: true,
+      metadata: {
+        customer_email: customer?.email || user.email || "",
+        customer_name: fullName,
+        auto_modification_charge: "true",
+        ...metadata,
+      },
+    });
+
+    return {
+      success: true,
+      paymentIntent: pi,
+    };
+  } catch (e) {
+    const code = e?.code || "";
+    const paymentIntent = e?.raw?.payment_intent || null;
+
+    if (
+      code === "authentication_required" ||
+      code === "card_declined" ||
+      paymentIntent?.client_secret
+    ) {
+      return {
+        success: false,
+        requiresAdditionalPayment: true,
+        clientSecret: paymentIntent?.client_secret || null,
+        paymentIntentId: paymentIntent?.id || null,
+        reason: e?.message || "Authentification ou nouvelle carte requise",
+      };
+    }
+
+    throw e;
+  }
 }
 
 // ------------------------------------------------------
@@ -905,15 +1137,14 @@ app.post("/api/verify-cart", async (req, res) => {
           .send(`Le créneau ${times.date} pour la box ${numericBoxId} n'est plus disponible.`);
       }
 
-      const price =
-        typeof slot.price === "number" && !Number.isNaN(slot.price)
-          ? slot.price
-          : PRICE_PER_SLOT_EUR;
+      const persons = clampPersons(slot.persons || slot.nb_personnes || 2);
 
       normalizedItems.push({
         ...slot,
-        price,
         box_id: numericBoxId,
+        persons,
+        nb_personnes: persons,
+        participants: persons,
         start_time: times.start_time,
         end_time: times.end_time,
         date: times.date,
@@ -1260,6 +1491,7 @@ app.post("/api/reservation-modification-options", authMiddleware, async (req, re
     const reservationDate = reservation.date || formatDateToYYYYMMDD(currentStart);
     const boxId = reservation.box_id;
     const currentPersons = getReservationPersons(reservation);
+    const loyaltyUsed = isReservationPaidWithLoyalty(reservation);
 
     const options = [];
 
@@ -1291,15 +1523,18 @@ app.post("/api/reservation-modification-options", authMiddleware, async (req, re
         endTime: endIso,
         boxId,
         boxName: `Box ${boxId}`,
-        estimatedAmount: computeReservationTheoreticalAmount(startDate, currentPersons, reservation),
+        estimatedAmount: computeSessionCashAmount(startDate, currentPersons, {
+          loyaltyUsed,
+        }),
       });
     }
 
     return res.json({
       reservationId: reservation.id,
       options,
-      freeLike: isReservationFreeLike(reservation),
+      loyaltyUsed,
       currentPersons,
+      loyaltyPointsUsed: getReservationLoyaltyPointsUsed(reservation),
     });
   } catch (e) {
     console.error("Erreur /api/reservation-modification-options :", e);
@@ -1316,7 +1551,7 @@ app.post("/api/modify-reservation", authMiddleware, async (req, res) => {
       return res.status(500).json({ error: "Supabase non configuré" });
     }
 
-    const { reservationId, newStartTime, newEndTime, newPersons, boxId } = req.body || {};
+    const { reservationId, newStartTime, newEndTime, newPersons, boxId, customer } = req.body || {};
 
     if (!reservationId) {
       return res.status(400).json({ error: "reservationId manquant" });
@@ -1367,24 +1602,55 @@ app.post("/api/modify-reservation", authMiddleware, async (req, res) => {
       return res.status(409).json({ error: "Le nouveau créneau n’est plus disponible" });
     }
 
+    const loyaltyUsed = isReservationPaidWithLoyalty(reservation);
     const oldAmount = getReservationAmountPaid(reservation);
-    const freeLike = isReservationFreeLike(reservation);
-    const newAmount = computeReservationTheoreticalAmount(targetStart, safePersons, reservation);
-    const deltaAmount = freeLike ? 0 : Number((newAmount - oldAmount).toFixed(2));
+    const newAmount = computeSessionCashAmount(targetStart, safePersons, {
+      loyaltyUsed,
+    });
+    const deltaAmount = Number((newAmount - oldAmount).toFixed(2));
 
-    if (!freeLike && deltaAmount > 0) {
-      return res.status(409).json({
-        success: false,
-        requiresAdditionalPayment: true,
-        error:
-          "Cette modification augmente le montant de la réservation. Le paiement complémentaire n'est pas encore branché côté backend.",
-        financial: {
-          oldAmount,
-          newAmount,
-          deltaAmount,
-          freeLike: false,
+    let modificationPaymentIntentId = null;
+    let refundDone = false;
+
+    if (deltaAmount > 0) {
+      const autoCharge = await attemptAutomaticSavedCardCharge({
+        userId: req.userId,
+        customer: customer || { email: reservation.email, prenom: "", nom: "" },
+        amountEur: deltaAmount,
+        metadata: {
+          reservation_id: String(reservation.id),
+          modification_delta_amount: String(deltaAmount),
         },
       });
+
+      if (!autoCharge.success) {
+        return res.status(409).json({
+          success: false,
+          requiresAdditionalPayment: true,
+          error: autoCharge.reason || "Paiement complémentaire requis",
+          clientSecret: autoCharge.clientSecret || null,
+          paymentIntentId: autoCharge.paymentIntentId || null,
+          financial: {
+            oldAmount,
+            newAmount,
+            deltaAmount,
+            loyaltyUsed,
+          },
+        });
+      }
+
+      modificationPaymentIntentId = autoCharge.paymentIntent?.id || null;
+    }
+
+    if (deltaAmount < 0) {
+      const refundAmount = Math.abs(deltaAmount);
+      const refundResult = await attemptRefundUsingReservationPaymentIntents(reservation, refundAmount);
+
+      if (!refundResult.success) {
+        console.warn("⚠️ Remboursement Stripe partiel non effectué :", refundResult.reason || "non disponible");
+      } else {
+        refundDone = true;
+      }
     }
 
     const newDateStr = formatDateToYYYYMMDD(targetStart);
@@ -1398,9 +1664,12 @@ app.post("/api/modify-reservation", authMiddleware, async (req, res) => {
       persons: safePersons,
       nb_personnes: safePersons,
       participants: safePersons,
-      montant: freeLike ? 0 : newAmount,
-      total: freeLike ? 0 : newAmount,
-      total_price: freeLike ? 0 : newAmount,
+      amount_paid: newAmount,
+      montant: newAmount,
+      total: newAmount,
+      total_price: newAmount,
+      latest_payment_intent_id: modificationPaymentIntentId || reservation.latest_payment_intent_id || reservation.payment_intent_id || null,
+      modification_payment_intent_id: modificationPaymentIntentId || reservation.modification_payment_intent_id || null,
       updated_at: new Date().toISOString(),
     };
 
@@ -1413,6 +1682,9 @@ app.post("/api/modify-reservation", authMiddleware, async (req, res) => {
       persons: safePersons,
       nb_personnes: safePersons,
       participants: safePersons,
+      montant: newAmount,
+      total: newAmount,
+      total_price: newAmount,
       updated_at: new Date().toISOString(),
     };
 
@@ -1433,13 +1705,19 @@ app.post("/api/modify-reservation", authMiddleware, async (req, res) => {
 
     return res.json({
       success: true,
-      message: "Réservation modifiée avec succès",
+      message:
+        deltaAmount > 0
+          ? "Réservation modifiée avec paiement complémentaire validé."
+          : deltaAmount < 0
+            ? "Réservation modifiée et remboursement déclenché."
+            : "Réservation modifiée avec succès.",
       reservation: updatedReservation,
       financial: {
         oldAmount,
         newAmount,
         deltaAmount,
-        freeLike,
+        loyaltyUsed,
+        refundDone,
       },
     });
   } catch (e) {
@@ -1499,13 +1777,16 @@ app.post("/api/use-loyalty", authMiddleware, async (req, res) => {
       return res.status(400).json({ error: "Utilisateur introuvable" });
     }
 
-    if (user.points < 100) {
+    if (user.points < LOYALTY_POINTS_COST) {
       return res.status(400).json({ error: "Pas assez de points" });
     }
 
     const { error: updateErr } = await supabase
       .from("users")
-      .update({ points: user.points - 100 })
+      .update({
+        points: user.points - LOYALTY_POINTS_COST,
+        updated_at: new Date().toISOString(),
+      })
       .eq("id", userId);
 
     if (updateErr) {
@@ -1513,7 +1794,7 @@ app.post("/api/use-loyalty", authMiddleware, async (req, res) => {
       return res.status(500).json({ error: "Impossible de retirer les points" });
     }
 
-    return res.json({ success: true, message: "100 points utilisés" });
+    return res.json({ success: true, message: `${LOYALTY_POINTS_COST} points utilisés` });
   } catch (e) {
     console.error("Erreur /api/use-loyalty :", e);
     return res.status(500).json({ error: "Erreur serveur" });
@@ -1572,26 +1853,22 @@ app.post("/api/create-payment-intent", optionalAuthMiddleware, async (req, res) 
       return res.status(400).json({ error: "Panier vide" });
     }
 
-    const totalBeforeDiscount = computeCartTotalEur(panier);
-    let totalAmountEur = totalBeforeDiscount;
-    let discountAmount = 0;
+    const pricing = computeCartPricing(panier, { loyaltyUsed: !!loyaltyUsed });
+    const theoreticalTotal = pricing.totalBeforeDiscount;
+    const loyaltyDiscount = pricing.loyaltyDiscount;
+    let totalAmountEur = pricing.totalCashDue;
+    let promoDiscountAmount = 0;
     let promo = null;
 
     if (promoCode) {
       const result = await validatePromoCode(promoCode, totalAmountEur);
       if (result.ok) {
         totalAmountEur = result.newTotal;
-        discountAmount = result.discountAmount;
+        promoDiscountAmount = result.discountAmount;
         promo = result.promo;
       } else {
         console.warn("Code promo non appliqué :", result.reason);
       }
-    }
-
-    if (loyaltyUsed) {
-      console.log("⭐ Fidélité utilisée : séance gratuite côté backend.");
-      discountAmount = totalBeforeDiscount;
-      totalAmountEur = 0;
     }
 
     if (
@@ -1605,15 +1882,26 @@ app.post("/api/create-payment-intent", optionalAuthMiddleware, async (req, res) 
       }
     }
 
-    console.log("Montant total calculé :", totalAmountEur, "€ ; remise=", discountAmount, "€");
+    console.log(
+      "Montant théorique :",
+      theoreticalTotal,
+      "€ ; remise fidélité =",
+      loyaltyDiscount,
+      "€ ; remise promo =",
+      promoDiscountAmount,
+      "€ ; total cash dû =",
+      totalAmountEur,
+      "€"
+    );
 
     if (totalAmountEur <= 0) {
       console.log("🟢 Séance gratuite : aucun PaymentIntent Stripe créé.");
       return res.json({
         isFree: true,
-        totalBeforeDiscount,
+        totalBeforeDiscount: theoreticalTotal,
+        loyaltyDiscount,
+        promoDiscountAmount,
         totalAfterDiscount: 0,
-        discountAmount: totalBeforeDiscount,
         promo: promo
           ? { id: promo.id, code: promo.code, type: promo.type, value: promo.value }
           : null,
@@ -1658,12 +1946,13 @@ app.post("/api/create-payment-intent", optionalAuthMiddleware, async (req, res) 
           payment_method: pmToUse,
           payment_method_types: ["card"],
           metadata: {
-            panier: JSON.stringify(panier),
+            panier: JSON.stringify(pricing.normalizedItems),
             customer_email: customer?.email || "",
             customer_name: fullName,
             promo_code: promoCode || "",
-            total_before_discount: String(totalBeforeDiscount),
-            discount_amount: String(discountAmount),
+            total_before_discount: String(theoreticalTotal),
+            loyalty_discount_amount: String(loyaltyDiscount),
+            promo_discount_amount: String(promoDiscountAmount),
             loyalty_used: loyaltyUsed ? "true" : "false",
             saved_card: "true",
           },
@@ -1673,9 +1962,10 @@ app.post("/api/create-payment-intent", optionalAuthMiddleware, async (req, res) 
           clientSecret: pi.client_secret,
           paymentIntentId: pi.id,
           isFree: false,
-          totalBeforeDiscount,
+          totalBeforeDiscount: theoreticalTotal,
+          loyaltyDiscount,
+          promoDiscountAmount,
           totalAfterDiscount: totalAmountEur,
-          discountAmount,
           promo: promo ? { id: promo.id, code: promo.code, type: promo.type, value: promo.value } : null,
         });
       } catch (e) {
@@ -1693,12 +1983,13 @@ app.post("/api/create-payment-intent", optionalAuthMiddleware, async (req, res) 
       currency: "eur",
       payment_method_types: ["card"],
       metadata: {
-        panier: JSON.stringify(panier),
+        panier: JSON.stringify(pricing.normalizedItems),
         customer_email: customer?.email || "",
         customer_name: (customer?.prenom || "") + " " + (customer?.nom || ""),
         promo_code: promoCode || "",
-        total_before_discount: String(totalBeforeDiscount),
-        discount_amount: String(discountAmount),
+        total_before_discount: String(theoreticalTotal),
+        loyalty_discount_amount: String(loyaltyDiscount),
+        promo_discount_amount: String(promoDiscountAmount),
         loyalty_used: loyaltyUsed ? "true" : "false",
       },
     });
@@ -1707,9 +1998,10 @@ app.post("/api/create-payment-intent", optionalAuthMiddleware, async (req, res) 
       clientSecret: paymentIntent.client_secret,
       paymentIntentId: paymentIntent.id,
       isFree: false,
-      totalBeforeDiscount,
+      totalBeforeDiscount: theoreticalTotal,
+      loyaltyDiscount,
+      promoDiscountAmount,
       totalAfterDiscount: totalAmountEur,
-      discountAmount,
       promo: promo
         ? { id: promo.id, code: promo.code, type: promo.type, value: promo.value }
         : null,
@@ -1845,11 +2137,30 @@ app.post("/api/confirm-reservation", async (req, res) => {
     console.log("/api/confirm-reservation appelé");
     const { panier, customer, promoCode, paymentIntentId, loyaltyUsed, isFree } = req.body || {};
 
-    const isFreeReservationFlag = !!isFree || !!loyaltyUsed;
-
     if (!panier || !Array.isArray(panier) || panier.length === 0) {
       return res.status(400).json({ error: "Panier vide" });
     }
+
+    const pricing = computeCartPricing(panier, { loyaltyUsed: !!loyaltyUsed });
+    const theoreticalTotal = pricing.totalBeforeDiscount;
+    const loyaltyDiscount = pricing.loyaltyDiscount;
+    let totalCashDue = pricing.totalCashDue;
+
+    let promoDiscountAmount = 0;
+    let promo = null;
+
+    if (promoCode) {
+      const result = await validatePromoCode(promoCode, totalCashDue);
+      if (result.ok) {
+        totalCashDue = result.newTotal;
+        promoDiscountAmount = result.discountAmount;
+        promo = result.promo;
+      } else {
+        console.warn("Code promo non appliqué lors de confirm-reservation :", result.reason);
+      }
+    }
+
+    const isFreeReservationFlag = !!isFree || totalCashDue <= 0;
 
     if (!isFreeReservationFlag) {
       if (!paymentIntentId) {
@@ -1865,7 +2176,7 @@ app.post("/api/confirm-reservation", async (req, res) => {
         return res.status(400).json({ error: "Paiement non validé par Stripe" });
       }
     } else {
-      console.log("✅ Réservation confirmée en mode gratuit (isFree / fidélité).");
+      console.log("✅ Réservation confirmée en mode gratuit.");
     }
 
     if (!supabase) {
@@ -1896,59 +2207,18 @@ app.post("/api/confirm-reservation", async (req, res) => {
     const fullName =
       (customer?.prenom || "") + (customer?.prenom ? " " : "") + (customer?.nom || "");
 
-    const totalBeforeDiscount = computeCartTotalEur(panier);
-    let discountAmount = 0;
-    let promo = null;
+    const rowsBase = pricing.normalizedItems.map((slot) => ({
+      name: fullName || null,
+      email: customer?.email || null,
+      box_id: slot.box_id,
+      start_time: slot.start_time,
+      end_time: slot.end_time,
+      date: slot.date,
+      datetime: slot.datetime,
+      status: "confirmed",
+    }));
 
-    if (promoCode) {
-      const result = await validatePromoCode(promoCode, totalBeforeDiscount);
-      if (result.ok) {
-        discountAmount = result.discountAmount;
-        promo = result.promo;
-      } else {
-        console.warn("Code promo non appliqué lors de confirm-reservation :", result.reason);
-      }
-    }
-
-    const rows = panier.map((slot) => {
-      const times = buildTimesFromSlot(slot);
-      const rawBox = slot.boxId ?? slot.box_id ?? slot.box ?? slot.boxName ?? 1;
-      const numericBoxId = getNumericBoxId(rawBox);
-
-      const personsValue = clampPersons(slot.persons || slot.nb_personnes || 2);
-      const priceValue =
-        typeof slot.price === "number" && !Number.isNaN(slot.price)
-          ? slot.price
-          : PRICE_PER_SLOT_EUR;
-
-      return {
-        name: fullName || null,
-        email: customer?.email || null,
-        box_id: numericBoxId,
-        start_time: times.start_time,
-        end_time: times.end_time,
-        date: times.date,
-        datetime: times.datetime,
-        status: "confirmed",
-
-        persons: personsValue,
-        nb_personnes: personsValue,
-        participants: personsValue,
-
-        montant: isFreeReservationFlag ? 0 : priceValue,
-        total: isFreeReservationFlag ? 0 : priceValue,
-        total_price: isFreeReservationFlag ? 0 : priceValue,
-
-        paid_with_loyalty: !!loyaltyUsed,
-        used_loyalty_reward: !!loyaltyUsed,
-        loyalty_reward_used: !!loyaltyUsed,
-        free_session: !!isFreeReservationFlag,
-        is_free_session: !!isFreeReservationFlag,
-        payment_mode: loyaltyUsed ? "loyalty" : isFree ? "free" : "paid",
-      };
-    });
-
-    for (const row of rows) {
+    for (const row of rowsBase) {
       const { data: conflicts, error: conflictError } = await supabase
         .from("reservations")
         .select("id")
@@ -1969,11 +2239,63 @@ app.post("/api/confirm-reservation", async (req, res) => {
       }
     }
 
-    const { data, error } = await supabase.from("reservations").insert(rows).select();
+    const { data, error } = await supabase.from("reservations").insert(rowsBase).select();
 
     if (error) {
       console.error("Erreur Supabase insert reservations :", error);
       return res.status(500).json({ error: "Erreur en enregistrant la réservation" });
+    }
+
+    for (let i = 0; i < data.length; i += 1) {
+      const insertedReservation = data[i];
+      const slot = pricing.normalizedItems[i];
+
+      const metadataVariants = [
+        {
+          persons: slot.persons,
+          nb_personnes: slot.persons,
+          participants: slot.persons,
+          amount_paid: slot.cashAmountDue,
+          montant: slot.cashAmountDue,
+          total: slot.cashAmountDue,
+          total_price: slot.cashAmountDue,
+          payment_mode: loyaltyUsed ? "loyalty" : isFreeReservationFlag ? "free" : "paid",
+          payment_intent_id: paymentIntentId || null,
+          latest_payment_intent_id: paymentIntentId || null,
+          paid_with_loyalty: !!loyaltyUsed,
+          used_loyalty_reward: !!loyaltyUsed,
+          loyalty_reward_used: !!loyaltyUsed,
+          loyalty_points_used: loyaltyUsed ? LOYALTY_POINTS_COST : 0,
+          loyalty_free_people_count: loyaltyUsed ? LOYALTY_FREE_BILLABLE_PERSONS : 0,
+          free_session: slot.cashAmountDue <= 0,
+          is_free_session: slot.cashAmountDue <= 0,
+          updated_at: new Date().toISOString(),
+        },
+        {
+          persons: slot.persons,
+          nb_personnes: slot.persons,
+          participants: slot.persons,
+          montant: slot.cashAmountDue,
+          total: slot.cashAmountDue,
+          total_price: slot.cashAmountDue,
+          payment_mode: loyaltyUsed ? "loyalty" : isFreeReservationFlag ? "free" : "paid",
+          payment_intent_id: paymentIntentId || null,
+          paid_with_loyalty: !!loyaltyUsed,
+          loyalty_points_used: loyaltyUsed ? LOYALTY_POINTS_COST : 0,
+          updated_at: new Date().toISOString(),
+        },
+        {
+          persons: slot.persons,
+          nb_personnes: slot.persons,
+          participants: slot.persons,
+          montant: slot.cashAmountDue,
+          total: slot.cashAmountDue,
+          total_price: slot.cashAmountDue,
+          updated_at: new Date().toISOString(),
+        },
+      ];
+
+      await updateInsertedReservationMetadata(insertedReservation.id, metadataVariants);
     }
 
     try {
@@ -1983,9 +2305,8 @@ app.post("/api/confirm-reservation", async (req, res) => {
     }
 
     try {
-      const isFreeReservationFinal = isFreeReservationFlag || (promo && promo.type === "free");
-
-      if (userIdFromToken && !isFreeReservationFinal) {
+      const isActuallyFree = totalCashDue <= 0;
+      if (userIdFromToken && !isActuallyFree) {
         const pointsToAdd = panier.length * 10;
 
         const { error: pointsError } = await supabase.rpc("increment_points", {
@@ -2002,17 +2323,17 @@ app.post("/api/confirm-reservation", async (req, res) => {
     }
 
     try {
-      if (promo && discountAmount > 0) {
-        const totalAfterDiscount = Math.max(0, totalBeforeDiscount - discountAmount);
+      if (promo && promoDiscountAmount > 0) {
+        const totalAfterDiscount = Math.max(0, totalCashDue);
 
         await supabase.from("promo_usages").insert({
           promo_id: promo.id,
           code: promo.code,
           email: customer?.email || null,
           payment_intent_id: paymentIntentId || null,
-          total_before: totalBeforeDiscount,
+          total_before: pricing.totalCashDue,
           total_after: totalAfterDiscount,
-          discount_amount: discountAmount,
+          discount_amount: promoDiscountAmount,
         });
 
         const currentUsed = Number(promo.used_count || 0);
@@ -2028,12 +2349,18 @@ app.post("/api/confirm-reservation", async (req, res) => {
     return res.json({
       status: "ok",
       reservations: data,
+      pricing: {
+        totalBeforeDiscount: theoreticalTotal,
+        loyaltyDiscount,
+        promoDiscountAmount,
+        totalAfterDiscount: totalCashDue,
+      },
       promo: promo
         ? {
             code: promo.code,
-            discountAmount,
-            totalBefore: totalBeforeDiscount,
-            totalAfter: Math.max(0, totalBeforeDiscount - discountAmount),
+            discountAmount: promoDiscountAmount,
+            totalBefore: pricing.totalCashDue,
+            totalAfter: totalCashDue,
           }
         : null,
     });
@@ -2074,13 +2401,39 @@ app.post("/api/refund-reservation", authMiddleware, async (req, res) => {
       });
     }
 
-    const freeLike = isReservationFreeLike(reservation);
+    const loyaltyUsed = isReservationPaidWithLoyalty(reservation);
+    const loyaltyPointsToRefund = loyaltyUsed ? getReservationLoyaltyPointsUsed(reservation) : 0;
+    const cashAmountToRefund = getReservationAmountPaid(reservation);
 
-    if (freeLike) {
-      await refundPointsToUser(req.userId, 100);
+    let stripeRefundDone = false;
+    let loyaltyRefundDone = false;
+
+    if (cashAmountToRefund > 0) {
+      const refundResult = await attemptRefundUsingReservationPaymentIntents(
+        reservation,
+        cashAmountToRefund
+      );
+
+      if (refundResult.success) {
+        stripeRefundDone = true;
+      } else {
+        console.warn("⚠️ Impossible de rembourser Stripe :", refundResult.reason || "pas de PI");
+      }
+    }
+
+    if (loyaltyPointsToRefund > 0) {
+      await refundPointsToUser(req.userId, loyaltyPointsToRefund);
+      loyaltyRefundDone = true;
     }
 
     const updatedReservation = await tryUpdateReservationWithFallbacks(reservation.id, [
+      {
+        status: "cancelled",
+        refunded_at: new Date().toISOString(),
+        refund_amount: cashAmountToRefund,
+        loyalty_refunded_points: loyaltyPointsToRefund,
+        updated_at: new Date().toISOString(),
+      },
       {
         status: "cancelled",
         updated_at: new Date().toISOString(),
@@ -2092,11 +2445,19 @@ app.post("/api/refund-reservation", authMiddleware, async (req, res) => {
 
     return res.json({
       success: true,
-      message: freeLike
-        ? "Réservation annulée. Les 100 points de fidélité ont été recrédités."
-        : "Réservation annulée. Le remboursement Stripe reste à brancher si nécessaire.",
+      message:
+        loyaltyRefundDone && stripeRefundDone
+          ? "Réservation annulée. Paiement remboursé et points recrédités."
+          : loyaltyRefundDone
+            ? "Réservation annulée. Les points de fidélité ont été recrédités."
+            : stripeRefundDone
+              ? "Réservation annulée. Le paiement a été remboursé."
+              : "Réservation annulée.",
       reservation: updatedReservation,
-      loyaltyRefunded: freeLike,
+      stripeRefundDone,
+      loyaltyRefundDone,
+      loyaltyPointsRefunded: loyaltyPointsToRefund,
+      cashRefundAmount: cashAmountToRefund,
     });
   } catch (e) {
     console.error("Erreur /api/refund-reservation :", e);
