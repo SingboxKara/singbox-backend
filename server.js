@@ -251,16 +251,6 @@ function areTimeRangesOverlapping(startA, endA, startB, endB) {
   return aStart.getTime() < bEnd.getTime() && aEnd.getTime() > bStart.getTime();
 }
 
-function computeCartTotalEur(panier) {
-  return panier.reduce((sum, item) => {
-    const price =
-      typeof item.price === "number" && !Number.isNaN(item.price)
-        ? item.price
-        : PRICE_PER_SLOT_EUR;
-    return sum + price;
-  }, 0);
-}
-
 function buildTimesFromSlot(slot) {
   if (slot.start_time && slot.end_time) {
     const dateFromStart = slot.date || String(slot.start_time).slice(0, 10);
@@ -354,7 +344,21 @@ function roundMoney(value) {
 // Helpers fidélité / pricing
 // ------------------------------------------------------
 function isReservationPaidWithLoyalty(reservation) {
-  return !!reservation?.loyalty_used;
+  if (reservation?.loyalty_used === true) return true;
+
+  const pointsSpent = Number(reservation?.points_spent || 0);
+  if (Number.isFinite(pointsSpent) && pointsSpent >= LOYALTY_POINTS_COST) return true;
+
+  const freeSession = reservation?.free_session === true;
+  const montant = Number(reservation?.montant || 0);
+  const hasNoPaymentIntent = !reservation?.payment_intent_id;
+  const hasNoPromo = !String(reservation?.promo_code || "").trim();
+
+  if (freeSession && montant === 0 && hasNoPaymentIntent && hasNoPromo) {
+    return true;
+  }
+
+  return false;
 }
 
 function getReservationLoyaltyPointsUsed(reservation) {
@@ -459,7 +463,7 @@ function computeCartPricing(panier, options = {}) {
 }
 
 function computeReservationTargetAmount({ reservation, targetStart, targetPersons }) {
-  const loyaltyUsed = !!reservation.loyalty_used;
+  const loyaltyUsed = isReservationPaidWithLoyalty(reservation);
 
   return computeSessionCashAmount(targetStart, targetPersons, {
     loyaltyUsed,
@@ -630,6 +634,74 @@ async function getReservationOwnedByUser(reservationId, userId) {
 }
 
 // ------------------------------------------------------
+// Helpers points fidélité
+// ------------------------------------------------------
+async function consumeLoyaltyPointsForUser(userId, pointsToSpend) {
+  if (!supabase) throw new Error("Supabase non configuré");
+  if (!pointsToSpend || pointsToSpend <= 0) {
+    return { success: true, deducted: 0 };
+  }
+
+  const { data: user, error: userErr } = await supabase
+    .from("users")
+    .select("id, points")
+    .eq("id", userId)
+    .single();
+
+  if (userErr || !user) {
+    throw new Error("Utilisateur introuvable pour débit fidélité");
+  }
+
+  const currentPoints = Number(user.points || 0);
+  if (currentPoints < pointsToSpend) {
+    return {
+      success: false,
+      reason: "Pas assez de points de fidélité",
+      currentPoints,
+      requiredPoints: pointsToSpend,
+    };
+  }
+
+  const newPoints = currentPoints - pointsToSpend;
+
+  const { error: updateErr } = await supabase
+    .from("users")
+    .update({
+      points: newPoints,
+      updated_at: new Date().toISOString(),
+    })
+    .eq("id", userId);
+
+  if (updateErr) {
+    throw updateErr;
+  }
+
+  return {
+    success: true,
+    deducted: pointsToSpend,
+    remainingPoints: newPoints,
+  };
+}
+
+async function refundPointsToUser(userId, pointsToRefund) {
+  if (!supabase) throw new Error("Supabase non configuré");
+  if (!pointsToRefund || pointsToRefund <= 0) return;
+
+  const user = await getUserById(userId);
+  const currentPoints = Number(user.points || 0);
+
+  const { error } = await supabase
+    .from("users")
+    .update({
+      points: currentPoints + pointsToRefund,
+      updated_at: new Date().toISOString(),
+    })
+    .eq("id", userId);
+
+  if (error) throw error;
+}
+
+// ------------------------------------------------------
 // Stripe customer helpers
 // ------------------------------------------------------
 async function ensureStripeCustomer(userId) {
@@ -754,24 +826,6 @@ function getReservationPaymentIntentCandidates(reservation) {
   ].filter(Boolean);
 }
 
-async function attemptStripePartialRefund(
-  paymentIntentId,
-  amountEur,
-  reason = "requested_by_customer"
-) {
-  if (!stripe || !paymentIntentId || !amountEur || amountEur <= 0) {
-    return { success: false, skipped: true };
-  }
-
-  const refund = await stripe.refunds.create({
-    payment_intent: paymentIntentId,
-    amount: Math.round(Number(amountEur) * 100),
-    reason,
-  });
-
-  return { success: true, refund };
-}
-
 async function attemptAutomaticRefundAcrossPaymentIntents(reservation, refundAmountEur) {
   if (!stripe) throw new Error("Stripe non configuré");
 
@@ -841,24 +895,6 @@ async function attemptAutomaticRefundAcrossPaymentIntents(reservation, refundAmo
     refundedAmountEur: refundAmountEur,
     refunds,
   };
-}
-
-async function refundPointsToUser(userId, pointsToRefund) {
-  if (!supabase) throw new Error("Supabase non configuré");
-  if (!pointsToRefund || pointsToRefund <= 0) return;
-
-  const user = await getUserById(userId);
-  const currentPoints = Number(user.points || 0);
-
-  const { error } = await supabase
-    .from("users")
-    .update({
-      points: currentPoints + pointsToRefund,
-      updated_at: new Date().toISOString(),
-    })
-    .eq("id", userId);
-
-  if (error) throw error;
 }
 
 async function attemptAutomaticSavedCardCharge({
@@ -938,7 +974,7 @@ async function attemptAutomaticSavedCardCharge({
 }
 
 // ------------------------------------------------------
-// Envoi d'email avec QR code pour une réservation
+// Envoi d'email
 // ------------------------------------------------------
 async function sendReservationEmail(reservation) {
   if (!mailEnabled || !resend) {
@@ -1576,6 +1612,290 @@ app.get("/api/my-reservations/:id", authMiddleware, async (req, res) => {
 });
 
 // ------------------------------------------------------
+// OPTIONS DE MODIFICATION
+// ------------------------------------------------------
+app.post("/api/reservation-modification-options", authMiddleware, async (req, res) => {
+  try {
+    if (!supabase) {
+      return res.status(500).json({ error: "Supabase non configuré" });
+    }
+
+    const { reservationId } = req.body || {};
+
+    if (!reservationId) {
+      return res.status(400).json({ error: "reservationId manquant" });
+    }
+
+    const reservation = await getReservationOwnedByUser(reservationId, req.userId);
+    if (!reservation) {
+      return res.status(404).json({ error: "Réservation introuvable" });
+    }
+
+    if (!isReservationStatusModifiable(reservation.status)) {
+      return res.status(400).json({ error: "Statut de réservation non modifiable" });
+    }
+
+    if (!isWithinModificationWindow(reservation.start_time)) {
+      return res.status(400).json({
+        error: `Modification impossible à moins de ${MODIFICATION_DEADLINE_HOURS}h avant la séance`,
+      });
+    }
+
+    const currentStart = parseDateOrNull(reservation.start_time);
+    if (!currentStart) {
+      return res.status(400).json({ error: "Date de réservation invalide" });
+    }
+
+    const reservationDate = reservation.date || formatDateToYYYYMMDD(currentStart);
+    const boxId = reservation.box_id;
+    const currentPersons = getReservationPersons(reservation);
+    const loyaltyUsed = isReservationPaidWithLoyalty(reservation);
+
+    const options = [];
+
+    for (const slotHour of STANDARD_SLOT_STARTS) {
+      const { startIso, endIso } = buildSlotIsoRange(reservationDate, slotHour);
+      const startDate = new Date(startIso);
+
+      if (Math.abs(startDate.getTime() - currentStart.getTime()) < 60 * 1000) {
+        continue;
+      }
+
+      if (!isWithinModificationWindow(startIso)) {
+        continue;
+      }
+
+      const conflict = await hasReservationConflict({
+        boxId,
+        startTime: startIso,
+        endTime: endIso,
+        localDate: reservationDate,
+        excludeReservationId: reservation.id,
+      });
+
+      if (conflict) {
+        continue;
+      }
+
+      options.push({
+        startTime: startIso,
+        endTime: endIso,
+        boxId,
+        boxName: `Box ${boxId}`,
+        estimatedAmount: computeSessionCashAmount(startDate, currentPersons, {
+          loyaltyUsed,
+        }),
+      });
+    }
+
+    return res.json({
+      reservationId: reservation.id,
+      options,
+      loyaltyUsed,
+      currentPersons,
+      loyaltyPointsUsed: getReservationLoyaltyPointsUsed(reservation),
+      slotStarts: STANDARD_SLOT_STARTS,
+    });
+  } catch (e) {
+    console.error("Erreur /api/reservation-modification-options :", e);
+    return res.status(500).json({ error: "Erreur serveur" });
+  }
+});
+
+// ------------------------------------------------------
+// MODIFIER UNE RÉSERVATION
+// ------------------------------------------------------
+app.post("/api/modify-reservation", authMiddleware, async (req, res) => {
+  try {
+    if (!supabase) {
+      return res.status(500).json({ error: "Supabase non configuré" });
+    }
+
+    const {
+      reservationId,
+      newStartTime,
+      newEndTime,
+      newPersons,
+      boxId,
+      customer,
+    } = req.body || {};
+
+    if (!reservationId) {
+      return res.status(400).json({ error: "reservationId manquant" });
+    }
+
+    const reservation = await getReservationOwnedByUser(reservationId, req.userId);
+    if (!reservation) {
+      return res.status(404).json({ error: "Réservation introuvable" });
+    }
+
+    if (!isReservationStatusModifiable(reservation.status)) {
+      return res.status(400).json({ error: "Statut de réservation non modifiable" });
+    }
+
+    if (!isWithinModificationWindow(reservation.start_time)) {
+      return res.status(400).json({
+        error: `Modification impossible à moins de ${MODIFICATION_DEADLINE_HOURS}h avant la séance`,
+      });
+    }
+
+    const safePersons = clampPersons(newPersons || getReservationPersons(reservation));
+
+    const targetStart = parseDateOrNull(newStartTime || reservation.start_time);
+    const targetEnd =
+      parseDateOrNull(newEndTime) ||
+      new Date(targetStart.getTime() + SLOT_DURATION_MINUTES * 60 * 1000);
+
+    if (!targetStart || !targetEnd) {
+      return res.status(400).json({ error: "Nouveau créneau invalide" });
+    }
+
+    if (!isWithinModificationWindow(targetStart.toISOString())) {
+      return res.status(400).json({
+        error: `Le nouveau créneau doit aussi être à plus de ${MODIFICATION_DEADLINE_HOURS}h de l'heure actuelle`,
+      });
+    }
+
+    const targetBoxId = Number(boxId || reservation.box_id || 1);
+    const targetLocalDate = formatDateToYYYYMMDD(targetStart);
+
+    const conflict = await hasReservationConflict({
+      boxId: targetBoxId,
+      startTime: targetStart.toISOString(),
+      endTime: targetEnd.toISOString(),
+      localDate: targetLocalDate,
+      excludeReservationId: reservation.id,
+    });
+
+    if (conflict) {
+      return res.status(409).json({ error: "Le nouveau créneau n’est plus disponible" });
+    }
+
+    const loyaltyUsed = isReservationPaidWithLoyalty(reservation);
+
+    const { oldAmount, newAmount, deltaAmount } = computeModificationDelta({
+      reservation,
+      targetStart,
+      targetPersons: safePersons,
+    });
+
+    let autoChargeDone = false;
+    let refundDone = false;
+    let newPaymentIntentId = null;
+
+    if (deltaAmount > 0) {
+      const autoCharge = await attemptAutomaticSavedCardCharge({
+        userId: req.userId,
+        customer: customer || { email: reservation.email, prenom: "", nom: "" },
+        amountEur: deltaAmount,
+        metadata: {
+          reservation_id: String(reservation.id),
+          modification_delta_amount: String(deltaAmount),
+          modification_type: "increase",
+        },
+      });
+
+      if (!autoCharge.success) {
+        return res.status(409).json({
+          success: false,
+          requiresAdditionalPayment: true,
+          error:
+            autoCharge.reason ||
+            "Le débit automatique a échoué. Une authentification ou une nouvelle carte est requise.",
+          clientSecret: autoCharge.clientSecret || null,
+          paymentIntentId: autoCharge.paymentIntentId || null,
+          financial: {
+            oldAmount,
+            newAmount,
+            deltaAmount,
+            loyaltyUsed,
+          },
+        });
+      }
+
+      autoChargeDone = true;
+      newPaymentIntentId = autoCharge.paymentIntent?.id || null;
+    }
+
+    if (deltaAmount < 0) {
+      const refundAmount = Math.abs(deltaAmount);
+
+      const refundResult = await attemptAutomaticRefundAcrossPaymentIntents(
+        reservation,
+        refundAmount
+      );
+
+      if (!refundResult.success) {
+        return res.status(500).json({
+          error:
+            refundResult.reason ||
+            "Impossible d’effectuer automatiquement le remboursement Stripe.",
+          financial: {
+            oldAmount,
+            newAmount,
+            deltaAmount,
+            loyaltyUsed,
+          },
+        });
+      }
+
+      refundDone = true;
+    }
+
+    const updatedReservation = await updateReservationById(reservation.id, {
+      start_time: targetStart.toISOString(),
+      end_time: targetEnd.toISOString(),
+      date: targetLocalDate,
+      datetime: targetStart.toISOString(),
+      box_id: targetBoxId,
+      persons: safePersons,
+      billable_persons: getBillablePersons(safePersons),
+      montant: newAmount,
+      free_session: newAmount <= 0,
+      loyalty_used: loyaltyUsed,
+      points_spent: loyaltyUsed ? LOYALTY_POINTS_COST : 0,
+      latest_payment_intent_id:
+        newPaymentIntentId ||
+        reservation.latest_payment_intent_id ||
+        reservation.payment_intent_id ||
+        reservation.original_payment_intent_id ||
+        null,
+      original_payment_intent_id:
+        reservation.original_payment_intent_id ||
+        reservation.payment_intent_id ||
+        null,
+      refunded_amount: roundMoney(
+        Number(reservation.refunded_amount || 0) + (deltaAmount < 0 ? Math.abs(deltaAmount) : 0)
+      ),
+      last_auto_charge_amount: deltaAmount > 0 ? deltaAmount : 0,
+      updated_at: new Date().toISOString(),
+    });
+
+    return res.json({
+      success: true,
+      message:
+        deltaAmount > 0
+          ? "Réservation modifiée avec débit automatique du supplément."
+          : deltaAmount < 0
+            ? "Réservation modifiée avec remboursement automatique."
+            : "Réservation modifiée sans supplément ni remboursement.",
+      reservation: updatedReservation,
+      financial: {
+        oldAmount,
+        newAmount,
+        deltaAmount,
+        loyaltyUsed,
+        autoChargeDone,
+        refundDone,
+      },
+    });
+  } catch (e) {
+    console.error("Erreur /api/modify-reservation :", e);
+    return res.status(500).json({ error: "Erreur serveur lors de la modification" });
+  }
+});
+
+// ------------------------------------------------------
 // POINTS FIDÉLITÉ
 // ------------------------------------------------------
 app.post("/api/add-points", authMiddleware, async (req, res) => {
@@ -1748,6 +2068,12 @@ app.post("/api/create-payment-intent", optionalAuthMiddleware, async (req, res) 
       totalAmountEur,
       "€"
     );
+
+    if (loyaltyUsed && !req.userId) {
+      return res.status(401).json({
+        error: "Connexion requise pour utiliser les points de fidélité",
+      });
+    }
 
     if (totalAmountEur <= 0) {
       console.log("🟢 Séance gratuite : aucun PaymentIntent Stripe créé.");
@@ -1978,6 +2304,10 @@ app.post("/api/create-deposit-intent", optionalAuthMiddleware, async (req, res) 
 // CONFIRM RESERVATION
 // ------------------------------------------------------
 app.post("/api/confirm-reservation", async (req, res) => {
+  let userIdFromToken = null;
+  let loyaltyPointsDebited = false;
+  let loyaltyPointsDebitedAmount = 0;
+
   try {
     console.log("/api/confirm-reservation appelé");
     const { panier, customer, promoCode, paymentIntentId, loyaltyUsed, isFree } = req.body || {};
@@ -2010,6 +2340,23 @@ app.post("/api/confirm-reservation", async (req, res) => {
 
     const isFreeReservationFlag = !!isFree || totalCashDue <= 0;
 
+    try {
+      const authHeader = req.headers.authorization;
+      const token = authHeader?.startsWith("Bearer ") ? authHeader.split(" ")[1] : null;
+      if (token) {
+        const decoded = jwt.verify(token, process.env.JWT_SECRET);
+        userIdFromToken = decoded.userId;
+      }
+    } catch (e) {
+      console.warn("⚠️ Token invalide sur /api/confirm-reservation :", e.message);
+    }
+
+    if (loyaltyUsed && !userIdFromToken) {
+      return res.status(401).json({
+        error: "Connexion requise pour utiliser la fidélité",
+      });
+    }
+
     if (!isFreeReservationFlag) {
       if (!paymentIntentId) {
         return res.status(400).json({ error: "paymentIntentId manquant" });
@@ -2032,16 +2379,22 @@ app.post("/api/confirm-reservation", async (req, res) => {
       return res.json({ status: "ok (sans enregistrement Supabase)" });
     }
 
-    let userIdFromToken = null;
-    try {
-      const authHeader = req.headers.authorization;
-      const token = authHeader?.startsWith("Bearer ") ? authHeader.split(" ")[1] : null;
-      if (token) {
-        const decoded = jwt.verify(token, process.env.JWT_SECRET);
-        userIdFromToken = decoded.userId;
+    if (loyaltyUsed) {
+      const loyaltyConsume = await consumeLoyaltyPointsForUser(
+        userIdFromToken,
+        LOYALTY_POINTS_COST
+      );
+
+      if (!loyaltyConsume.success) {
+        return res.status(400).json({
+          error: loyaltyConsume.reason || "Pas assez de points de fidélité",
+          currentPoints: loyaltyConsume.currentPoints ?? null,
+          requiredPoints: loyaltyConsume.requiredPoints ?? LOYALTY_POINTS_COST,
+        });
       }
-    } catch (e) {
-      console.warn("⚠️ Token invalide sur /api/confirm-reservation :", e.message);
+
+      loyaltyPointsDebited = true;
+      loyaltyPointsDebitedAmount = LOYALTY_POINTS_COST;
     }
 
     try {
@@ -2092,6 +2445,10 @@ app.post("/api/confirm-reservation", async (req, res) => {
       });
 
       if (hasConflict) {
+        if (loyaltyPointsDebited && userIdFromToken && loyaltyPointsDebitedAmount > 0) {
+          await refundPointsToUser(userIdFromToken, loyaltyPointsDebitedAmount);
+        }
+
         return res.status(409).json({
           error: "Ce créneau est déjà réservé pour la box " + row.box_id + ".",
         });
@@ -2107,6 +2464,10 @@ app.post("/api/confirm-reservation", async (req, res) => {
         .single();
 
       if (error) {
+        if (loyaltyPointsDebited && userIdFromToken && loyaltyPointsDebitedAmount > 0) {
+          await refundPointsToUser(userIdFromToken, loyaltyPointsDebitedAmount);
+        }
+
         console.error("Erreur Supabase insert reservations :", error);
         return res.status(500).json({ error: "Erreur en enregistrant la réservation" });
       }
@@ -2171,6 +2532,10 @@ app.post("/api/confirm-reservation", async (req, res) => {
         promoDiscountAmount,
         totalAfterDiscount: totalCashDue,
       },
+      loyalty: {
+        used: !!loyaltyUsed,
+        pointsSpent: loyaltyUsed ? loyaltyPointsDebitedAmount : 0,
+      },
       promo: promo
         ? {
             code: promo.code,
@@ -2181,292 +2546,16 @@ app.post("/api/confirm-reservation", async (req, res) => {
         : null,
     });
   } catch (err) {
+    if (loyaltyPointsDebited && userIdFromToken && loyaltyPointsDebitedAmount > 0) {
+      try {
+        await refundPointsToUser(userIdFromToken, loyaltyPointsDebitedAmount);
+      } catch (refundErr) {
+        console.error("❌ Impossible de recréditer les points après échec :", refundErr);
+      }
+    }
+
     console.error("Erreur confirm-reservation :", err);
     return res.status(500).json({ error: "Erreur serveur lors de la réservation" });
-  }
-});
-
-// ------------------------------------------------------
-// OPTIONS DE MODIFICATION
-// ------------------------------------------------------
-app.post("/api/reservation-modification-options", authMiddleware, async (req, res) => {
-  try {
-    if (!supabase) {
-      return res.status(500).json({ error: "Supabase non configuré" });
-    }
-
-    const { reservationId } = req.body || {};
-
-    if (!reservationId) {
-      return res.status(400).json({ error: "reservationId manquant" });
-    }
-
-    const reservation = await getReservationOwnedByUser(reservationId, req.userId);
-    if (!reservation) {
-      return res.status(404).json({ error: "Réservation introuvable" });
-    }
-
-    if (!isReservationStatusModifiable(reservation.status)) {
-      return res.status(400).json({ error: "Statut de réservation non modifiable" });
-    }
-
-    if (!isWithinModificationWindow(reservation.start_time)) {
-      return res.status(400).json({
-        error: `Modification impossible à moins de ${MODIFICATION_DEADLINE_HOURS}h avant la séance`,
-      });
-    }
-
-    const currentStart = parseDateOrNull(reservation.start_time);
-    if (!currentStart) {
-      return res.status(400).json({ error: "Date de réservation invalide" });
-    }
-
-    const reservationDate = reservation.date || formatDateToYYYYMMDD(currentStart);
-    const boxId = reservation.box_id;
-    const currentPersons = getReservationPersons(reservation);
-    const loyaltyUsed = isReservationPaidWithLoyalty(reservation);
-
-    const options = [];
-
-    for (const slotHour of STANDARD_SLOT_STARTS) {
-      const { startIso, endIso } = buildSlotIsoRange(reservationDate, slotHour);
-      const startDate = new Date(startIso);
-
-      if (Math.abs(startDate.getTime() - currentStart.getTime()) < 60 * 1000) {
-        continue;
-      }
-
-      if (!isWithinModificationWindow(startIso)) {
-        continue;
-      }
-
-      const conflict = await hasReservationConflict({
-        boxId,
-        startTime: startIso,
-        endTime: endIso,
-        localDate: reservationDate,
-        excludeReservationId: reservation.id,
-      });
-
-      if (conflict) {
-        continue;
-      }
-
-      options.push({
-        startTime: startIso,
-        endTime: endIso,
-        boxId,
-        boxName: `Box ${boxId}`,
-        estimatedAmount: computeSessionCashAmount(startDate, currentPersons, {
-          loyaltyUsed,
-        }),
-      });
-    }
-
-    return res.json({
-      reservationId: reservation.id,
-      options,
-      loyaltyUsed,
-      currentPersons,
-      loyaltyPointsUsed: getReservationLoyaltyPointsUsed(reservation),
-      slotStarts: STANDARD_SLOT_STARTS,
-    });
-  } catch (e) {
-    console.error("Erreur /api/reservation-modification-options :", e);
-    return res.status(500).json({ error: "Erreur serveur" });
-  }
-});
-
-// ------------------------------------------------------
-// MODIFIER UNE RÉSERVATION
-// ------------------------------------------------------
-app.post("/api/modify-reservation", authMiddleware, async (req, res) => {
-  try {
-    if (!supabase) {
-      return res.status(500).json({ error: "Supabase non configuré" });
-    }
-
-    const {
-      reservationId,
-      newStartTime,
-      newEndTime,
-      newPersons,
-      boxId,
-      customer,
-    } = req.body || {};
-
-    if (!reservationId) {
-      return res.status(400).json({ error: "reservationId manquant" });
-    }
-
-    const reservation = await getReservationOwnedByUser(reservationId, req.userId);
-    if (!reservation) {
-      return res.status(404).json({ error: "Réservation introuvable" });
-    }
-
-    if (!isReservationStatusModifiable(reservation.status)) {
-      return res.status(400).json({ error: "Statut de réservation non modifiable" });
-    }
-
-    if (!isWithinModificationWindow(reservation.start_time)) {
-      return res.status(400).json({
-        error: `Modification impossible à moins de ${MODIFICATION_DEADLINE_HOURS}h avant la séance`,
-      });
-    }
-
-    const safePersons = clampPersons(newPersons || getReservationPersons(reservation));
-
-    const targetStart = parseDateOrNull(newStartTime || reservation.start_time);
-    const targetEnd =
-      parseDateOrNull(newEndTime) ||
-      new Date(targetStart.getTime() + SLOT_DURATION_MINUTES * 60 * 1000);
-
-    if (!targetStart || !targetEnd) {
-      return res.status(400).json({ error: "Nouveau créneau invalide" });
-    }
-
-    if (!isWithinModificationWindow(targetStart.toISOString())) {
-      return res.status(400).json({
-        error: `Le nouveau créneau doit aussi être à plus de ${MODIFICATION_DEADLINE_HOURS}h de l'heure actuelle`,
-      });
-    }
-
-    const targetBoxId = Number(boxId || reservation.box_id || 1);
-    const targetLocalDate = formatDateToYYYYMMDD(targetStart);
-
-    const conflict = await hasReservationConflict({
-      boxId: targetBoxId,
-      startTime: targetStart.toISOString(),
-      endTime: targetEnd.toISOString(),
-      localDate: targetLocalDate,
-      excludeReservationId: reservation.id,
-    });
-
-    if (conflict) {
-      return res.status(409).json({ error: "Le nouveau créneau n’est plus disponible" });
-    }
-
-    const loyaltyUsed = !!reservation.loyalty_used;
-
-    const { oldAmount, newAmount, deltaAmount } = computeModificationDelta({
-      reservation,
-      targetStart,
-      targetPersons: safePersons,
-    });
-
-    let autoChargeDone = false;
-    let refundDone = false;
-    let newPaymentIntentId = null;
-
-    if (deltaAmount > 0) {
-      const autoCharge = await attemptAutomaticSavedCardCharge({
-        userId: req.userId,
-        customer: customer || { email: reservation.email, prenom: "", nom: "" },
-        amountEur: deltaAmount,
-        metadata: {
-          reservation_id: String(reservation.id),
-          modification_delta_amount: String(deltaAmount),
-          modification_type: "increase",
-        },
-      });
-
-      if (!autoCharge.success) {
-        return res.status(409).json({
-          success: false,
-          requiresAdditionalPayment: true,
-          error:
-            autoCharge.reason ||
-            "Le débit automatique a échoué. Une authentification ou une nouvelle carte est requise.",
-          clientSecret: autoCharge.clientSecret || null,
-          paymentIntentId: autoCharge.paymentIntentId || null,
-          financial: {
-            oldAmount,
-            newAmount,
-            deltaAmount,
-            loyaltyUsed,
-          },
-        });
-      }
-
-      autoChargeDone = true;
-      newPaymentIntentId = autoCharge.paymentIntent?.id || null;
-    }
-
-    if (deltaAmount < 0) {
-      const refundAmount = Math.abs(deltaAmount);
-
-      const refundResult = await attemptAutomaticRefundAcrossPaymentIntents(
-        reservation,
-        refundAmount
-      );
-
-      if (!refundResult.success) {
-        return res.status(500).json({
-          error:
-            refundResult.reason ||
-            "Impossible d’effectuer automatiquement le remboursement Stripe.",
-          financial: {
-            oldAmount,
-            newAmount,
-            deltaAmount,
-            loyaltyUsed,
-          },
-        });
-      }
-
-      refundDone = true;
-    }
-
-    const updatedReservation = await updateReservationById(reservation.id, {
-      start_time: targetStart.toISOString(),
-      end_time: targetEnd.toISOString(),
-      date: targetLocalDate,
-      datetime: targetStart.toISOString(),
-      box_id: targetBoxId,
-      persons: safePersons,
-      billable_persons: getBillablePersons(safePersons),
-      montant: newAmount,
-      free_session: newAmount <= 0,
-      loyalty_used: loyaltyUsed,
-      points_spent: loyaltyUsed ? LOYALTY_POINTS_COST : 0,
-      latest_payment_intent_id:
-        newPaymentIntentId ||
-        reservation.latest_payment_intent_id ||
-        reservation.payment_intent_id ||
-        reservation.original_payment_intent_id ||
-        null,
-      original_payment_intent_id:
-        reservation.original_payment_intent_id ||
-        reservation.payment_intent_id ||
-        null,
-      refunded_amount: roundMoney(
-        Number(reservation.refunded_amount || 0) + (deltaAmount < 0 ? Math.abs(deltaAmount) : 0)
-      ),
-      last_auto_charge_amount: deltaAmount > 0 ? deltaAmount : 0,
-      updated_at: new Date().toISOString(),
-    });
-
-    return res.json({
-      success: true,
-      message:
-        deltaAmount > 0
-          ? "Réservation modifiée avec débit automatique du supplément."
-          : deltaAmount < 0
-            ? "Réservation modifiée avec remboursement automatique."
-            : "Réservation modifiée sans supplément ni remboursement.",
-      reservation: updatedReservation,
-      financial: {
-        oldAmount,
-        newAmount,
-        deltaAmount,
-        loyaltyUsed,
-        autoChargeDone,
-        refundDone,
-      },
-    });
-  } catch (e) {
-    console.error("Erreur /api/modify-reservation :", e);
-    return res.status(500).json({ error: "Erreur serveur lors de la modification" });
   }
 });
 
@@ -2501,8 +2590,8 @@ app.post("/api/refund-reservation", authMiddleware, async (req, res) => {
       });
     }
 
-    const loyaltyUsed = !!reservation.loyalty_used;
-    const loyaltyPointsToRefund = loyaltyUsed ? Number(reservation.points_spent || 0) : 0;
+    const loyaltyUsed = isReservationPaidWithLoyalty(reservation);
+    const loyaltyPointsToRefund = loyaltyUsed ? Number(getReservationLoyaltyPointsUsed(reservation)) : 0;
     const cashAmountToRefund = Number(reservation.montant || 0);
 
     let stripeRefundDone = false;
