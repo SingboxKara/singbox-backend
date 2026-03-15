@@ -220,6 +220,12 @@ function isReservationStatusConfirmed(statusRaw) {
   return CONFIRMED_STATUSES.map(normalizeReservationStatus).includes(s);
 }
 
+function isReservationStatusBlocking(statusRaw) {
+  const s = normalizeReservationStatus(statusRaw);
+  if (!s) return false;
+  return s !== "cancelled" && s !== "annulee" && s !== "annulé" && s !== "annule";
+}
+
 function isReservationStatusModifiable(statusRaw) {
   return isReservationStatusConfirmed(statusRaw);
 }
@@ -334,6 +340,20 @@ function buildSlotIsoRange(dateStr, slotHourFloat) {
   const endIso = `${endY}-${endM}-${endD}T${endH}:${endMin}:00${OFFSET}`;
 
   return { startIso, endIso };
+}
+
+function buildTimesFromDateAndStartMinutes(dateStr, startMinutes) {
+  const hourNum = Math.floor(startMinutes / 60);
+  const minuteNum = startMinutes % 60;
+  const slotHourFloat = hourNum + minuteNum / 60;
+  const { startIso, endIso } = buildSlotIsoRange(dateStr, slotHourFloat);
+
+  return {
+    start_time: startIso,
+    end_time: endIso,
+    date: dateStr,
+    datetime: startIso,
+  };
 }
 
 function roundMoney(value) {
@@ -806,6 +826,45 @@ async function hasReservationConflict({
   );
 }
 
+async function hasBlockingReservationConflict({
+  boxId,
+  startTime,
+  endTime,
+  localDate = null,
+  excludeReservationId = null,
+}) {
+  if (!supabase) throw new Error("Supabase non configuré");
+
+  const candidateDates = [];
+  if (localDate) {
+    candidateDates.push(localDate);
+    candidateDates.push(addDaysToDateString(localDate, -1));
+    candidateDates.push(addDaysToDateString(localDate, 1));
+  }
+
+  let query = supabase
+    .from("reservations")
+    .select("id, box_id, start_time, end_time, status, date")
+    .eq("box_id", boxId);
+
+  if (candidateDates.length > 0) {
+    query = query.in("date", [...new Set(candidateDates)]);
+  }
+
+  if (excludeReservationId) {
+    query = query.neq("id", excludeReservationId);
+  }
+
+  const { data, error } = await query;
+  if (error) throw error;
+
+  return (data || [])
+    .filter((row) => isReservationStatusBlocking(row.status))
+    .some((row) =>
+      areTimeRangesOverlapping(row.start_time, row.end_time, startTime, endTime)
+    );
+}
+
 async function updateReservationById(reservationId, payload) {
   const { data, error } = await supabase
     .from("reservations")
@@ -970,6 +1029,61 @@ async function attemptAutomaticSavedCardCharge({
     }
 
     throw e;
+  }
+}
+
+// ------------------------------------------------------
+// Helpers admin Supabase
+// ------------------------------------------------------
+function extractBearerToken(req) {
+  const authHeader = req.headers.authorization;
+  return authHeader?.startsWith("Bearer ")
+    ? authHeader.split(" ")[1]
+    : null;
+}
+
+function isSupabaseAdminUser(user) {
+  const appRole = String(user?.app_metadata?.role || "").toLowerCase();
+  const userRole = String(user?.user_metadata?.role || "").toLowerCase();
+  const appIsAdmin = user?.app_metadata?.is_admin === true;
+  const userIsAdmin = user?.user_metadata?.is_admin === true;
+  const email = String(user?.email || "").trim().toLowerCase();
+
+  return (
+    appRole === "admin" ||
+    userRole === "admin" ||
+    appIsAdmin ||
+    userIsAdmin ||
+    email === "contactsingbox@gmail.com"
+  );
+}
+
+async function requireSupabaseAdmin(req, res, next) {
+  try {
+    if (!supabase) {
+      return res.status(500).json({ error: "Supabase non configuré" });
+    }
+
+    const token = extractBearerToken(req);
+    if (!token) {
+      return res.status(401).json({ error: "Token admin manquant" });
+    }
+
+    const { data, error } = await supabase.auth.getUser(token);
+
+    if (error || !data?.user) {
+      return res.status(401).json({ error: "Session admin invalide" });
+    }
+
+    if (!isSupabaseAdminUser(data.user)) {
+      return res.status(403).json({ error: "Accès admin refusé" });
+    }
+
+    req.adminUser = data.user;
+    next();
+  } catch (e) {
+    console.error("Erreur requireSupabaseAdmin :", e);
+    return res.status(500).json({ error: "Erreur serveur auth admin" });
   }
 }
 
@@ -2556,6 +2670,117 @@ app.post("/api/confirm-reservation", async (req, res) => {
 
     console.error("Erreur confirm-reservation :", err);
     return res.status(500).json({ error: "Erreur serveur lors de la réservation" });
+  }
+});
+
+// ------------------------------------------------------
+// ADMIN - CRÉER UNE RÉSERVATION GRATUITE + MAIL + QR
+// ------------------------------------------------------
+app.post("/api/admin/create-free-reservation", requireSupabaseAdmin, async (req, res) => {
+  try {
+    if (!supabase) {
+      return res.status(500).json({ error: "Supabase non configuré" });
+    }
+
+    const {
+      name,
+      email,
+      date,
+      box_id,
+      start_minutes,
+      persons,
+      status,
+    } = req.body || {};
+
+    const safeName = safeText(name, 120);
+    const safeEmail = safeText(email, 160);
+    const safeDate = safeText(date, 10);
+    const safeBoxId = getNumericBoxId(box_id);
+    const safeStartMinutes = Number(start_minutes);
+    const safePersons = clampPersons(persons || 2);
+    const safeStatus = safeText(status, 40) || "confirmed";
+
+    if (!safeName || !safeEmail || !safeDate) {
+      return res.status(400).json({
+        error: "name, email et date sont requis",
+      });
+    }
+
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(safeDate)) {
+      return res.status(400).json({ error: "date invalide (YYYY-MM-DD attendu)" });
+    }
+
+    if (!Number.isFinite(safeStartMinutes) || safeStartMinutes < 0 || safeStartMinutes >= 24 * 60) {
+      return res.status(400).json({ error: "start_minutes invalide" });
+    }
+
+    const times = buildTimesFromDateAndStartMinutes(safeDate, safeStartMinutes);
+
+    const hasConflict = await hasBlockingReservationConflict({
+      boxId: safeBoxId,
+      startTime: times.start_time,
+      endTime: times.end_time,
+      localDate: safeDate,
+    });
+
+    if (hasConflict) {
+      return res.status(409).json({
+        error: "Ce créneau est déjà réservé pour cette box",
+      });
+    }
+
+    const reservationRow = {
+      name: safeName,
+      email: safeEmail,
+      datetime: times.datetime,
+      created_at: new Date().toISOString(),
+      start_time: times.start_time,
+      box_id: safeBoxId,
+      status: safeStatus,
+      date: safeDate,
+      end_time: times.end_time,
+      payment_intent_id: null,
+      deposit_payment_intent_id: null,
+      deposit_amount_cents: 0,
+      deposit_status: null,
+      persons: safePersons,
+      billable_persons: getBillablePersons(safePersons),
+      montant: 0,
+      free_session: true,
+      loyalty_used: false,
+      points_spent: 0,
+      promo_code: null,
+      updated_at: new Date().toISOString(),
+    };
+
+    const { data: insertedReservation, error: insertError } = await supabase
+      .from("reservations")
+      .insert(reservationRow)
+      .select()
+      .single();
+
+    if (insertError || !insertedReservation) {
+      console.error("Erreur insert admin free reservation :", insertError);
+      return res.status(500).json({
+        error: "Impossible de créer la réservation gratuite",
+      });
+    }
+
+    try {
+      await sendReservationEmail(insertedReservation);
+    } catch (mailErr) {
+      console.error("Erreur envoi mail admin free reservation :", mailErr);
+    }
+
+    return res.json({
+      success: true,
+      reservation: insertedReservation,
+    });
+  } catch (e) {
+    console.error("Erreur /api/admin/create-free-reservation :", e);
+    return res.status(500).json({
+      error: "Erreur serveur lors de la création de la réservation gratuite",
+    });
   }
 });
 
