@@ -10,6 +10,7 @@ import { Resend } from "resend";
 import QRCode from "qrcode";
 import bcrypt from "bcryptjs";
 import jwt from "jsonwebtoken";
+import crypto from "crypto";
 
 dotenv.config();
 
@@ -95,7 +96,26 @@ const CONFIRMED_STATUSES = [
   "confirmee",
 ];
 
+const CANCELLED_OR_REFUNDED_STATUSES = [
+  "cancelled",
+  "canceled",
+  "annulé",
+  "annule",
+  "annulée",
+  "annulee",
+  "refunded",
+  "refund",
+  "remboursé",
+  "rembourse",
+  "remboursée",
+  "remboursee",
+];
+
 const STANDARD_SLOT_STARTS = generateStandardSlotStarts();
+
+// ---------- NOUVELLES CONSTANTES AVIS ----------
+const FRONTEND_BASE_URL = (process.env.FRONTEND_BASE_URL || "https://www.singbox.fr").replace(/\/+$/, "");
+const REVIEW_REQUEST_EXPIRY_DAYS = Number(process.env.REVIEW_REQUEST_EXPIRY_DAYS || 30);
 
 // ------------------------------------------------------
 // Vacances scolaires (Zone C : Toulouse)
@@ -220,10 +240,11 @@ function isReservationStatusConfirmed(statusRaw) {
   return CONFIRMED_STATUSES.map(normalizeReservationStatus).includes(s);
 }
 
-function isReservationStatusBlocking(statusRaw) {
+function isReservationStatusCancelledOrRefunded(statusRaw) {
   const s = normalizeReservationStatus(statusRaw);
-  if (!s) return false;
-  return s !== "cancelled" && s !== "annulee" && s !== "annulé" && s !== "annule";
+  return CANCELLED_OR_REFUNDED_STATUSES
+    .map(normalizeReservationStatus)
+    .includes(s);
 }
 
 function isReservationStatusModifiable(statusRaw) {
@@ -340,20 +361,6 @@ function buildSlotIsoRange(dateStr, slotHourFloat) {
   const endIso = `${endY}-${endM}-${endD}T${endH}:${endMin}:00${OFFSET}`;
 
   return { startIso, endIso };
-}
-
-function buildTimesFromDateAndStartMinutes(dateStr, startMinutes) {
-  const hourNum = Math.floor(startMinutes / 60);
-  const minuteNum = startMinutes % 60;
-  const slotHourFloat = hourNum + minuteNum / 60;
-  const { startIso, endIso } = buildSlotIsoRange(dateStr, slotHourFloat);
-
-  return {
-    start_time: startIso,
-    end_time: endIso,
-    date: dateStr,
-    datetime: startIso,
-  };
 }
 
 function roundMoney(value) {
@@ -826,45 +833,6 @@ async function hasReservationConflict({
   );
 }
 
-async function hasBlockingReservationConflict({
-  boxId,
-  startTime,
-  endTime,
-  localDate = null,
-  excludeReservationId = null,
-}) {
-  if (!supabase) throw new Error("Supabase non configuré");
-
-  const candidateDates = [];
-  if (localDate) {
-    candidateDates.push(localDate);
-    candidateDates.push(addDaysToDateString(localDate, -1));
-    candidateDates.push(addDaysToDateString(localDate, 1));
-  }
-
-  let query = supabase
-    .from("reservations")
-    .select("id, box_id, start_time, end_time, status, date")
-    .eq("box_id", boxId);
-
-  if (candidateDates.length > 0) {
-    query = query.in("date", [...new Set(candidateDates)]);
-  }
-
-  if (excludeReservationId) {
-    query = query.neq("id", excludeReservationId);
-  }
-
-  const { data, error } = await query;
-  if (error) throw error;
-
-  return (data || [])
-    .filter((row) => isReservationStatusBlocking(row.status))
-    .some((row) =>
-      areTimeRangesOverlapping(row.start_time, row.end_time, startTime, endTime)
-    );
-}
-
 async function updateReservationById(reservationId, payload) {
   const { data, error } = await supabase
     .from("reservations")
@@ -1273,6 +1241,299 @@ async function sendReservationEmail(reservation) {
     console.log("✅ Email envoyé via Resend à", toEmail, "reservation", reservation.id);
   } catch (err) {
     console.error("❌ Erreur lors de l'envoi de l'email via Resend :", err);
+  }
+}
+
+// ------------------------------------------------------
+// NOUVEAUX HELPERS DEMANDES D'AVIS
+// ------------------------------------------------------
+function generateReviewToken() {
+  return crypto.randomBytes(32).toString("hex");
+}
+
+function buildReviewLink(token) {
+  return `${FRONTEND_BASE_URL}/laisser-un-avis?token=${encodeURIComponent(token)}`;
+}
+
+function getFirstNameFromReservation(reservation) {
+  const name = String(reservation?.name || "").trim();
+  if (!name) return null;
+  const first = name.split(/\s+/)[0];
+  return safeText(first, 80);
+}
+
+function addDaysToIsoNow(days) {
+  return new Date(Date.now() + days * 24 * 60 * 60 * 1000).toISOString();
+}
+
+function isReservationFinished(reservation) {
+  const end = parseDateOrNull(reservation?.end_time);
+  if (!end) return false;
+  return end.getTime() < Date.now();
+}
+
+async function getReservationById(reservationId) {
+  if (!supabase) throw new Error("Supabase non configuré");
+
+  const { data, error } = await supabase
+    .from("reservations")
+    .select("*")
+    .eq("id", reservationId)
+    .single();
+
+  if (error) throw error;
+  return data;
+}
+
+async function getExistingReviewRequestByReservationId(reservationId) {
+  if (!supabase) throw new Error("Supabase non configuré");
+
+  const { data, error } = await supabase
+    .from("review_requests")
+    .select("*")
+    .eq("reservation_id", String(reservationId))
+    .maybeSingle();
+
+  if (error) throw error;
+  return data || null;
+}
+
+async function upsertReviewRequestForReservation(reservation) {
+  if (!supabase) throw new Error("Supabase non configuré");
+
+  const reservationId = String(reservation?.id || "").trim();
+  const email = safeText(reservation?.email, 160);
+  const firstName = getFirstNameFromReservation(reservation);
+
+  if (!reservationId) {
+    throw new Error("reservation.id manquant pour la demande d’avis");
+  }
+  if (!email) {
+    throw new Error("reservation.email manquant pour la demande d’avis");
+  }
+
+  const existing = await getExistingReviewRequestByReservationId(reservationId);
+
+  if (existing && existing.status === "used") {
+    return {
+      request: existing,
+      alreadyUsed: true,
+      created: false,
+    };
+  }
+
+  const token = generateReviewToken();
+  const nowIso = new Date().toISOString();
+  const expiresAt = addDaysToIsoNow(REVIEW_REQUEST_EXPIRY_DAYS);
+
+  const payload = {
+    reservation_id: reservationId,
+    email,
+    name: firstName,
+    token,
+    status: "pending",
+    sent_at: existing?.sent_at || null,
+    used_at: null,
+    expires_at: expiresAt,
+    created_at: existing?.created_at || nowIso,
+    updated_at: nowIso,
+  };
+
+  const { data, error } = await supabase
+    .from("review_requests")
+    .upsert(payload, { onConflict: "reservation_id" })
+    .select()
+    .single();
+
+  if (error) throw error;
+
+  return {
+    request: data,
+    alreadyUsed: false,
+    created: !existing,
+  };
+}
+
+async function markReviewRequestSent(reviewRequestId) {
+  if (!supabase) throw new Error("Supabase non configuré");
+
+  const nowIso = new Date().toISOString();
+
+  const { error } = await supabase
+    .from("review_requests")
+    .update({
+      sent_at: nowIso,
+      updated_at: nowIso,
+    })
+    .eq("id", reviewRequestId);
+
+  if (error) throw error;
+}
+
+async function getReviewRequestByToken(token) {
+  if (!supabase) throw new Error("Supabase non configuré");
+
+  const { data, error } = await supabase
+    .from("review_requests")
+    .select("*")
+    .eq("token", token)
+    .maybeSingle();
+
+  if (error) throw error;
+  return data || null;
+}
+
+async function markReviewRequestUsed(token) {
+  if (!supabase) throw new Error("Supabase non configuré");
+
+  const nowIso = new Date().toISOString();
+
+  const { data, error } = await supabase
+    .from("review_requests")
+    .update({
+      status: "used",
+      used_at: nowIso,
+      updated_at: nowIso,
+    })
+    .eq("token", token)
+    .select()
+    .single();
+
+  if (error) throw error;
+  return data;
+}
+
+async function expireReviewRequestIfNeeded(request) {
+  if (!request) return null;
+  if (request.status !== "pending") return request;
+
+  const expiresAt = parseDateOrNull(request.expires_at);
+  if (!expiresAt) return request;
+
+  if (expiresAt.getTime() > Date.now()) {
+    return request;
+  }
+
+  const { data, error } = await supabase
+    .from("review_requests")
+    .update({
+      status: "expired",
+      updated_at: new Date().toISOString(),
+    })
+    .eq("id", request.id)
+    .select()
+    .single();
+
+  if (error) throw error;
+  return data;
+}
+
+async function sendReviewRequestEmail(reservation) {
+  if (!mailEnabled || !resend) {
+    console.warn("📧 Envoi mail avis désactivé (RESEND_API_KEY manquante).");
+    return { sent: false, reason: "mail_disabled" };
+  }
+
+  if (!reservation?.email) {
+    console.warn("📧 Impossible d'envoyer le mail d'avis : email manquant", reservation?.id);
+    return { sent: false, reason: "missing_email" };
+  }
+
+  const upsertResult = await upsertReviewRequestForReservation(reservation);
+
+  if (upsertResult.alreadyUsed) {
+    return { sent: false, reason: "already_used", reviewRequest: upsertResult.request };
+  }
+
+  const reviewRequest = upsertResult.request;
+  const reviewLink = buildReviewLink(reviewRequest.token);
+
+  try {
+    const start = reservation.start_time ? new Date(reservation.start_time) : null;
+
+    const fmt = (d) =>
+      d
+        ? d.toLocaleString("fr-FR", {
+            timeZone: "Europe/Paris",
+            day: "2-digit",
+            month: "2-digit",
+            year: "numeric",
+            hour: "2-digit",
+            minute: "2-digit",
+          })
+        : "N/A";
+
+    const startStr = fmt(start);
+    const firstName = safeText(reviewRequest.name || "bonjour", 80) || "bonjour";
+
+    const subject = `Votre avis sur votre session Singbox`;
+
+    const htmlBody = `
+      <div style="margin:0;padding:22px 0;background:#050814;">
+        <div style="max-width:720px;margin:0 auto;background:#020617;border-radius:18px;border:1px solid rgba(148,163,184,0.35);box-shadow:0 18px 45px rgba(0,0,0,0.85);overflow:hidden;">
+          <div style="padding:22px;background:radial-gradient(circle at 0% 0%,rgba(56,189,248,0.14),transparent 55%),radial-gradient(circle at 100% 0%,rgba(201,76,53,0.22),transparent 55%),#020617;color:#F9FAFB;font-family:system-ui,-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Arial,sans-serif;">
+            <div style="font-weight:800;letter-spacing:0.22em;text-transform:uppercase;font-size:14px;line-height:1;">SINGBOX</div>
+            <div style="margin-top:6px;font-size:12px;color:#9CA3AF;">Karaoké box privatives · Toulouse</div>
+
+            <div style="margin-top:18px;font-size:24px;font-weight:900;letter-spacing:0.04em;text-transform:uppercase;">
+              MERCI POUR VOTRE VISITE 🎤
+            </div>
+
+            <div style="margin-top:10px;font-size:14px;line-height:1.65;color:rgba(249,250,251,0.9);">
+              Bonjour ${firstName}, merci d’être venu chez <strong>Singbox</strong>.
+              Votre session du <strong>${startStr}</strong> en <strong>Box ${reservation.box_id}</strong> s’est terminée, et votre retour nous aiderait beaucoup.
+            </div>
+
+            <div style="margin-top:18px;padding:16px;border-radius:16px;background:rgba(15,23,42,0.72);border:1px solid rgba(148,163,184,0.30);">
+              <div style="font-size:13px;color:#E5E7EB;line-height:1.65;">
+                Cliquez sur le bouton ci-dessous pour laisser votre avis.
+                Ce lien est personnel et valable jusqu’au <strong>${new Date(reviewRequest.expires_at).toLocaleDateString("fr-FR")}</strong>.
+              </div>
+
+              <div style="margin-top:18px;text-align:center;">
+                <a
+                  href="${reviewLink}"
+                  style="display:inline-block;padding:12px 22px;border-radius:999px;background:linear-gradient(90deg,#c94c35,#f97316);color:#F9FAFB;font-weight:800;font-size:14px;text-decoration:none;"
+                >
+                  Laisser mon avis
+                </a>
+              </div>
+            </div>
+
+            <div style="margin-top:16px;font-size:11px;color:#9CA3AF;line-height:1.6;">
+              Si vous n’arrivez pas à cliquer sur le bouton, copiez-collez ce lien dans votre navigateur :
+              <br />
+              <span style="word-break:break-all;color:#E5E7EB;">${reviewLink}</span>
+            </div>
+          </div>
+        </div>
+      </div>
+    `;
+
+    await resend.emails.send({
+      from: "Singbox <onboarding@resend.dev>",
+      to: reservation.email,
+      subject,
+      html: htmlBody,
+    });
+
+    await markReviewRequestSent(reviewRequest.id);
+
+    console.log("✅ Email de demande d'avis envoyé à", reservation.email, "reservation", reservation.id);
+
+    return {
+      sent: true,
+      reviewRequest,
+      reviewLink,
+    };
+  } catch (err) {
+    console.error("❌ Erreur envoi email demande d'avis :", err);
+    return {
+      sent: false,
+      reason: "mail_error",
+      error: err.message,
+      reviewRequest,
+    };
   }
 }
 
@@ -2714,12 +2975,14 @@ app.post("/api/admin/create-free-reservation", requireSupabaseAdmin, async (req,
       return res.status(400).json({ error: "start_minutes invalide" });
     }
 
-    const times = buildTimesFromDateAndStartMinutes(safeDate, safeStartMinutes);
+    const hourFloat =
+      Math.floor(safeStartMinutes / 60) + (safeStartMinutes % 60) / 60;
+    const { startIso, endIso } = buildSlotIsoRange(safeDate, hourFloat);
 
-    const hasConflict = await hasBlockingReservationConflict({
+    const hasConflict = await hasReservationConflict({
       boxId: safeBoxId,
-      startTime: times.start_time,
-      endTime: times.end_time,
+      startTime: startIso,
+      endTime: endIso,
       localDate: safeDate,
     });
 
@@ -2732,13 +2995,13 @@ app.post("/api/admin/create-free-reservation", requireSupabaseAdmin, async (req,
     const reservationRow = {
       name: safeName,
       email: safeEmail,
-      datetime: times.datetime,
+      datetime: startIso,
       created_at: new Date().toISOString(),
-      start_time: times.start_time,
+      start_time: startIso,
       box_id: safeBoxId,
       status: safeStatus,
       date: safeDate,
-      end_time: times.end_time,
+      end_time: endIso,
       payment_intent_id: null,
       deposit_payment_intent_id: null,
       deposit_amount_cents: 0,
@@ -2750,6 +3013,8 @@ app.post("/api/admin/create-free-reservation", requireSupabaseAdmin, async (req,
       loyalty_used: false,
       points_spent: 0,
       promo_code: null,
+      refunded_amount: 0,
+      last_auto_charge_amount: 0,
       updated_at: new Date().toISOString(),
     };
 
@@ -3026,7 +3291,10 @@ app.get("/api/check", async (req, res) => {
     let access = false;
     let reason = "OK";
 
-    if (now < startWithMargin) {
+    if (isReservationStatusCancelledOrRefunded(data.status)) {
+      access = false;
+      reason = "Réservation annulée ou remboursée, accès refusé.";
+    } else if (now < startWithMargin) {
       access = false;
       reason = "Trop tôt pour accéder à la box.";
     } else if (now > lastEntryTime) {
@@ -3045,6 +3313,230 @@ app.get("/api/check", async (req, res) => {
     console.error("Erreur /api/check :", e);
     res.status(500);
     return res.json({ valid: false, error: e.message });
+  }
+});
+
+// ------------------------------------------------------
+// NOUVELLES ROUTES DEMANDES D'AVIS
+// ------------------------------------------------------
+app.post("/api/admin/send-review-request", requireSupabaseAdmin, async (req, res) => {
+  try {
+    if (!supabase) {
+      return res.status(500).json({ error: "Supabase non configuré" });
+    }
+
+    const { reservationId } = req.body || {};
+    if (!reservationId) {
+      return res.status(400).json({ error: "reservationId manquant" });
+    }
+
+    const reservation = await getReservationById(reservationId);
+    if (!reservation) {
+      return res.status(404).json({ error: "Réservation introuvable" });
+    }
+
+    if (!isReservationStatusConfirmed(reservation.status)) {
+      return res.status(400).json({
+        error: "La réservation doit être confirmée pour envoyer une demande d’avis",
+      });
+    }
+
+    if (!isReservationFinished(reservation)) {
+      return res.status(400).json({
+        error: "La séance n’est pas encore terminée",
+      });
+    }
+
+    const result = await sendReviewRequestEmail(reservation);
+
+    return res.json({
+      success: result.sent,
+      result,
+    });
+  } catch (e) {
+    console.error("Erreur /api/admin/send-review-request :", e);
+    return res.status(500).json({ error: "Erreur serveur lors de l’envoi de la demande d’avis" });
+  }
+});
+
+app.post("/api/admin/send-completed-review-requests", requireSupabaseAdmin, async (req, res) => {
+  try {
+    if (!supabase) {
+      return res.status(500).json({ error: "Supabase non configuré" });
+    }
+
+    const limit = Math.min(Math.max(Number(req.body?.limit || 20), 1), 100);
+    const nowIso = new Date().toISOString();
+
+    const { data: reservations, error } = await supabase
+      .from("reservations")
+      .select("*")
+      .lt("end_time", nowIso)
+      .order("end_time", { ascending: false })
+      .limit(limit);
+
+    if (error) {
+      throw error;
+    }
+
+    const confirmedFinishedReservations = (reservations || []).filter(
+      (row) => isReservationStatusConfirmed(row.status) && isReservationFinished(row)
+    );
+
+    const results = [];
+
+    for (const reservation of confirmedFinishedReservations) {
+      try {
+        const existing = await getExistingReviewRequestByReservationId(reservation.id);
+
+        if (existing?.status === "used") {
+          results.push({
+            reservationId: reservation.id,
+            email: reservation.email,
+            skipped: true,
+            reason: "already_used",
+          });
+          continue;
+        }
+
+        if (existing?.sent_at && existing?.status === "pending") {
+          results.push({
+            reservationId: reservation.id,
+            email: reservation.email,
+            skipped: true,
+            reason: "already_sent",
+          });
+          continue;
+        }
+
+        const sendResult = await sendReviewRequestEmail(reservation);
+
+        results.push({
+          reservationId: reservation.id,
+          email: reservation.email,
+          sent: !!sendResult.sent,
+          reason: sendResult.reason || null,
+        });
+      } catch (itemErr) {
+        console.error("Erreur envoi review request reservation", reservation.id, itemErr);
+        results.push({
+          reservationId: reservation.id,
+          email: reservation.email,
+          sent: false,
+          reason: itemErr.message || "error",
+        });
+      }
+    }
+
+    return res.json({
+      success: true,
+      totalProcessed: results.length,
+      results,
+    });
+  } catch (e) {
+    console.error("Erreur /api/admin/send-completed-review-requests :", e);
+    return res.status(500).json({ error: "Erreur serveur lors de l’envoi en lot des demandes d’avis" });
+  }
+});
+
+app.get("/api/review-request/validate", async (req, res) => {
+  try {
+    if (!supabase) {
+      return res.status(500).json({ error: "Supabase non configuré" });
+    }
+
+    const token = String(req.query.token || "").trim();
+    if (!token) {
+      return res.status(400).json({ valid: false, error: "token manquant" });
+    }
+
+    let request = await getReviewRequestByToken(token);
+
+    if (!request) {
+      return res.status(404).json({ valid: false, error: "Lien d’avis introuvable" });
+    }
+
+    request = await expireReviewRequestIfNeeded(request);
+
+    if (request.status === "used") {
+      return res.status(400).json({
+        valid: false,
+        error: "Ce lien d’avis a déjà été utilisé",
+      });
+    }
+
+    if (request.status === "expired") {
+      return res.status(400).json({
+        valid: false,
+        error: "Ce lien d’avis a expiré",
+      });
+    }
+
+    const reservation = await getReservationById(request.reservation_id);
+
+    return res.json({
+      valid: true,
+      request: {
+        reservation_id: request.reservation_id,
+        email: request.email,
+        name: request.name,
+        expires_at: request.expires_at,
+        status: request.status,
+      },
+      reservation: reservation
+        ? {
+            id: reservation.id,
+            email: reservation.email,
+            name: reservation.name,
+            start_time: reservation.start_time,
+            end_time: reservation.end_time,
+            box_id: reservation.box_id,
+            status: reservation.status,
+          }
+        : null,
+    });
+  } catch (e) {
+    console.error("Erreur /api/review-request/validate :", e);
+    return res.status(500).json({ valid: false, error: "Erreur serveur" });
+  }
+});
+
+app.post("/api/review-request/mark-used", async (req, res) => {
+  try {
+    if (!supabase) {
+      return res.status(500).json({ error: "Supabase non configuré" });
+    }
+
+    const token = String(req.body?.token || "").trim();
+    if (!token) {
+      return res.status(400).json({ error: "token manquant" });
+    }
+
+    let request = await getReviewRequestByToken(token);
+
+    if (!request) {
+      return res.status(404).json({ error: "Lien d’avis introuvable" });
+    }
+
+    request = await expireReviewRequestIfNeeded(request);
+
+    if (request.status === "expired") {
+      return res.status(400).json({ error: "Lien expiré" });
+    }
+
+    if (request.status === "used") {
+      return res.json({ success: true, alreadyUsed: true });
+    }
+
+    const updated = await markReviewRequestUsed(token);
+
+    return res.json({
+      success: true,
+      request: updated,
+    });
+  } catch (e) {
+    console.error("Erreur /api/review-request/mark-used :", e);
+    return res.status(500).json({ error: "Erreur serveur" });
   }
 });
 
