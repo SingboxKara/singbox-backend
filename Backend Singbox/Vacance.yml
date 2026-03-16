@@ -1,0 +1,19 @@
+info:
+  name: Vacance
+  type: http
+  seq: 3
+
+http:
+  method: GET
+  url: https://singbox-backend.onrender.com/api/is-vacances?date=2026-02-25
+  params:
+    - name: date
+      value: 2026-02-25
+      type: query
+  auth: inherit
+
+settings:
+  encodeUrl: true
+  timeout: 0
+  followRedirects: true
+  maxRedirects: 5

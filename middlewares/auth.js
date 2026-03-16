@@ -16,6 +16,7 @@ export function authMiddleware(req, res, next) {
     const decoded = jwt.verify(token, JWT_SECRET);
 
     req.user = decoded;
+    req.userId = decoded.userId;
 
     next();
   } catch (error) {
@@ -37,9 +38,10 @@ export function optionalAuthMiddleware(req, res, next) {
     const decoded = jwt.verify(token, JWT_SECRET);
 
     req.user = decoded;
+    req.userId = decoded.userId;
 
     next();
-  } catch (error) {
+  } catch (_error) {
     return next();
   }
 }
