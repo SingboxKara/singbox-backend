@@ -1,0 +1,448 @@
+// backend/routes/paymentRoutes.js
+
+import express from "express";
+
+import { stripe } from "../config/stripe.js";
+import { supabase } from "../config/supabase.js";
+import { authMiddleware, optionalAuthMiddleware } from "../middlewares/auth.js";
+import { authMiddleware as requireAuth } from "../middlewares/auth.js";
+import {
+  ensureStripeCustomer,
+  saveDefaultCardToUsersTable,
+} from "../services/stripeCustomerService.js";
+import {
+  getUserById,
+} from "../services/userService.js";
+import {
+  computeCartPricing,
+} from "../services/pricingService.js";
+import { validatePromoCode } from "../services/promoService.js";
+import { updateReservationById } from "../services/reservationService.js";
+import { DEPOSIT_AMOUNT_EUR } from "../constants/booking.js";
+
+const router = express.Router();
+
+router.post("/api/create-setup-intent", requireAuth, async (req, res) => {
+  try {
+    if (!stripe) return res.status(500).json({ error: "Stripe non configuré" });
+    if (!supabase) return res.status(500).json({ error: "Supabase non configuré" });
+
+    const { customerId } = await ensureStripeCustomer(req.userId);
+
+    const setupIntent = await stripe.setupIntents.create({
+      customer: customerId,
+      payment_method_types: ["card"],
+      usage: "off_session",
+      metadata: { supabase_user_id: String(req.userId) },
+    });
+
+    return res.json({ clientSecret: setupIntent.client_secret });
+  } catch (e) {
+    console.error("Erreur /api/create-setup-intent :", e);
+    return res.status(500).json({ error: "Erreur serveur (setup intent)" });
+  }
+});
+
+router.get("/api/payment-methods", authMiddleware, async (req, res) => {
+  try {
+    if (!stripe) return res.status(500).json({ error: "Stripe non configuré" });
+    if (!supabase) return res.status(500).json({ error: "Supabase non configuré" });
+
+    const { customerId } = await ensureStripeCustomer(req.userId);
+
+    const pms = await stripe.paymentMethods.list({
+      customer: customerId,
+      type: "card",
+    });
+
+    const user = await getUserById(req.userId);
+
+    return res.json({
+      customerId,
+      defaultPaymentMethodId: user.default_payment_method_id ?? null,
+      methods: (pms.data || []).map((pm) => ({
+        id: pm.id,
+        brand: pm.card?.brand ?? null,
+        last4: pm.card?.last4 ?? null,
+        exp_month: pm.card?.exp_month ?? null,
+        exp_year: pm.card?.exp_year ?? null,
+      })),
+    });
+  } catch (e) {
+    console.error("Erreur /api/payment-methods :", e);
+    return res.status(500).json({ error: "Erreur serveur (list payment methods)" });
+  }
+});
+
+router.post("/api/set-default-payment-method", authMiddleware, async (req, res) => {
+  try {
+    if (!stripe) return res.status(500).json({ error: "Stripe non configuré" });
+    if (!supabase) return res.status(500).json({ error: "Supabase non configuré" });
+
+    const { paymentMethodId } = req.body || {};
+    if (!paymentMethodId) {
+      return res.status(400).json({ error: "paymentMethodId manquant" });
+    }
+
+    const { customerId } = await ensureStripeCustomer(req.userId);
+
+    try {
+      await stripe.paymentMethods.attach(paymentMethodId, { customer: customerId });
+    } catch (e) {
+      const msg = String(e?.message || "");
+      if (!msg.toLowerCase().includes("already") && !msg.toLowerCase().includes("attached")) {
+        throw e;
+      }
+    }
+
+    await stripe.customers.update(customerId, {
+      invoice_settings: { default_payment_method: paymentMethodId },
+    });
+
+    const pm = await stripe.paymentMethods.retrieve(paymentMethodId);
+    await saveDefaultCardToUsersTable(req.userId, pm);
+
+    return res.json({ ok: true });
+  } catch (e) {
+    console.error("Erreur /api/set-default-payment-method :", e);
+    return res.status(500).json({ error: "Erreur serveur (set default PM)" });
+  }
+});
+
+router.post("/api/create-payment-intent", optionalAuthMiddleware, async (req, res) => {
+  try {
+    if (!stripe) {
+      return res.status(500).json({ error: "Stripe non configuré" });
+    }
+
+    const {
+      panier,
+      customer,
+      promoCode,
+      finalAmountCents,
+      loyaltyUsed,
+      useSavedPaymentMethod,
+      paymentMethodId,
+    } = req.body || {};
+
+    if (!panier || !Array.isArray(panier) || panier.length === 0) {
+      return res.status(400).json({ error: "Panier vide" });
+    }
+
+    const pricing = computeCartPricing(panier, { loyaltyUsed: !!loyaltyUsed });
+    const theoreticalTotal = pricing.totalBeforeDiscount;
+    const loyaltyDiscount = pricing.loyaltyDiscount;
+    let totalAmountEur = pricing.totalCashDue;
+    let promoDiscountAmount = 0;
+    let promo = null;
+
+    if (promoCode) {
+      const result = await validatePromoCode(promoCode, totalAmountEur);
+      if (result.ok) {
+        totalAmountEur = result.newTotal;
+        promoDiscountAmount = result.discountAmount;
+        promo = result.promo;
+      } else {
+        console.warn("Code promo non appliqué :", result.reason);
+      }
+    }
+
+    if (
+      typeof finalAmountCents === "number" &&
+      finalAmountCents >= 0 &&
+      Number.isFinite(finalAmountCents)
+    ) {
+      const frontTotal = finalAmountCents / 100;
+      if (Math.abs(frontTotal - totalAmountEur) > 0.01) {
+        console.warn("⚠️ Écart entre total front et back :", frontTotal, totalAmountEur);
+      }
+    }
+
+    if (loyaltyUsed && !req.userId) {
+      return res.status(401).json({
+        error: "Connexion requise pour utiliser les points de fidélité",
+      });
+    }
+
+    if (totalAmountEur <= 0) {
+      return res.json({
+        isFree: true,
+        totalBeforeDiscount: theoreticalTotal,
+        loyaltyDiscount,
+        promoDiscountAmount,
+        totalAfterDiscount: 0,
+        promo: promo
+          ? { id: promo.id, code: promo.code, type: promo.type, value: promo.value }
+          : null,
+      });
+    }
+
+    const amountInCents = Math.round(totalAmountEur * 100);
+
+    if (useSavedPaymentMethod) {
+      if (!req.userId) {
+        return res.status(401).json({ error: "Connexion requise pour payer avec carte enregistrée" });
+      }
+      if (!supabase) {
+        return res.status(500).json({ error: "Supabase non configuré" });
+      }
+
+      const user = await getUserById(req.userId);
+      const { customerId } = await ensureStripeCustomer(req.userId);
+
+      const pmToUse = paymentMethodId || user.default_payment_method_id;
+      if (!pmToUse) {
+        return res.status(400).json({ error: "Aucune carte enregistrée disponible" });
+      }
+
+      try {
+        await stripe.paymentMethods.attach(pmToUse, { customer: customerId });
+      } catch (e) {
+        const msg = String(e?.message || "");
+        if (!msg.toLowerCase().includes("already") && !msg.toLowerCase().includes("attached")) {
+          throw e;
+        }
+      }
+
+      const fullName =
+        (customer?.prenom || "") + (customer?.prenom ? " " : "") + (customer?.nom || "");
+
+      try {
+        const pi = await stripe.paymentIntents.create({
+          amount: amountInCents,
+          currency: "eur",
+          customer: customerId,
+          payment_method: pmToUse,
+          payment_method_types: ["card"],
+          metadata: {
+            panier: JSON.stringify(pricing.normalizedItems),
+            customer_email: customer?.email || "",
+            customer_name: fullName,
+            promo_code: promoCode || "",
+            total_before_discount: String(theoreticalTotal),
+            loyalty_discount_amount: String(loyaltyDiscount),
+            promo_discount_amount: String(promoDiscountAmount),
+            loyalty_used: loyaltyUsed ? "true" : "false",
+            saved_card: "true",
+          },
+        });
+
+        return res.json({
+          clientSecret: pi.client_secret,
+          paymentIntentId: pi.id,
+          isFree: false,
+          totalBeforeDiscount: theoreticalTotal,
+          loyaltyDiscount,
+          promoDiscountAmount,
+          totalAfterDiscount: totalAmountEur,
+          promo: promo ? { id: promo.id, code: promo.code, type: promo.type, value: promo.value } : null,
+        });
+      } catch (e) {
+        const stripeMsg =
+          e?.raw?.message || e?.message || "Erreur Stripe inconnue (saved card)";
+        console.error("❌ Stripe saved-card PI error:", stripeMsg, e?.raw || e);
+
+        return res.status(500).json({
+          error: "Stripe saved-card: " + stripeMsg,
+        });
+      }
+    }
+
+    const paymentIntent = await stripe.paymentIntents.create({
+      amount: amountInCents,
+      currency: "eur",
+      payment_method_types: ["card"],
+      metadata: {
+        panier: JSON.stringify(pricing.normalizedItems),
+        customer_email: customer?.email || "",
+        customer_name: (customer?.prenom || "") + " " + (customer?.nom || ""),
+        promo_code: promoCode || "",
+        total_before_discount: String(theoreticalTotal),
+        loyalty_discount_amount: String(loyaltyDiscount),
+        promo_discount_amount: String(promoDiscountAmount),
+        loyalty_used: loyaltyUsed ? "true" : "false",
+      },
+    });
+
+    return res.json({
+      clientSecret: paymentIntent.client_secret,
+      paymentIntentId: paymentIntent.id,
+      isFree: false,
+      totalBeforeDiscount: theoreticalTotal,
+      loyaltyDiscount,
+      promoDiscountAmount,
+      totalAfterDiscount: totalAmountEur,
+      promo: promo
+        ? { id: promo.id, code: promo.code, type: promo.type, value: promo.value }
+        : null,
+    });
+  } catch (err) {
+    const msg = err?.raw?.message || err?.message || "Erreur serveur Stripe";
+    console.error("Erreur create-payment-intent :", msg, err?.raw || err);
+    return res.status(500).json({ error: msg });
+  }
+});
+
+router.post("/api/create-deposit-intent", optionalAuthMiddleware, async (req, res) => {
+  try {
+    if (!stripe) return res.status(500).json({ error: "Stripe non configuré" });
+
+    const { reservationId, customer, useSavedPaymentMethod, paymentMethodId } = req.body || {};
+    const amountInCents = Math.round(DEPOSIT_AMOUNT_EUR * 100);
+
+    const fullName =
+      (customer?.prenom || "") + (customer?.prenom ? " " : "") + (customer?.nom || "");
+
+    if (useSavedPaymentMethod) {
+      if (!req.userId) {
+        return res.status(401).json({ error: "Connexion requise pour la caution avec carte enregistrée" });
+      }
+      if (!supabase) {
+        return res.status(500).json({ error: "Supabase non configuré" });
+      }
+
+      const user = await getUserById(req.userId);
+      const { customerId } = await ensureStripeCustomer(req.userId);
+
+      const pmToUse = paymentMethodId || user.default_payment_method_id;
+      if (!pmToUse) {
+        return res.status(400).json({ error: "Aucune carte enregistrée disponible pour la caution" });
+      }
+
+      try {
+        await stripe.paymentMethods.attach(pmToUse, { customer: customerId });
+      } catch (e) {
+        const msg = String(e?.message || "");
+        if (!msg.toLowerCase().includes("already") && !msg.toLowerCase().includes("attached")) {
+          throw e;
+        }
+      }
+
+      const pi = await stripe.paymentIntents.create({
+        amount: amountInCents,
+        currency: "eur",
+        customer: customerId,
+        payment_method: pmToUse,
+        payment_method_types: ["card"],
+        capture_method: "manual",
+        metadata: {
+          type: "singbox_deposit",
+          reservation_id: reservationId || "",
+          customer_email: customer?.email || "",
+          customer_name: fullName,
+          saved_card: "true",
+        },
+      });
+
+      if (supabase && reservationId) {
+        await updateReservationById(reservationId, {
+          deposit_payment_intent_id: pi.id,
+          deposit_amount_cents: amountInCents,
+          deposit_status: "created",
+          updated_at: new Date().toISOString(),
+        });
+      }
+
+      return res.json({
+        clientSecret: pi.client_secret,
+        paymentIntentId: pi.id,
+        depositAmountEur: DEPOSIT_AMOUNT_EUR,
+      });
+    }
+
+    const paymentIntent = await stripe.paymentIntents.create({
+      amount: amountInCents,
+      currency: "eur",
+      capture_method: "manual",
+      payment_method_types: ["card"],
+      metadata: {
+        type: "singbox_deposit",
+        reservation_id: reservationId || "",
+        customer_email: customer?.email || "",
+        customer_name: fullName,
+      },
+    });
+
+    if (supabase && reservationId) {
+      await updateReservationById(reservationId, {
+        deposit_payment_intent_id: paymentIntent.id,
+        deposit_amount_cents: amountInCents,
+        deposit_status: "created",
+        updated_at: new Date().toISOString(),
+      });
+    }
+
+    return res.json({
+      clientSecret: paymentIntent.client_secret,
+      paymentIntentId: paymentIntent.id,
+      depositAmountEur: DEPOSIT_AMOUNT_EUR,
+    });
+  } catch (err) {
+    console.error("Erreur create-deposit-intent :", err);
+    const msg = err?.raw?.message || err?.message || "Erreur serveur Stripe (caution)";
+    return res.status(500).json({ error: msg });
+  }
+});
+
+router.post("/api/capture-deposit", async (req, res) => {
+  try {
+    if (!stripe) {
+      return res.status(500).json({ error: "Stripe non configuré" });
+    }
+
+    const { paymentIntentId, amountToCaptureEur, reservationId } = req.body || {};
+
+    if (!paymentIntentId) {
+      return res.status(400).json({ error: "paymentIntentId manquant pour la caution" });
+    }
+
+    const params = {};
+    if (amountToCaptureEur != null) {
+      params.amount_to_capture = Math.round(Number(amountToCaptureEur) * 100);
+    }
+
+    const paymentIntent = await stripe.paymentIntents.capture(paymentIntentId, params);
+
+    if (supabase && reservationId) {
+      await updateReservationById(reservationId, {
+        deposit_status: "captured",
+        updated_at: new Date().toISOString(),
+      });
+    }
+
+    return res.json({ status: "captured", paymentIntent });
+  } catch (err) {
+    console.error("Erreur capture-deposit :", err);
+    return res.status(500).json({ error: "Erreur serveur lors de la capture de la caution" });
+  }
+});
+
+router.post("/api/cancel-deposit", async (req, res) => {
+  try {
+    if (!stripe) {
+      return res.status(500).json({ error: "Stripe non configuré" });
+    }
+
+    const { paymentIntentId, reservationId } = req.body || {};
+
+    if (!paymentIntentId) {
+      return res.status(400).json({ error: "paymentIntentId manquant pour la caution" });
+    }
+
+    const canceled = await stripe.paymentIntents.cancel(paymentIntentId);
+
+    if (supabase && reservationId) {
+      await updateReservationById(reservationId, {
+        deposit_status: "canceled",
+        updated_at: new Date().toISOString(),
+      });
+    }
+
+    return res.json({ status: "canceled", paymentIntent: canceled });
+  } catch (err) {
+    console.error("Erreur cancel-deposit :", err);
+    return res.status(500).json({ error: "Erreur serveur lors de l'annulation de la caution" });
+  }
+});
+
+export default router;
