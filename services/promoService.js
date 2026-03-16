@@ -1,108 +1,63 @@
-// backend/services/loyaltyService.js
+// backend/services/promoService.js
 
 import { supabase } from "../config/supabase.js";
-import { LOYALTY_POINTS_COST } from "../constants/booking.js";
-import { getUserById } from "./userService.js";
 
-export function isReservationPaidWithLoyalty(reservation) {
-  if (reservation?.loyalty_used === true) return true;
-
-  const pointsSpent = Number(reservation?.points_spent || 0);
-  if (Number.isFinite(pointsSpent) && pointsSpent >= LOYALTY_POINTS_COST) return true;
-
-  const freeSession = reservation?.free_session === true;
-  const montant = Number(reservation?.montant || 0);
-  const hasNoPaymentIntent = !reservation?.payment_intent_id;
-  const hasNoPromo = !String(reservation?.promo_code || "").trim();
-
-  if (freeSession && montant === 0 && hasNoPaymentIntent && hasNoPromo) {
-    return true;
+export async function validatePromoCode(code, totalAmountEur) {
+  if (!supabase) {
+    return { ok: false, reason: "Supabase non configuré" };
+  }
+  if (!code) {
+    return { ok: false, reason: "Code vide" };
   }
 
-  return false;
-}
+  const upperCode = String(code).trim().toUpperCase();
 
-export function getReservationLoyaltyPointsUsed(reservation) {
-  const n = Number(reservation?.points_spent);
-  if (Number.isFinite(n) && n > 0) return n;
-  return isReservationPaidWithLoyalty(reservation) ? LOYALTY_POINTS_COST : 0;
-}
-
-export function getReservationPersons(reservation) {
-  const n = Number(reservation?.persons);
-  if (Number.isFinite(n) && n >= 1 && n <= 8) {
-    return n;
-  }
-  return 2;
-}
-
-export function getReservationAmountPaid(reservation) {
-  const n = Number(reservation?.montant);
-  if (Number.isFinite(n)) return n;
-  return 0;
-}
-
-export async function consumeLoyaltyPointsForUser(userId, pointsToSpend) {
-  if (!supabase) throw new Error("Supabase non configuré");
-  if (!pointsToSpend || pointsToSpend <= 0) {
-    return { success: true, deducted: 0 };
-  }
-
-  const { data: user, error: userErr } = await supabase
-    .from("users")
-    .select("id, points")
-    .eq("id", userId)
+  const { data: promo, error } = await supabase
+    .from("promo_codes")
+    .select("*")
+    .eq("code", upperCode)
     .single();
 
-  if (userErr || !user) {
-    throw new Error("Utilisateur introuvable pour débit fidélité");
+  if (error || !promo) {
+    console.warn("Promo introuvable :", error);
+    return { ok: false, reason: "Code introuvable" };
   }
 
-  const currentPoints = Number(user.points || 0);
-  if (currentPoints < pointsToSpend) {
-    return {
-      success: false,
-      reason: "Pas assez de points de fidélité",
-      currentPoints,
-      requiredPoints: pointsToSpend,
-    };
+  if (promo.is_active === false) {
+    return { ok: false, reason: "Code inactif" };
   }
 
-  const newPoints = currentPoints - pointsToSpend;
+  const today = new Date().toISOString().slice(0, 10);
 
-  const { error: updateErr } = await supabase
-    .from("users")
-    .update({
-      points: newPoints,
-      updated_at: new Date().toISOString(),
-    })
-    .eq("id", userId);
-
-  if (updateErr) {
-    throw updateErr;
+  if (promo.valid_from && today < promo.valid_from) {
+    return { ok: false, reason: "Code pas encore valable" };
   }
+  if (promo.valid_to && today > promo.valid_to) {
+    return { ok: false, reason: "Code expiré" };
+  }
+
+  if (promo.max_uses && promo.used_count >= promo.max_uses) {
+    return { ok: false, reason: "Nombre d'utilisations atteint" };
+  }
+
+  let discountAmount = 0;
+  const type = promo.type;
+  const value = Number(promo.value) || 0;
+
+  if (type === "percent") {
+    discountAmount = totalAmountEur * (value / 100);
+  } else if (type === "fixed") {
+    discountAmount = Math.min(totalAmountEur, value);
+  } else if (type === "free") {
+    discountAmount = totalAmountEur;
+  }
+
+  const newTotal = Math.max(0, totalAmountEur - discountAmount);
 
   return {
-    success: true,
-    deducted: pointsToSpend,
-    remainingPoints: newPoints,
+    ok: true,
+    newTotal,
+    discountAmount,
+    promo,
   };
-}
-
-export async function refundPointsToUser(userId, pointsToRefund) {
-  if (!supabase) throw new Error("Supabase non configuré");
-  if (!pointsToRefund || pointsToRefund <= 0) return;
-
-  const user = await getUserById(userId);
-  const currentPoints = Number(user.points || 0);
-
-  const { error } = await supabase
-    .from("users")
-    .update({
-      points: currentPoints + pointsToRefund,
-      updated_at: new Date().toISOString(),
-    })
-    .eq("id", userId);
-
-  if (error) throw error;
 }
