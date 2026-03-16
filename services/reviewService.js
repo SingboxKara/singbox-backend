@@ -8,6 +8,7 @@ import {
   FRONTEND_BASE_URL,
   RESEND_FROM_EMAIL,
   REVIEW_REQUEST_EXPIRY_DAYS,
+  REVIEW_REQUEST_BATCH_LIMIT,
 } from "../config/env.js";
 
 import { safeText } from "../utils/validators.js";
@@ -19,7 +20,7 @@ export function generateReviewToken() {
 }
 
 export function buildReviewLink(token) {
-  return `${FRONTEND_BASE_URL}/laisser-un-avis?token=${encodeURIComponent(token)}`;
+  return `${FRONTEND_BASE_URL}/avis.html?token=${encodeURIComponent(token)}`;
 }
 
 export function getFirstNameFromReservation(reservation) {
@@ -408,4 +409,96 @@ export async function sendReviewRequestEmail(reservation) {
       reviewRequest,
     };
   }
+}
+
+export async function processCompletedReviewRequests(options = {}) {
+  if (!supabase) {
+    throw new Error("Supabase non configuré");
+  }
+
+  const limit = Math.min(
+    Math.max(Number(options.limit || REVIEW_REQUEST_BATCH_LIMIT), 1),
+    100
+  );
+
+  const source = safeText(options.source, 50) || "unknown";
+  const nowIso = new Date().toISOString();
+
+  const { data: reservations, error } = await supabase
+    .from("reservations")
+    .select("*")
+    .lt("end_time", nowIso)
+    .order("end_time", { ascending: false })
+    .limit(limit);
+
+  if (error) {
+    throw error;
+  }
+
+  const confirmedFinishedReservations = (reservations || []).filter(
+    (row) => isReservationStatusConfirmed(row.status) && isReservationFinished(row)
+  );
+
+  const results = [];
+
+  for (const reservation of confirmedFinishedReservations) {
+    try {
+      const existing = await getExistingReviewRequestByReservationId(reservation.id);
+
+      if (existing?.status === "used") {
+        results.push({
+          reservationId: reservation.id,
+          email: reservation.email,
+          skipped: true,
+          reason: "already_used",
+        });
+        continue;
+      }
+
+      if (existing?.sent_at && existing?.status === "pending") {
+        results.push({
+          reservationId: reservation.id,
+          email: reservation.email,
+          skipped: true,
+          reason: "already_sent",
+        });
+        continue;
+      }
+
+      const sendResult = await sendReviewRequestEmail(reservation);
+
+      results.push({
+        reservationId: reservation.id,
+        email: reservation.email,
+        sent: !!sendResult.sent,
+        reason: sendResult.reason || null,
+      });
+    } catch (itemErr) {
+      console.error("Erreur envoi review request reservation", reservation.id, itemErr);
+      results.push({
+        reservationId: reservation.id,
+        email: reservation.email,
+        sent: false,
+        reason: itemErr.message || "error",
+      });
+    }
+  }
+
+  const sentCount = results.filter((r) => r.sent).length;
+  const skippedCount = results.filter((r) => r.skipped).length;
+  const failedCount = results.filter((r) => r.sent === false && !r.skipped).length;
+
+  console.log(
+    `🕒 Review scheduler [${source}] terminé : processed=${results.length}, sent=${sentCount}, skipped=${skippedCount}, failed=${failedCount}`
+  );
+
+  return {
+    success: true,
+    source,
+    totalProcessed: results.length,
+    sentCount,
+    skippedCount,
+    failedCount,
+    results,
+  };
 }

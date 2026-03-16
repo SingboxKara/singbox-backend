@@ -6,6 +6,13 @@ info:
 http:
   method: POST
   url: https://singbox-backend.onrender.com/api/login
+  body:
+    type: json
+    data: |-
+      {
+        "email": "testsingbox123@example.com",
+        "password": "test1234"
+      }
   auth: inherit
 
 settings:

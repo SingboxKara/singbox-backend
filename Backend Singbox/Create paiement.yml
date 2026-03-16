@@ -1,0 +1,42 @@
+info:
+  name: Create paiement
+  type: http
+  seq: 12
+
+http:
+  method: POST
+  url: https://singbox-backend.onrender.com/api/create-payment-intent
+  headers:
+    - name: Authorization
+      value: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJ1c2VySWQiOiIwZDQ2OThiYy0wOTJmLTQzNjctOWQxOS0xODE0NzA3YzM4YTciLCJpYXQiOjE3NzM2NjE3NTMsImV4cCI6MTc3NDI2NjU1M30.5L8rOZQoHESKV4l9XgEgAFCRrETanpn1NkaJlwQmo2I
+    - name: Content-Type
+      value: application/json
+  body:
+    type: json
+    data: |-
+      {
+        "panier": [
+          {
+            "date": "2026-04-10",
+            "hour": 18,
+            "boxId": 1,
+            "persons": 4
+          }
+        ],
+        "customer": {
+          "prenom": "Jolann",
+          "nom": "Test",
+          "email": "testsingbox123@example.com"
+        },
+        "promoCode": "",
+        "finalAmountCents": 3960,
+        "loyaltyUsed": false,
+        "useSavedPaymentMethod": false
+      }
+  auth: inherit
+
+settings:
+  encodeUrl: true
+  timeout: 0
+  followRedirects: true
+  maxRedirects: 5

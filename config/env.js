@@ -15,11 +15,12 @@ export const RESEND_FROM_EMAIL =
   process.env.RESEND_FROM_EMAIL || "Singbox <onboarding@resend.dev>";
 
 export const FRONTEND_BASE_URL = (
-  process.env.FRONTEND_BASE_URL || "https://www.singbox.fr"
+  process.env.FRONTEND_BASE_URL || "https://site-reservation-qr.vercel.app"
 ).replace(/\/+$/, "");
 
 export const BACKEND_BASE_URL = (
   process.env.BACKEND_BASE_URL ||
+  process.env.RENDER_EXTERNAL_URL ||
   (process.env.VERCEL_URL
     ? `https://${process.env.VERCEL_URL}`
     : "http://localhost:3000")
@@ -32,6 +33,25 @@ export const REVIEW_REQUEST_EXPIRY_DAYS = Number(
 
 export const JWT_SECRET = process.env.JWT_SECRET || "";
 export const PORT = process.env.PORT || 3000;
+
+// Scheduler auto des demandes d'avis
+export const ENABLE_REVIEW_REQUEST_SCHEDULER =
+  String(process.env.ENABLE_REVIEW_REQUEST_SCHEDULER || "true").toLowerCase() === "true";
+
+export const REVIEW_REQUEST_SCHEDULER_INTERVAL_MS = Math.max(
+  60_000,
+  Number(process.env.REVIEW_REQUEST_SCHEDULER_INTERVAL_MS || 60 * 60 * 1000)
+);
+
+export const REVIEW_REQUEST_SCHEDULER_INITIAL_DELAY_MS = Math.max(
+  5_000,
+  Number(process.env.REVIEW_REQUEST_SCHEDULER_INITIAL_DELAY_MS || 30_000)
+);
+
+export const REVIEW_REQUEST_BATCH_LIMIT = Math.min(
+  Math.max(Number(process.env.REVIEW_REQUEST_BATCH_LIMIT || 50), 1),
+  100
+);
 
 if (!STRIPE_SECRET_KEY) {
   console.error("❌ STRIPE_SECRET_KEY manquante dans .env");

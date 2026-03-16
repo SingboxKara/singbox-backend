@@ -1,14 +1,16 @@
 info:
-  name: Profil
+  name: Fidélité
   type: http
-  seq: 6
+  seq: 10
 
 http:
-  method: GET
-  url: https://singbox-backend.onrender.com/api/me
+  method: POST
+  url: https://singbox-backend.onrender.com/api/use-loyalty
   headers:
     - name: Authorization
       value: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJ1c2VySWQiOiIwZDQ2OThiYy0wOTJmLTQzNjctOWQxOS0xODE0NzA3YzM4YTciLCJpYXQiOjE3NzM2NjE3NTMsImV4cCI6MTc3NDI2NjU1M30.5L8rOZQoHESKV4l9XgEgAFCRrETanpn1NkaJlwQmo2I
+    - name: Content-Type
+      value: application/json
   auth: inherit
 
 settings:

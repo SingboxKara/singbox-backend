@@ -1,14 +1,30 @@
 info:
-  name: Profil
+  name: Mise a jour profil
   type: http
-  seq: 6
+  seq: 7
 
 http:
-  method: GET
+  method: POST
   url: https://singbox-backend.onrender.com/api/me
   headers:
     - name: Authorization
       value: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJ1c2VySWQiOiIwZDQ2OThiYy0wOTJmLTQzNjctOWQxOS0xODE0NzA3YzM4YTciLCJpYXQiOjE3NzM2NjE3NTMsImV4cCI6MTc3NDI2NjU1M30.5L8rOZQoHESKV4l9XgEgAFCRrETanpn1NkaJlwQmo2I
+    - name: Content-Type
+      value: application/json
+  body:
+    type: json
+    data: |-
+      {
+        "prenom": "Jolann",
+        "nom": "Test",
+        "telephone": "0601020304",
+        "pays": "FR",
+        "adresse": "1 rue de test",
+        "complement": "Appartement 2",
+        "cp": "31000",
+        "ville": "Toulouse",
+        "naissance": "2000-01-01"
+      }
   auth: inherit
 
 settings:

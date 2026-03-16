@@ -9,14 +9,17 @@ function extractBearerToken(req) {
 }
 
 export function isCronAuthorized(req) {
-  const token = extractBearerToken(req);
-  return token && token === CRON_SECRET;
+  if (!CRON_SECRET) return false;
+
+  const bearerToken = extractBearerToken(req);
+  const headerSecret = String(req.headers["x-cron-secret"] || "").trim();
+
+  return bearerToken === CRON_SECRET || headerSecret === CRON_SECRET;
 }
 
 export function requireAdminOrCron(req, res, next) {
-  const token = extractBearerToken(req);
-
-  if (token === CRON_SECRET) {
+  if (isCronAuthorized(req)) {
+    req.isCron = true;
     return next();
   }
 
@@ -26,6 +29,7 @@ export function requireAdminOrCron(req, res, next) {
     });
   }
 
+  req.isCron = false;
   next();
 }
 
