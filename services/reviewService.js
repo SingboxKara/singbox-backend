@@ -219,6 +219,40 @@ export async function getExistingReviewForReservation(reservationId) {
   return data?.[0] || null;
 }
 
+function isMissingColumnError(error, columnName) {
+  const message = String(error?.message || "");
+  const details = String(error?.details || "");
+  const hint = String(error?.hint || "");
+  const combined = `${message} ${details} ${hint}`.toLowerCase();
+
+  return (
+    combined.includes("column") &&
+    combined.includes(String(columnName).toLowerCase())
+  );
+}
+
+function formatSupabaseError(error) {
+  if (!error) return "Erreur Supabase inconnue";
+
+  const code = error.code ? `[${error.code}] ` : "";
+  const message = error.message || "Erreur Supabase";
+  const details = error.details ? ` | details: ${error.details}` : "";
+  const hint = error.hint ? ` | hint: ${error.hint}` : "";
+
+  return `${code}${message}${details}${hint}`;
+}
+
+async function insertReviewPayload(payload) {
+  const { data, error } = await supabase
+    .from("reviews")
+    .insert(payload)
+    .select()
+    .single();
+
+  if (error) throw error;
+  return data;
+}
+
 export async function createReviewFromToken({
   token,
   firstName,
@@ -270,7 +304,7 @@ export async function createReviewFromToken({
 
   const nowIso = new Date().toISOString();
 
-  const payload = {
+  const basePayload = {
     reservation_id: request.reservation_id,
     email: safeText(email || request.email, 160),
     name: safeText(firstName || request.name, 80),
@@ -282,19 +316,40 @@ export async function createReviewFromToken({
     consent_publication: !!consentPublication,
   };
 
-  const { data, error } = await supabase
-    .from("reviews")
-    .insert(payload)
-    .select()
-    .single();
+  let insertedReview = null;
 
-  if (error) throw error;
+  try {
+    insertedReview = await insertReviewPayload(basePayload);
+  } catch (error) {
+    if (isMissingColumnError(error, "consent_publication")) {
+      const fallbackPayload = {
+        reservation_id: request.reservation_id,
+        email: safeText(email || request.email, 160),
+        name: safeText(firstName || request.name, 80),
+        rating: Number(rating),
+        comment: safeText(comment, 4000),
+        approved: false,
+        created_at: nowIso,
+        updated_at: nowIso,
+      };
+
+      try {
+        insertedReview = await insertReviewPayload(fallbackPayload);
+      } catch (fallbackError) {
+        console.error("❌ Erreur insert avis (fallback sans consent_publication) :", fallbackError);
+        throw new Error(formatSupabaseError(fallbackError));
+      }
+    } else {
+      console.error("❌ Erreur insert avis :", error);
+      throw new Error(formatSupabaseError(error));
+    }
+  }
 
   await markReviewRequestUsed(token);
 
   return {
     alreadyExists: false,
-    review: data,
+    review: insertedReview,
   };
 }
 
@@ -338,7 +393,7 @@ export async function sendReviewRequestEmail(reservation) {
         : "N/A";
 
     const startStr = fmt(start);
-    const firstName = safeText(reviewRequest.name || "bonjour", 80) || "bonjour";
+    const firstNameSafe = safeText(reviewRequest.name || "bonjour", 80) || "bonjour";
 
     const subject = `Votre avis sur votre session Singbox`;
 
@@ -354,7 +409,7 @@ export async function sendReviewRequestEmail(reservation) {
             </div>
 
             <div style="margin-top:10px;font-size:14px;line-height:1.65;color:rgba(249,250,251,0.9);">
-              Bonjour ${firstName}, merci d’être venu chez <strong>Singbox</strong>.
+              Bonjour ${firstNameSafe}, merci d’être venu chez <strong>Singbox</strong>.
               Votre session du <strong>${startStr}</strong> en <strong>Box ${reservation.box_id}</strong> s’est terminée, et votre retour nous aiderait beaucoup.
             </div>
 

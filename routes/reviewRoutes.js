@@ -191,7 +191,19 @@ router.post("/api/review/submit", async (req, res) => {
     });
   } catch (e) {
     console.error("Erreur /api/review/submit :", e);
-    return res.status(400).json({ error: e.message || "Erreur serveur" });
+
+    return res.status(400).json({
+      error: e?.message || "Erreur serveur",
+      debug:
+        process.env.NODE_ENV !== "production"
+          ? {
+              name: e?.name || null,
+              code: e?.code || null,
+              details: e?.details || null,
+              hint: e?.hint || null,
+            }
+          : undefined,
+    });
   }
 });
 

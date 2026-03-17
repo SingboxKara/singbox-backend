@@ -1,0 +1,26 @@
+info:
+  name: Test Avis
+  type: http
+  seq: 15
+
+http:
+  method: POST
+  url: https://singbox-backend.onrender.com/api/admin/send-completed-review-requests
+  headers:
+    - name: Authorization
+      value: Bearer H10ScmZm2moIGRdDCvnQ
+    - name: Content-Type
+      value: application/json
+  body:
+    type: json
+    data: |-
+      {
+        "limit": 20
+      }
+  auth: inherit
+
+settings:
+  encodeUrl: true
+  timeout: 0
+  followRedirects: true
+  maxRedirects: 5
