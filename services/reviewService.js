@@ -1,5 +1,3 @@
-// backend/services/reviewService.js
-
 import crypto from "crypto";
 
 import { supabase } from "../config/supabase.js";
@@ -15,12 +13,27 @@ import { safeText } from "../utils/validators.js";
 import { parseDateOrNull } from "../utils/dates.js";
 import { isReservationStatusConfirmed } from "./reservationService.js";
 
+const FALLBACK_FRONTEND_BASE_URL = "https://site-reservation-qr.vercel.app";
+const POST_SESSION_PROMO_PERCENT = 10;
+const POST_SESSION_PROMO_VALIDITY_DAYS = 15;
+
 export function generateReviewToken() {
   return crypto.randomBytes(32).toString("hex");
 }
 
+function getFrontendBaseUrl() {
+  return String(FRONTEND_BASE_URL || FALLBACK_FRONTEND_BASE_URL)
+    .trim()
+    .replace(/\/+$/, "");
+}
+
 export function buildReviewLink(token) {
-  return `${FRONTEND_BASE_URL}/avis.html?token=${encodeURIComponent(token)}`;
+  return `${getFrontendBaseUrl()}/avis.html?token=${encodeURIComponent(token)}`;
+}
+
+function buildBookingLink() {
+  const base = getFrontendBaseUrl();
+  return base || FALLBACK_FRONTEND_BASE_URL;
 }
 
 export function getFirstNameFromReservation(reservation) {
@@ -32,6 +45,141 @@ export function getFirstNameFromReservation(reservation) {
 
 export function addDaysToIsoNow(days) {
   return new Date(Date.now() + days * 24 * 60 * 60 * 1000).toISOString();
+}
+
+function addDaysToDateOnly(days) {
+  return new Date(Date.now() + days * 24 * 60 * 60 * 1000)
+    .toISOString()
+    .slice(0, 10);
+}
+
+function todayDateOnly() {
+  return new Date().toISOString().slice(0, 10);
+}
+
+function formatDateFr(dateLike) {
+  const date = parseDateOrNull(dateLike);
+  if (!date) return "N/A";
+
+  return date.toLocaleDateString("fr-FR", {
+    timeZone: "Europe/Paris",
+    day: "2-digit",
+    month: "2-digit",
+    year: "numeric",
+  });
+}
+
+function isPromoStillUsable(promo) {
+  if (!promo) return false;
+  if (promo.is_active === false) return false;
+
+  const today = todayDateOnly();
+
+  if (promo.valid_from && today < promo.valid_from) return false;
+  if (promo.valid_to && today > promo.valid_to) return false;
+
+  if (
+    promo.max_uses != null &&
+    Number(promo.used_count || 0) >= Number(promo.max_uses || 0)
+  ) {
+    return false;
+  }
+
+  return true;
+}
+
+function buildPromoNoteForReservation(reservationId) {
+  return `post_session_review_discount:${String(reservationId || "").trim()}`;
+}
+
+function generatePromoCodeCandidate() {
+  const random = crypto.randomBytes(3).toString("hex").toUpperCase();
+  return `SING10-${random}`;
+}
+
+async function getPromoCodeByCode(code) {
+  const { data, error } = await supabase
+    .from("promo_codes")
+    .select("*")
+    .eq("code", code)
+    .maybeSingle();
+
+  if (error) throw error;
+  return data || null;
+}
+
+async function getExistingPostSessionPromoForReservation(reservationId) {
+  const note = buildPromoNoteForReservation(reservationId);
+
+  const { data, error } = await supabase
+    .from("promo_codes")
+    .select("*")
+    .eq("note", note)
+    .order("created_at", { ascending: false })
+    .limit(1);
+
+  if (error) throw error;
+  return data?.[0] || null;
+}
+
+async function createUniquePostSessionPromoForReservation(reservation) {
+  if (!supabase) {
+    throw new Error("Supabase non configuré");
+  }
+
+  const reservationId = String(reservation?.id || "").trim();
+  if (!reservationId) {
+    throw new Error("reservation.id manquant pour la création du code promo");
+  }
+
+  const existing = await getExistingPostSessionPromoForReservation(reservationId);
+  if (existing && isPromoStillUsable(existing)) {
+    return existing;
+  }
+
+  const validFrom = todayDateOnly();
+  const validTo = addDaysToDateOnly(POST_SESSION_PROMO_VALIDITY_DAYS);
+  const note = buildPromoNoteForReservation(reservationId);
+
+  for (let attempt = 0; attempt < 12; attempt += 1) {
+    const code = generatePromoCodeCandidate();
+    const collision = await getPromoCodeByCode(code);
+
+    if (collision) {
+      continue;
+    }
+
+    const payload = {
+      code,
+      type: "percent",
+      is_active: true,
+      used_count: 0,
+      max_uses: 1,
+      value: POST_SESSION_PROMO_PERCENT,
+      valid_from: validFrom,
+      valid_to: validTo,
+      first_session_only: false,
+      max_uses_per_user: null,
+      email_domain: null,
+      note,
+    };
+
+    const { data, error } = await supabase
+      .from("promo_codes")
+      .insert(payload)
+      .select()
+      .single();
+
+    if (!error && data) {
+      return data;
+    }
+
+    if (error) {
+      console.error("Erreur création code promo post-session :", error);
+    }
+  }
+
+  throw new Error("Impossible de générer un code promo unique");
 }
 
 export function isReservationFinished(reservation) {
@@ -336,7 +484,10 @@ export async function createReviewFromToken({
       try {
         insertedReview = await insertReviewPayload(fallbackPayload);
       } catch (fallbackError) {
-        console.error("❌ Erreur insert avis (fallback sans consent_publication) :", fallbackError);
+        console.error(
+          "❌ Erreur insert avis (fallback sans consent_publication) :",
+          fallbackError
+        );
         throw new Error(formatSupabaseError(fallbackError));
       }
     } else {
@@ -360,27 +511,51 @@ export async function sendReviewRequestEmail(reservation) {
   }
 
   if (!reservation?.email) {
-    console.warn("📧 Impossible d'envoyer le mail d'avis : email manquant", reservation?.id);
+    console.warn(
+      "📧 Impossible d'envoyer le mail d'avis : email manquant",
+      reservation?.id
+    );
     return { sent: false, reason: "missing_email" };
   }
 
   const upsertResult = await upsertReviewRequestForReservation(reservation);
 
   if (upsertResult.alreadyUsed) {
-    return { sent: false, reason: "already_used", reviewRequest: upsertResult.request };
+    return {
+      sent: false,
+      reason: "already_used",
+      reviewRequest: upsertResult.request,
+    };
   }
 
   if (upsertResult.alreadySent) {
-    return { sent: false, reason: "already_sent", reviewRequest: upsertResult.request };
+    return {
+      sent: false,
+      reason: "already_sent",
+      reviewRequest: upsertResult.request,
+    };
   }
 
   const reviewRequest = upsertResult.request;
   const reviewLink = buildReviewLink(reviewRequest.token);
+  const bookingLink = buildBookingLink();
+
+  let promo = null;
+
+  try {
+    promo = await createUniquePostSessionPromoForReservation(reservation);
+  } catch (promoErr) {
+    console.error(
+      "❌ Erreur création code promo post-session pour réservation",
+      reservation?.id,
+      promoErr
+    );
+  }
 
   try {
     const start = reservation.start_time ? new Date(reservation.start_time) : null;
 
-    const fmt = (d) =>
+    const fmtDateTime = (d) =>
       d
         ? d.toLocaleString("fr-FR", {
             timeZone: "Europe/Paris",
@@ -392,10 +567,46 @@ export async function sendReviewRequestEmail(reservation) {
           })
         : "N/A";
 
-    const startStr = fmt(start);
+    const startStr = fmtDateTime(start);
     const firstNameSafe = safeText(reviewRequest.name || "bonjour", 80) || "bonjour";
+    const promoExpiryLabel = promo?.valid_to ? formatDateFr(promo.valid_to) : null;
 
-    const subject = `Votre avis sur votre session Singbox`;
+    const subject = `Merci pour votre session Singbox 🎤`;
+
+    const promoBlock = promo
+      ? `
+        <div style="margin-top:18px;padding:18px;border-radius:16px;background:linear-gradient(135deg,rgba(249,115,22,0.18),rgba(234,88,12,0.08));border:1px solid rgba(251,146,60,0.38);">
+          <div style="font-size:12.5px;font-weight:900;letter-spacing:0.08em;text-transform:uppercase;color:#FDBA74;">
+            VOTRE AVANTAGE RETOUR
+          </div>
+
+          <div style="margin-top:10px;font-size:13px;color:#E5E7EB;line-height:1.7;">
+            Pour vous remercier de votre venue, voici votre <strong>code promo personnel de -${POST_SESSION_PROMO_PERCENT}%</strong> sur une prochaine réservation :
+          </div>
+
+          <div style="margin-top:14px;text-align:center;">
+            <div style="display:inline-block;padding:14px 18px;border-radius:14px;background:#0F172A;border:1px dashed rgba(251,146,60,0.75);font-size:22px;font-weight:900;letter-spacing:0.08em;color:#F9FAFB;">
+              ${promo.code}
+            </div>
+          </div>
+
+          <ul style="margin:14px 0 0 18px;padding:0;color:#E5E7EB;font-size:12.5px;line-height:1.7;">
+            <li><strong>Réduction :</strong> -${POST_SESSION_PROMO_PERCENT}% sur votre prochaine réservation.</li>
+            <li><strong>Validité :</strong> jusqu’au <strong>${promoExpiryLabel}</strong>.</li>
+            <li><strong>Utilisation :</strong> 1 seule fois.</li>
+          </ul>
+
+          <div style="margin-top:14px;text-align:center;">
+            <a
+              href="${bookingLink}"
+              style="display:inline-block;padding:12px 22px;border-radius:999px;background:linear-gradient(90deg,#c94c35,#f97316);color:#F9FAFB;font-weight:800;font-size:14px;text-decoration:none;"
+            >
+              Réserver une nouvelle session
+            </a>
+          </div>
+        </div>
+      `
+      : "";
 
     const htmlBody = `
       <div style="margin:0;padding:22px 0;background:#050814;">
@@ -410,21 +621,46 @@ export async function sendReviewRequestEmail(reservation) {
 
             <div style="margin-top:10px;font-size:14px;line-height:1.65;color:rgba(249,250,251,0.9);">
               Bonjour ${firstNameSafe}, merci d’être venu chez <strong>Singbox</strong>.
-              Votre session du <strong>${startStr}</strong> en <strong>Box ${reservation.box_id}</strong> s’est terminée, et votre retour nous aiderait beaucoup.
+              Votre session du <strong>${startStr}</strong> en <strong>Box ${reservation.box_id}</strong> est maintenant terminée, et votre retour nous aiderait beaucoup à améliorer l’expérience.
             </div>
 
             <div style="margin-top:18px;padding:16px;border-radius:16px;background:rgba(15,23,42,0.72);border:1px solid rgba(148,163,184,0.30);">
-              <div style="font-size:13px;color:#E5E7EB;line-height:1.65;">
-                Cliquez sur le bouton ci-dessous pour laisser votre avis.
-                Ce lien est personnel et valable jusqu’au <strong>${new Date(reviewRequest.expires_at).toLocaleDateString("fr-FR")}</strong>.
+              <div style="font-size:12.5px;font-weight:900;letter-spacing:0.08em;text-transform:uppercase;color:#E5E7EB;">
+                LAISSER UN AVIS
+              </div>
+
+              <div style="margin-top:10px;font-size:13px;color:#E5E7EB;line-height:1.7;">
+                Cliquez sur le bouton ci-dessous pour partager votre avis.
+                Ce lien est personnel et valable jusqu’au <strong>${new Date(
+                  reviewRequest.expires_at
+                ).toLocaleDateString("fr-FR")}</strong>.
               </div>
 
               <div style="margin-top:18px;text-align:center;">
                 <a
                   href="${reviewLink}"
-                  style="display:inline-block;padding:12px 22px;border-radius:999px;background:linear-gradient(90deg,#c94c35,#f97316);color:#F9FAFB;font-weight:800;font-size:14px;text-decoration:none;"
+                  style="display:inline-block;padding:12px 22px;border-radius:999px;background:#F9FAFB;color:#020617;font-weight:800;font-size:14px;text-decoration:none;"
                 >
                   Laisser mon avis
+                </a>
+              </div>
+            </div>
+
+            ${promoBlock}
+
+            <div style="margin-top:18px;padding:16px;border-radius:16px;background:rgba(15,23,42,0.62);border:1px solid rgba(148,163,184,0.26);text-align:center;">
+              <div style="font-size:13px;font-weight:800;color:#F9FAFB;">
+                Envie de revenir chanter avec votre groupe ?
+              </div>
+              <div style="margin-top:7px;font-size:12px;color:#CBD5E1;line-height:1.6;">
+                Retrouvez vos prochaines disponibilités directement sur le site Singbox.
+              </div>
+              <div style="margin-top:14px;">
+                <a
+                  href="${bookingLink}"
+                  style="display:inline-block;padding:12px 20px;border-radius:999px;background:transparent;color:#F9FAFB;text-decoration:none;font-weight:800;font-size:13px;border:1px solid rgba(148,163,184,0.45);"
+                >
+                  Voir les disponibilités
                 </a>
               </div>
             </div>
@@ -448,12 +684,18 @@ export async function sendReviewRequestEmail(reservation) {
 
     await markReviewRequestSent(reviewRequest.id);
 
-    console.log("✅ Email de demande d'avis envoyé à", reservation.email, "reservation", reservation.id);
+    console.log(
+      "✅ Email de demande d'avis envoyé à",
+      reservation.email,
+      "reservation",
+      reservation.id
+    );
 
     return {
       sent: true,
       reviewRequest,
       reviewLink,
+      promoCode: promo?.code || null,
     };
   } catch (err) {
     console.error("❌ Erreur envoi email demande d'avis :", err);
@@ -462,6 +704,7 @@ export async function sendReviewRequestEmail(reservation) {
       reason: "mail_error",
       error: err.message,
       reviewRequest,
+      promoCode: promo?.code || null,
     };
   }
 }
@@ -527,6 +770,7 @@ export async function processCompletedReviewRequests(options = {}) {
         email: reservation.email,
         sent: !!sendResult.sent,
         reason: sendResult.reason || null,
+        promoCode: sendResult.promoCode || null,
       });
     } catch (itemErr) {
       console.error("Erreur envoi review request reservation", reservation.id, itemErr);
