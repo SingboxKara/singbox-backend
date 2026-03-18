@@ -19,6 +19,9 @@ export const OFF_PEAK_END_HOUR = 14;
 export const OFF_PEAK_RATE = 7.9;
 export const STANDARD_RATE = 9.9;
 
+export const GUEST_MANAGE_TOKEN_BYTES = 32;
+export const GUEST_MANAGE_TOKEN_TTL_DAYS = 90;
+
 export const CONFIRMED_STATUSES = [
   "confirmed",
   "confirmé",

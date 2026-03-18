@@ -10,6 +10,26 @@ import {
   REFUND_DEADLINE_HOURS,
 } from "../constants/booking.js";
 
+function getFrontendBaseUrl() {
+  const raw =
+    process.env.FRONTEND_BASE_URL ||
+    process.env.PUBLIC_FRONTEND_URL ||
+    "https://www.singbox.fr";
+
+  return String(raw).replace(/\/+$/, "");
+}
+
+function getManageReservationUrl(reservation) {
+  const frontBase = getFrontendBaseUrl();
+  const token = String(reservation?.guest_manage_token || "").trim();
+
+  if (token) {
+    return `${frontBase}/modifier-reservation.html?token=${encodeURIComponent(token)}`;
+  }
+
+  return `${frontBase}/mon-compte.html`;
+}
+
 export async function sendReservationEmail(reservation) {
   if (!mailEnabled || !resend) {
     console.warn(
@@ -53,7 +73,7 @@ export async function sendReservationEmail(reservation) {
     const startStr = fmt(start);
     const endStr = fmt(end);
 
-    const manageReservationUrl = `${String(BACKEND_BASE_URL || "").replace(/\/+$/, "")}/mon-compte`;
+    const manageReservationUrl = getManageReservationUrl(reservation);
 
     const subject = `Confirmation de votre réservation Singbox - Box ${reservation.box_id}`;
 
@@ -116,20 +136,20 @@ export async function sendReservationEmail(reservation) {
 
             <div style="margin-top:14px;padding:16px 16px 14px 16px;border-radius:16px;background:linear-gradient(135deg,rgba(249,115,22,0.18),rgba(234,88,12,0.08));border:1px solid rgba(251,146,60,0.38);">
               <div style="font-size:12.5px;font-weight:900;letter-spacing:0.08em;text-transform:uppercase;color:#FDBA74;">
-                VOTRE GROUPE PEUT TOUJOURS S’AGRANDIR
+                GÉRER VOTRE RÉSERVATION
               </div>
               <div style="margin-top:10px;font-size:12.5px;color:#E5E7EB;line-height:1.65;">
-                Une bonne nouvelle : si d’autres personnes veulent se joindre à vous, <strong>vous pouvez ajouter des participants à tout moment avant le début de votre séance</strong>, dans la limite de la capacité de la box.
+                Vous pouvez consulter votre réservation via un <strong>lien sécurisé</strong>, puis :
               </div>
 
               <ul style="margin:12px 0 0 18px;padding:0;color:#E5E7EB;font-size:12.5px;line-height:1.7;">
                 <li><strong>Ajouter des participants</strong> avant la séance si votre groupe s’agrandit.</li>
                 <li><strong>Modifier la date ou l’horaire</strong> jusqu’à <strong>${MODIFICATION_DEADLINE_HOURS}h avant</strong>, selon disponibilités.</li>
-                <li><strong>Gérer votre réservation</strong> facilement depuis votre compte Singbox.</li>
+                <li><strong>Demander un remboursement</strong> jusqu’à <strong>${REFUND_DEADLINE_HOURS}h avant</strong>.</li>
               </ul>
 
               <div style="margin-top:10px;font-size:11.5px;color:#FED7AA;line-height:1.6;">
-                Plus vous anticipez les changements d’horaire, plus vous aurez de choix sur les créneaux disponibles.
+                Conservez cet e-mail : le bouton ci-dessous contient votre accès sécurisé de gestion.
               </div>
 
               <div style="margin-top:16px;text-align:center;">
@@ -138,7 +158,7 @@ export async function sendReservationEmail(reservation) {
                 </a>
               </div>
               <div style="margin-top:8px;text-align:center;font-size:11px;color:#9CA3AF;">
-                Accédez à votre compte Singbox pour retrouver votre réservation et ajuster votre séance.
+                Ce lien est personnel et associé à cette réservation.
               </div>
             </div>
 
@@ -152,44 +172,8 @@ export async function sendReservationEmail(reservation) {
 
               <ul style="margin:10px 0 0 18px;padding:0;color:#E5E7EB;font-size:12px;line-height:1.55;">
                 <li>Il ne s’agit pas d’un débit immédiat, mais d’un blocage temporaire du montant.</li>
-                <li>L’empreinte n’est pas encaissée si la session se déroule normalement et que le règlement est respecté.</li>
-                <li>En cas de dégradations ou non-respect des règles, tout ou partie de ce montant peut être prélevée après constat par l’équipe Singbox.</li>
+                <li>L’empreinte pourra être utilisée uniquement en cas de dégradations, non-respect du règlement ou frais dus.</li>
               </ul>
-
-              <div style="margin-top:10px;font-size:11px;color:#9CA3AF;">
-                Les délais de libération de l’empreinte dépendent de votre banque (généralement quelques jours).
-              </div>
-            </div>
-
-            <div style="margin-top:16px;">
-              <div style="font-size:12.5px;font-weight:900;letter-spacing:0.08em;text-transform:uppercase;color:#E5E7EB;">
-                CONDITIONS DE GESTION DE RÉSERVATION
-              </div>
-              <ul style="margin:10px 0 0 18px;padding:0;color:#E5E7EB;font-size:12px;line-height:1.6;">
-                <li>Annulation avec remboursement possible jusqu’à <strong>${REFUND_DEADLINE_HOURS}h</strong> avant le début de la séance.</li>
-                <li>Passé ce délai, la réservation est considérée comme due et non remboursable.</li>
-                <li>Modification de date ou d’horaire possible jusqu’à <strong>${MODIFICATION_DEADLINE_HOURS}h</strong> avant, selon disponibilités.</li>
-                <li><strong>Ajout de participants possible jusqu’au début de la séance</strong>, dans la limite de la capacité autorisée de la box.</li>
-                <li>En cas de retard important, la session pourra être écourtée sans compensation afin de respecter les créneaux suivants.</li>
-              </ul>
-            </div>
-
-            <div style="margin-top:14px;">
-              <div style="font-size:12.5px;font-weight:900;letter-spacing:0.08em;text-transform:uppercase;color:#E5E7EB;">
-                RÈGLEMENT INTÉRIEUR SINGBOX
-              </div>
-              <ul style="margin:10px 0 0 18px;padding:0;color:#E5E7EB;font-size:12px;line-height:1.6;">
-                <li><strong>Respect du matériel :</strong> micros, écrans, banquettes et équipements doivent être utilisés avec soin.</li>
-                <li><strong>Comportement :</strong> toute attitude violente, insultante ou dangereuse peut entraîner l’arrêt immédiat de la session.</li>
-                <li><strong>Alcool & drogues :</strong> l’accès pourra être refusé en cas d’état d’ivresse avancé ou de consommation de substances illicites.</li>
-                <li><strong>Fumée :</strong> il est strictement interdit de fumer dans les box.</li>
-                <li><strong>Nuisances sonores :</strong> merci de respecter les autres clients et le voisinage dans les espaces communs.</li>
-                <li><strong>Capacité maximale :</strong> le nombre de personnes par box ne doit pas dépasser la limite indiquée sur place.</li>
-              </ul>
-
-              <div style="margin-top:10px;font-size:11px;color:#9CA3AF;">
-                En validant votre réservation, vous acceptez le règlement intérieur de Singbox.
-              </div>
             </div>
 
             <div style="margin-top:14px;">
@@ -197,20 +181,20 @@ export async function sendReservationEmail(reservation) {
                 INFOS PRATIQUES
               </div>
               <div style="margin-top:10px;font-size:12px;color:#E5E7EB;line-height:1.6;">
-                <div><strong>Adresse :</strong> 66 Rue de la République, 31300 Toulouse (à adapter si besoin).</div>
+                <div><strong>Adresse :</strong> 66 Rue de la République, 31300 Toulouse</div>
                 <div style="margin-top:6px;color:#9CA3AF;font-size:11.5px;">Pensez à vérifier l’accès et le stationnement avant votre venue.</div>
               </div>
             </div>
 
             <div style="margin-top:18px;padding:16px 14px;border-radius:14px;background:rgba(15,23,42,0.62);border:1px solid rgba(148,163,184,0.26);text-align:center;">
               <div style="font-size:13px;font-weight:800;color:#F9FAFB;">
-                Besoin d’ajouter quelqu’un avant votre session ?
+                Besoin d’un accès classique à votre espace client ?
               </div>
               <div style="margin-top:7px;font-size:12px;color:#CBD5E1;line-height:1.6;">
-                Retrouvez votre réservation dans votre compte Singbox et ajustez votre séance en quelques clics.
+                Vous pouvez aussi retrouver Singbox depuis le site principal.
               </div>
               <div style="margin-top:14px;">
-                <a href="${manageReservationUrl}" target="_blank" rel="noopener noreferrer" style="${buttonStyleSecondary}">
+                <a href="${getFrontendBaseUrl()}/mon-compte.html" target="_blank" rel="noopener noreferrer" style="${buttonStyleSecondary}">
                   Accéder à mon compte Singbox
                 </a>
               </div>

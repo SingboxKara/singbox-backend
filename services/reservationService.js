@@ -1,11 +1,15 @@
 // backend/services/reservationService.js
 
+import crypto from "crypto";
+
 import { supabase } from "../config/supabase.js";
 import {
   CONFIRMED_STATUSES,
   CANCELLED_OR_REFUNDED_STATUSES,
   MODIFICATION_DEADLINE_HOURS,
   REFUND_DEADLINE_HOURS,
+  GUEST_MANAGE_TOKEN_BYTES,
+  GUEST_MANAGE_TOKEN_TTL_DAYS,
 } from "../constants/booking.js";
 import {
   addDaysToDateString,
@@ -47,6 +51,16 @@ export function isWithinRefundWindow(startTimeIso) {
   const diff = hoursBeforeDate(startTimeIso);
   if (diff === null) return false;
   return diff >= REFUND_DEADLINE_HOURS;
+}
+
+export function generateGuestManageToken() {
+  return crypto.randomBytes(GUEST_MANAGE_TOKEN_BYTES).toString("hex");
+}
+
+export function computeGuestManageTokenExpiresAt(fromDate = new Date()) {
+  const expires = new Date(fromDate);
+  expires.setDate(expires.getDate() + GUEST_MANAGE_TOKEN_TTL_DAYS);
+  return expires.toISOString();
 }
 
 export async function getPotentiallyConflictingReservations({
@@ -99,6 +113,49 @@ export async function hasReservationConflict({
   return reservations.some((row) =>
     areTimeRangesOverlapping(row.start_time, row.end_time, startTime, endTime)
   );
+}
+
+export async function getReservationById(reservationId) {
+  if (!supabase) throw new Error("Supabase non configuré");
+
+  const { data, error } = await supabase
+    .from("reservations")
+    .select("*")
+    .eq("id", reservationId)
+    .single();
+
+  if (error) throw error;
+  return data;
+}
+
+export async function getReservationByGuestToken(token) {
+  if (!supabase) throw new Error("Supabase non configuré");
+
+  const safeToken = String(token || "").trim();
+  if (!safeToken) return null;
+
+  const { data, error } = await supabase
+    .from("reservations")
+    .select("*")
+    .eq("guest_manage_token", safeToken)
+    .single();
+
+  if (error) {
+    if (error.code === "PGRST116") return null;
+    throw error;
+  }
+
+  if (!data) return null;
+
+  const expiresAt = data.guest_manage_token_expires_at
+    ? new Date(data.guest_manage_token_expires_at)
+    : null;
+
+  if (expiresAt && !Number.isNaN(expiresAt.getTime()) && expiresAt.getTime() < Date.now()) {
+    return null;
+  }
+
+  return data;
 }
 
 export async function updateReservationById(reservationId, payload) {
