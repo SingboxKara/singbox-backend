@@ -3,7 +3,9 @@
 export const PRICE_PER_SLOT_EUR = 10;
 export const DEPOSIT_AMOUNT_EUR = 250;
 export const SLOT_DURATION_MINUTES = 90;
+
 export const MODIFICATION_DEADLINE_HOURS = 6;
+export const REFUND_DEADLINE_HOURS = 24;
 
 export const MIN_ALLOWED_PERSONS = 1;
 export const MAX_ALLOWED_PERSONS = 8;

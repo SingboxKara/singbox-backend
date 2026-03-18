@@ -21,6 +21,7 @@ import {
   hasReservationConflict,
   isReservationStatusModifiable,
   isWithinModificationWindow,
+  isWithinRefundWindow,
   isReservationStatusConfirmed,
   updateReservationById,
 } from "../services/reservationService.js";
@@ -58,6 +59,7 @@ import { roundMoney } from "../utils/formatters.js";
 import {
   PRICE_PER_SLOT_EUR,
   MODIFICATION_DEADLINE_HOURS,
+  REFUND_DEADLINE_HOURS,
   SLOT_DURATION_MINUTES,
   LOYALTY_POINTS_COST,
 } from "../constants/booking.js";
@@ -722,10 +724,9 @@ router.post("/api/refund-reservation", authMiddleware, async (req, res) => {
       return res.status(400).json({ error: "Date de réservation invalide" });
     }
 
-    const hoursBefore = (start.getTime() - Date.now()) / (1000 * 60 * 60);
-    if (hoursBefore < 24) {
+    if (!isWithinRefundWindow(reservation.start_time)) {
       return res.status(400).json({
-        error: "Le remboursement n'est plus possible (moins de 24h avant la séance).",
+        error: `Le remboursement n'est plus possible (moins de ${REFUND_DEADLINE_HOURS}h avant la séance).`,
       });
     }
 

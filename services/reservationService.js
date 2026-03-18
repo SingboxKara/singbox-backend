@@ -5,6 +5,7 @@ import {
   CONFIRMED_STATUSES,
   CANCELLED_OR_REFUNDED_STATUSES,
   MODIFICATION_DEADLINE_HOURS,
+  REFUND_DEADLINE_HOURS,
 } from "../constants/booking.js";
 import {
   addDaysToDateString,
@@ -40,6 +41,12 @@ export function isWithinModificationWindow(startTimeIso) {
   const diff = hoursBeforeDate(startTimeIso);
   if (diff === null) return false;
   return diff >= MODIFICATION_DEADLINE_HOURS;
+}
+
+export function isWithinRefundWindow(startTimeIso) {
+  const diff = hoursBeforeDate(startTimeIso);
+  if (diff === null) return false;
+  return diff >= REFUND_DEADLINE_HOURS;
 }
 
 export async function getPotentiallyConflictingReservations({
