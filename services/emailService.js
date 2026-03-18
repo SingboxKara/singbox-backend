@@ -4,7 +4,10 @@ import QRCode from "qrcode";
 
 import { resend, mailEnabled } from "../config/mail.js";
 import { BACKEND_BASE_URL, RESEND_FROM_EMAIL } from "../config/env.js";
-import { DEPOSIT_AMOUNT_EUR } from "../constants/booking.js";
+import {
+  DEPOSIT_AMOUNT_EUR,
+  MODIFICATION_DEADLINE_HOURS,
+} from "../constants/booking.js";
 
 export async function sendReservationEmail(reservation) {
   if (!mailEnabled || !resend) {
@@ -49,7 +52,14 @@ export async function sendReservationEmail(reservation) {
     const startStr = fmt(start);
     const endStr = fmt(end);
 
+    const manageReservationUrl = `${String(BACKEND_BASE_URL || "").replace(/\/+$/, "")}/mon-compte`;
+
     const subject = `Confirmation de votre réservation Singbox - Box ${reservation.box_id}`;
+
+    const buttonStylePrimary =
+      "display:inline-block;padding:13px 22px;border-radius:999px;background:#f97316;color:#ffffff;text-decoration:none;font-weight:800;font-size:13px;letter-spacing:0.03em;";
+    const buttonStyleSecondary =
+      "display:inline-block;padding:12px 20px;border-radius:999px;background:transparent;color:#F9FAFB;text-decoration:none;font-weight:800;font-size:13px;border:1px solid rgba(148,163,184,0.45);";
 
     const htmlBody = `
       <div style="margin:0;padding:22px 0;background:#050814;">
@@ -74,7 +84,7 @@ export async function sendReservationEmail(reservation) {
                 VOTRE SESSION EST CONFIRMÉE <span style="color:#22c55e;">✅</span>
               </div>
               <div style="margin-top:8px;font-size:13px;color:rgba(249,250,251,0.88);line-height:1.55;">
-                Merci pour votre réservation chez <strong>Singbox</strong> ! Voici le récapitulatif de votre box karaoké privative.
+                Merci pour votre réservation chez <strong>Singbox</strong> ! Votre box karaoké privative vous attend — voici le récapitulatif de votre séance.
               </div>
             </div>
 
@@ -100,6 +110,34 @@ export async function sendReservationEmail(reservation) {
               </div>
               <div style="margin-top:6px;font-size:11.5px;color:#9CA3AF;">
                 Présentez-le à l’accueil pour accéder à votre box.
+              </div>
+            </div>
+
+            <div style="margin-top:14px;padding:16px 16px 14px 16px;border-radius:16px;background:linear-gradient(135deg,rgba(249,115,22,0.18),rgba(234,88,12,0.08));border:1px solid rgba(251,146,60,0.38);">
+              <div style="font-size:12.5px;font-weight:900;letter-spacing:0.08em;text-transform:uppercase;color:#FDBA74;">
+                GÉRER VOTRE SÉANCE JUSQU’À ${MODIFICATION_DEADLINE_HOURS}H AVANT
+              </div>
+              <div style="margin-top:10px;font-size:12.5px;color:#E5E7EB;line-height:1.65;">
+                Un imprévu ? Votre groupe s’agrandit ? Vous pouvez <strong>gérer votre réservation directement depuis votre compte Singbox</strong> jusqu’à <strong>${MODIFICATION_DEADLINE_HOURS}h avant votre séance</strong>.
+              </div>
+
+              <ul style="margin:12px 0 0 18px;padding:0;color:#E5E7EB;font-size:12.5px;line-height:1.7;">
+                <li><strong>Ajouter des participants</strong> si d’autres personnes souhaitent se joindre à vous.</li>
+                <li><strong>Modifier votre horaire ou votre date</strong> selon les disponibilités.</li>
+                <li><strong>Mettre à jour votre séance</strong> simplement depuis votre espace client.</li>
+              </ul>
+
+              <div style="margin-top:10px;font-size:11.5px;color:#FED7AA;line-height:1.6;">
+                Plus vous vous y prenez tôt, plus vous aurez de choix sur les créneaux disponibles.
+              </div>
+
+              <div style="margin-top:16px;text-align:center;">
+                <a href="${manageReservationUrl}" target="_blank" rel="noopener noreferrer" style="${buttonStylePrimary}">
+                  Gérer ma réservation
+                </a>
+              </div>
+              <div style="margin-top:8px;text-align:center;font-size:11px;color:#9CA3AF;">
+                Accédez à votre compte Singbox pour modifier votre séance en quelques clics.
               </div>
             </div>
 
@@ -129,6 +167,7 @@ export async function sendReservationEmail(reservation) {
               <ul style="margin:10px 0 0 18px;padding:0;color:#E5E7EB;font-size:12px;line-height:1.6;">
                 <li>Annulation gratuite jusqu’à <strong>24h</strong> avant le début de la session.</li>
                 <li>Passé ce délai, la réservation est considérée comme due et non remboursable.</li>
+                <li>Les modifications de séance et l’ajout de participants restent possibles jusqu’à <strong>${MODIFICATION_DEADLINE_HOURS}h</strong> avant, selon disponibilités.</li>
                 <li>En cas de retard important, la session pourra être écourtée sans compensation afin de respecter les créneaux suivants.</li>
               </ul>
             </div>
@@ -158,6 +197,20 @@ export async function sendReservationEmail(reservation) {
               <div style="margin-top:10px;font-size:12px;color:#E5E7EB;line-height:1.6;">
                 <div><strong>Adresse :</strong> 66 Rue de la République, 31300 Toulouse (à adapter si besoin).</div>
                 <div style="margin-top:6px;color:#9CA3AF;font-size:11.5px;">Pensez à vérifier l’accès et le stationnement avant votre venue.</div>
+              </div>
+            </div>
+
+            <div style="margin-top:18px;padding:16px 14px;border-radius:14px;background:rgba(15,23,42,0.62);border:1px solid rgba(148,163,184,0.26);text-align:center;">
+              <div style="font-size:13px;font-weight:800;color:#F9FAFB;">
+                Besoin d’ajouter quelqu’un ou d’ajuster votre séance ?
+              </div>
+              <div style="margin-top:7px;font-size:12px;color:#CBD5E1;line-height:1.6;">
+                Accédez à votre compte Singbox pour gérer votre réservation jusqu’à ${MODIFICATION_DEADLINE_HOURS}h avant le début de votre session.
+              </div>
+              <div style="margin-top:14px;">
+                <a href="${manageReservationUrl}" target="_blank" rel="noopener noreferrer" style="${buttonStyleSecondary}">
+                  Accéder à mon compte Singbox
+                </a>
               </div>
             </div>
 
