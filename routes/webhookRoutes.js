@@ -14,7 +14,6 @@ router.post(
   "/api/webhook",
   bodyParser.raw({ type: "application/json" }),
   async (req, res) => {
-
     const sig = req.headers["stripe-signature"];
 
     let event;
@@ -31,33 +30,54 @@ router.post(
         const intent = event.data.object;
 
         if (intent.metadata?.type === "modification") {
-
           const modId = intent.metadata.modification_request_id;
 
-          const { data: modReq } = await supabase
+          const { data: modReq, error: modReqError } = await supabase
             .from("reservation_modification_requests")
             .select("*")
             .eq("id", modId)
             .single();
 
+          if (modReqError) {
+            console.error("Erreur récupération modification request :", modReqError);
+            return res.json({ received: true });
+          }
+
           if (modReq && modReq.status !== "applied") {
+            try {
+              await applyReservationModification({
+                ...modReq,
+                stripe_payment_intent_id:
+                  modReq.stripe_payment_intent_id || intent.id,
+              });
 
-            await applyReservationModification(modReq);
+              await supabase
+                .from("reservation_modification_requests")
+                .update({
+                  status: "applied",
+                  stripe_payment_intent_id: modReq.stripe_payment_intent_id || intent.id,
+                  paid_at: new Date().toISOString(),
+                  applied_at: new Date().toISOString(),
+                  updated_at: new Date().toISOString(),
+                })
+                .eq("id", modId);
+            } catch (applyErr) {
+              console.error("Erreur application modification :", applyErr);
 
-            await supabase
-              .from("reservation_modification_requests")
-              .update({
-                status: "applied",
-                paid_at: new Date(),
-                applied_at: new Date(),
-              })
-              .eq("id", modId);
+              await supabase
+                .from("reservation_modification_requests")
+                .update({
+                  status: "failed",
+                  failure_reason: applyErr.message || "Erreur application modification",
+                  updated_at: new Date().toISOString(),
+                })
+                .eq("id", modId);
+            }
           }
         }
       }
 
       res.json({ received: true });
-
     } catch (err) {
       console.error("Webhook processing error:", err);
       res.sendStatus(500);

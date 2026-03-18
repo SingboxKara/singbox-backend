@@ -84,6 +84,87 @@ function buildGuestReservationResponse(reservation) {
   };
 }
 
+async function createPendingModificationRequest({
+  reservation,
+  oldAmount,
+  newAmount,
+  deltaAmount,
+  targetStart,
+  targetEnd,
+  safePersons,
+  targetBoxId,
+  stripePaymentIntentId = null,
+  stripeClientSecret = null,
+  source = "guest",
+}) {
+  const { data: modReq, error } = await supabase
+    .from("reservation_modification_requests")
+    .insert({
+      reservation_id: reservation.id,
+      guest_manage_token: reservation.guest_manage_token || null,
+
+      old_start_time: reservation.start_time,
+      old_end_time: reservation.end_time,
+      old_persons: reservation.persons,
+      old_amount: oldAmount,
+
+      new_start_time: targetStart.toISOString(),
+      new_end_time: targetEnd.toISOString(),
+      new_persons: safePersons,
+      new_amount: newAmount,
+      delta_amount: deltaAmount,
+
+      box_id: targetBoxId,
+      status: "pending",
+      source,
+      stripe_payment_intent_id: stripePaymentIntentId,
+      stripe_client_secret: stripeClientSecret,
+      expires_at: new Date(Date.now() + 30 * 60 * 1000).toISOString(),
+      created_at: new Date().toISOString(),
+      updated_at: new Date().toISOString(),
+    })
+    .select()
+    .single();
+
+  if (error || !modReq) {
+    console.error(error || "Modification request introuvable après insert");
+    return null;
+  }
+
+  return modReq;
+}
+
+async function attachPaymentIntentToModificationRequest({
+  modReqId,
+  paymentIntentId,
+  clientSecret = null,
+}) {
+  if (!paymentIntentId || !modReqId) return false;
+
+  try {
+    await stripe.paymentIntents.update(paymentIntentId, {
+      metadata: {
+        type: "modification",
+        modification_request_id: String(modReqId),
+      },
+    });
+
+    await supabase
+      .from("reservation_modification_requests")
+      .update({
+        stripe_payment_intent_id: paymentIntentId,
+        stripe_client_secret: clientSecret,
+        updated_at: new Date().toISOString(),
+      })
+      .eq("id", modReqId);
+
+    return true;
+  } catch (err) {
+    console.error("Erreur liaison PaymentIntent -> modification request :", err);
+    return false;
+  }
+}
+
 async function runReservationModification({
   reservation,
   userId = null,
@@ -191,34 +272,20 @@ async function runReservationModification({
   let newPaymentIntentId = null;
 
   if (deltaAmount > 0) {
-    // 🔥 CAS INVITÉ → on crée paiement Stripe
     if (isGuest || !userId) {
-      const { data: modReq, error } = await supabase
-        .from("reservation_modification_requests")
-        .insert({
-          reservation_id: reservation.id,
-          guest_manage_token: reservation.guest_manage_token,
+      const modReq = await createPendingModificationRequest({
+        reservation,
+        oldAmount,
+        newAmount,
+        deltaAmount,
+        targetStart,
+        targetEnd,
+        safePersons,
+        targetBoxId,
+        source: "guest",
+      });
 
-          old_start_time: reservation.start_time,
-          old_end_time: reservation.end_time,
-          old_persons: reservation.persons,
-          old_amount: oldAmount,
-
-          new_start_time: targetStart.toISOString(),
-          new_end_time: targetEnd.toISOString(),
-          new_persons: safePersons,
-          new_amount: newAmount,
-          delta_amount: deltaAmount,
-
-          box_id: targetBoxId,
-          status: "pending",
-          expires_at: new Date(Date.now() + 30 * 60 * 1000).toISOString(),
-        })
-        .select()
-        .single();
-
-      if (error || !modReq) {
-        console.error(error || "Modification request introuvable après insert");
+      if (!modReq) {
         return {
           ok: false,
           status: 500,
@@ -231,7 +298,7 @@ async function runReservationModification({
         currency: "eur",
         metadata: {
           type: "modification",
-          modification_request_id: modReq.id,
+          modification_request_id: String(modReq.id),
         },
       });
 
@@ -240,6 +307,7 @@ async function runReservationModification({
         .update({
           stripe_payment_intent_id: paymentIntent.id,
           stripe_client_secret: paymentIntent.client_secret,
+          updated_at: new Date().toISOString(),
         })
         .eq("id", modReq.id);
 
@@ -254,8 +322,6 @@ async function runReservationModification({
       };
     }
 
-    // 🔥 sinon ton système EXISTANT continue
-
     const autoCharge = await attemptAutomaticSavedCardCharge({
       userId,
       customer: customer || { email: reservation.email, prenom: "", nom: "" },
@@ -268,6 +334,56 @@ async function runReservationModification({
     });
 
     if (!autoCharge.success) {
+      if (autoCharge.clientSecret && autoCharge.paymentIntentId) {
+        const modReq = await createPendingModificationRequest({
+          reservation,
+          oldAmount,
+          newAmount,
+          deltaAmount,
+          targetStart,
+          targetEnd,
+          safePersons,
+          targetBoxId,
+          stripePaymentIntentId: autoCharge.paymentIntentId,
+          stripeClientSecret: autoCharge.clientSecret,
+          source: "auth_manual",
+        });
+
+        if (!modReq) {
+          return {
+            ok: false,
+            status: 500,
+            body: { error: "Erreur création modification" },
+          };
+        }
+
+        const linked = await attachPaymentIntentToModificationRequest({
+          modReqId: modReq.id,
+          paymentIntentId: autoCharge.paymentIntentId,
+          clientSecret: autoCharge.clientSecret,
+        });
+
+        if (!linked) {
+          return {
+            ok: false,
+            status: 500,
+            body: {
+              error: "Impossible de préparer le paiement de la modification.",
+            },
+          };
+        }
+
+        return {
+          ok: false,
+          status: 200,
+          body: {
+            requiresPayment: true,
+            clientSecret: autoCharge.clientSecret,
+            amount: deltaAmount,
+          },
+        };
+      }
+
       return {
         ok: false,
         status: 409,
