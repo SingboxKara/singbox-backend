@@ -7,6 +7,7 @@ import { BACKEND_BASE_URL, RESEND_FROM_EMAIL } from "../config/env.js";
 import {
   DEPOSIT_AMOUNT_EUR,
   MODIFICATION_DEADLINE_HOURS,
+  REFUND_DEADLINE_HOURS,
 } from "../constants/booking.js";
 
 export async function sendReservationEmail(reservation) {
@@ -115,20 +116,20 @@ export async function sendReservationEmail(reservation) {
 
             <div style="margin-top:14px;padding:16px 16px 14px 16px;border-radius:16px;background:linear-gradient(135deg,rgba(249,115,22,0.18),rgba(234,88,12,0.08));border:1px solid rgba(251,146,60,0.38);">
               <div style="font-size:12.5px;font-weight:900;letter-spacing:0.08em;text-transform:uppercase;color:#FDBA74;">
-                GÉRER VOTRE SÉANCE JUSQU’À ${MODIFICATION_DEADLINE_HOURS}H AVANT
+                VOTRE GROUPE PEUT TOUJOURS S’AGRANDIR
               </div>
               <div style="margin-top:10px;font-size:12.5px;color:#E5E7EB;line-height:1.65;">
-                Un imprévu ? Votre groupe s’agrandit ? Vous pouvez <strong>gérer votre réservation directement depuis votre compte Singbox</strong> jusqu’à <strong>${MODIFICATION_DEADLINE_HOURS}h avant votre séance</strong>.
+                Une bonne nouvelle : si d’autres personnes veulent se joindre à vous, <strong>vous pouvez ajouter des participants à tout moment avant le début de votre séance</strong>, dans la limite de la capacité de la box.
               </div>
 
               <ul style="margin:12px 0 0 18px;padding:0;color:#E5E7EB;font-size:12.5px;line-height:1.7;">
-                <li><strong>Ajouter des participants</strong> si d’autres personnes souhaitent se joindre à vous.</li>
-                <li><strong>Modifier votre horaire ou votre date</strong> selon les disponibilités.</li>
-                <li><strong>Mettre à jour votre séance</strong> simplement depuis votre espace client.</li>
+                <li><strong>Ajouter des participants</strong> avant la séance si votre groupe s’agrandit.</li>
+                <li><strong>Modifier la date ou l’horaire</strong> jusqu’à <strong>${MODIFICATION_DEADLINE_HOURS}h avant</strong>, selon disponibilités.</li>
+                <li><strong>Gérer votre réservation</strong> facilement depuis votre compte Singbox.</li>
               </ul>
 
               <div style="margin-top:10px;font-size:11.5px;color:#FED7AA;line-height:1.6;">
-                Plus vous vous y prenez tôt, plus vous aurez de choix sur les créneaux disponibles.
+                Plus vous anticipez les changements d’horaire, plus vous aurez de choix sur les créneaux disponibles.
               </div>
 
               <div style="margin-top:16px;text-align:center;">
@@ -137,7 +138,7 @@ export async function sendReservationEmail(reservation) {
                 </a>
               </div>
               <div style="margin-top:8px;text-align:center;font-size:11px;color:#9CA3AF;">
-                Accédez à votre compte Singbox pour modifier votre séance en quelques clics.
+                Accédez à votre compte Singbox pour retrouver votre réservation et ajuster votre séance.
               </div>
             </div>
 
@@ -162,12 +163,13 @@ export async function sendReservationEmail(reservation) {
 
             <div style="margin-top:16px;">
               <div style="font-size:12.5px;font-weight:900;letter-spacing:0.08em;text-transform:uppercase;color:#E5E7EB;">
-                CONDITIONS D’ANNULATION
+                CONDITIONS DE GESTION DE RÉSERVATION
               </div>
               <ul style="margin:10px 0 0 18px;padding:0;color:#E5E7EB;font-size:12px;line-height:1.6;">
-                <li>Annulation gratuite jusqu’à <strong>24h</strong> avant le début de la session.</li>
+                <li>Annulation avec remboursement possible jusqu’à <strong>${REFUND_DEADLINE_HOURS}h</strong> avant le début de la séance.</li>
                 <li>Passé ce délai, la réservation est considérée comme due et non remboursable.</li>
-                <li>Les modifications de séance et l’ajout de participants restent possibles jusqu’à <strong>${MODIFICATION_DEADLINE_HOURS}h</strong> avant, selon disponibilités.</li>
+                <li>Modification de date ou d’horaire possible jusqu’à <strong>${MODIFICATION_DEADLINE_HOURS}h</strong> avant, selon disponibilités.</li>
+                <li><strong>Ajout de participants possible jusqu’au début de la séance</strong>, dans la limite de la capacité autorisée de la box.</li>
                 <li>En cas de retard important, la session pourra être écourtée sans compensation afin de respecter les créneaux suivants.</li>
               </ul>
             </div>
@@ -202,10 +204,10 @@ export async function sendReservationEmail(reservation) {
 
             <div style="margin-top:18px;padding:16px 14px;border-radius:14px;background:rgba(15,23,42,0.62);border:1px solid rgba(148,163,184,0.26);text-align:center;">
               <div style="font-size:13px;font-weight:800;color:#F9FAFB;">
-                Besoin d’ajouter quelqu’un ou d’ajuster votre séance ?
+                Besoin d’ajouter quelqu’un avant votre session ?
               </div>
               <div style="margin-top:7px;font-size:12px;color:#CBD5E1;line-height:1.6;">
-                Accédez à votre compte Singbox pour gérer votre réservation jusqu’à ${MODIFICATION_DEADLINE_HOURS}h avant le début de votre session.
+                Retrouvez votre réservation dans votre compte Singbox et ajustez votre séance en quelques clics.
               </div>
               <div style="margin-top:14px;">
                 <a href="${manageReservationUrl}" target="_blank" rel="noopener noreferrer" style="${buttonStyleSecondary}">

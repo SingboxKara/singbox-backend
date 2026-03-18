@@ -16,7 +16,10 @@ import {
 import {
   computeCartPricing,
 } from "../services/pricingService.js";
-import { validatePromoCode } from "../services/promoService.js";
+import {
+  validatePromoCode,
+  sanitizePromoForClient,
+} from "../services/promoService.js";
 import { updateReservationById } from "../services/reservationService.js";
 import { DEPOSIT_AMOUNT_EUR } from "../constants/booking.js";
 
@@ -106,6 +109,56 @@ router.post("/api/set-default-payment-method", authMiddleware, async (req, res) 
   } catch (e) {
     console.error("Erreur /api/set-default-payment-method :", e);
     return res.status(500).json({ error: "Erreur serveur (set default PM)" });
+  }
+});
+
+router.post("/api/validate-promo", async (req, res) => {
+  try {
+    const { code, panier, loyaltyUsed } = req.body || {};
+
+    if (!code || !String(code).trim()) {
+      return res.status(400).json({
+        valid: false,
+        error: "Code promo manquant.",
+      });
+    }
+
+    if (loyaltyUsed) {
+      return res.status(400).json({
+        valid: false,
+        error: "Un code promo ne peut pas être utilisé en même temps que la fidélité.",
+      });
+    }
+
+    let totalAmountEur = 0;
+
+    if (Array.isArray(panier) && panier.length > 0) {
+      const pricing = computeCartPricing(panier, { loyaltyUsed: false });
+      totalAmountEur = pricing.totalCashDue;
+    }
+
+    const result = await validatePromoCode(code, totalAmountEur);
+
+    if (!result.ok) {
+      return res.status(404).json({
+        valid: false,
+        error: "Ce code n’existe pas ou n’est plus valable.",
+        reason: result.reason,
+      });
+    }
+
+    return res.json({
+      valid: true,
+      promo: result.promoPublic || sanitizePromoForClient(result.promo),
+      discountAmount: result.discountAmount,
+      newTotal: result.newTotal,
+    });
+  } catch (e) {
+    console.error("Erreur /api/validate-promo :", e);
+    return res.status(500).json({
+      valid: false,
+      error: "Erreur serveur lors de la validation du code promo.",
+    });
   }
 });
 

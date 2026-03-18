@@ -2,12 +2,33 @@
 
 import { supabase } from "../config/supabase.js";
 
-export async function validatePromoCode(code, totalAmountEur) {
+function getTodayIsoDate() {
+  return new Date().toISOString().slice(0, 10);
+}
+
+function sanitizePromoForClient(promo) {
+  if (!promo) return null;
+
+  return {
+    id: promo.id ?? null,
+    code: promo.code ?? null,
+    type: promo.type ?? null,
+    value: Number(promo.value) || 0,
+    is_active: promo.is_active !== false,
+    valid_from: promo.valid_from ?? null,
+    valid_to: promo.valid_to ?? null,
+    max_uses: promo.max_uses ?? null,
+    used_count: promo.used_count ?? 0,
+  };
+}
+
+export async function getPromoByCode(code) {
   if (!supabase) {
-    return { ok: false, reason: "Supabase non configuré" };
+    return { ok: false, reason: "Supabase non configuré", promo: null };
   }
+
   if (!code) {
-    return { ok: false, reason: "Code vide" };
+    return { ok: false, reason: "Code vide", promo: null };
   }
 
   const upperCode = String(code).trim().toUpperCase();
@@ -16,10 +37,22 @@ export async function validatePromoCode(code, totalAmountEur) {
     .from("promo_codes")
     .select("*")
     .eq("code", upperCode)
-    .single();
+    .maybeSingle();
 
-  if (error || !promo) {
-    console.warn("Promo introuvable :", error);
+  if (error) {
+    console.error("Erreur lecture promo_codes :", error);
+    return { ok: false, reason: "Erreur lecture promo", promo: null };
+  }
+
+  if (!promo) {
+    return { ok: false, reason: "Code introuvable", promo: null };
+  }
+
+  return { ok: true, promo };
+}
+
+export function isPromoValidNow(promo) {
+  if (!promo) {
     return { ok: false, reason: "Code introuvable" };
   }
 
@@ -27,37 +60,81 @@ export async function validatePromoCode(code, totalAmountEur) {
     return { ok: false, reason: "Code inactif" };
   }
 
-  const today = new Date().toISOString().slice(0, 10);
+  const today = getTodayIsoDate();
 
   if (promo.valid_from && today < promo.valid_from) {
     return { ok: false, reason: "Code pas encore valable" };
   }
+
   if (promo.valid_to && today > promo.valid_to) {
     return { ok: false, reason: "Code expiré" };
   }
 
-  if (promo.max_uses && promo.used_count >= promo.max_uses) {
+  const maxUses =
+    promo.max_uses === null || promo.max_uses === undefined
+      ? null
+      : Number(promo.max_uses);
+
+  const usedCount = Number(promo.used_count) || 0;
+
+  if (maxUses !== null && Number.isFinite(maxUses) && usedCount >= maxUses) {
     return { ok: false, reason: "Nombre d'utilisations atteint" };
   }
 
-  let discountAmount = 0;
+  return { ok: true };
+}
+
+export function computePromoDiscount(promo, totalAmountEur) {
+  const safeTotal = Math.max(0, Number(totalAmountEur) || 0);
+  if (!promo || safeTotal <= 0) return 0;
+
   const type = promo.type;
   const value = Number(promo.value) || 0;
 
+  let discountAmount = 0;
+
   if (type === "percent") {
-    discountAmount = totalAmountEur * (value / 100);
+    discountAmount = safeTotal * (value / 100);
   } else if (type === "fixed") {
-    discountAmount = Math.min(totalAmountEur, value);
+    discountAmount = Math.min(safeTotal, value);
   } else if (type === "free") {
-    discountAmount = totalAmountEur;
+    discountAmount = safeTotal;
   }
 
-  const newTotal = Math.max(0, totalAmountEur - discountAmount);
+  return Math.max(0, Number(discountAmount) || 0);
+}
+
+export async function validatePromoCode(code, totalAmountEur = 0) {
+  const promoLookup = await getPromoByCode(code);
+
+  if (!promoLookup.ok || !promoLookup.promo) {
+    return {
+      ok: false,
+      reason: promoLookup.reason || "Code introuvable",
+    };
+  }
+
+  const promo = promoLookup.promo;
+  const validity = isPromoValidNow(promo);
+
+  if (!validity.ok) {
+    return {
+      ok: false,
+      reason: validity.reason,
+      promo: sanitizePromoForClient(promo),
+    };
+  }
+
+  const discountAmount = computePromoDiscount(promo, totalAmountEur);
+  const newTotal = Math.max(0, (Number(totalAmountEur) || 0) - discountAmount);
 
   return {
     ok: true,
     newTotal,
     discountAmount,
     promo,
+    promoPublic: sanitizePromoForClient(promo),
   };
 }
+
+export { sanitizePromoForClient };
