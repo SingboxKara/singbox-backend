@@ -191,24 +191,70 @@ async function runReservationModification({
   let newPaymentIntentId = null;
 
   if (deltaAmount > 0) {
+    // 🔥 CAS INVITÉ → on crée paiement Stripe
     if (isGuest || !userId) {
+      const { data: modReq, error } = await supabase
+        .from("reservation_modification_requests")
+        .insert({
+          reservation_id: reservation.id,
+          guest_manage_token: reservation.guest_manage_token,
+
+          old_start_time: reservation.start_time,
+          old_end_time: reservation.end_time,
+          old_persons: reservation.persons,
+          old_amount: oldAmount,
+
+          new_start_time: targetStart.toISOString(),
+          new_end_time: targetEnd.toISOString(),
+          new_persons: safePersons,
+          new_amount: newAmount,
+          delta_amount: deltaAmount,
+
+          box_id: targetBoxId,
+          status: "pending",
+          expires_at: new Date(Date.now() + 30 * 60 * 1000).toISOString(),
+        })
+        .select()
+        .single();
+
+      if (error || !modReq) {
+        console.error(error || "Modification request introuvable après insert");
+        return {
+          ok: false,
+          status: 500,
+          body: { error: "Erreur création modification" },
+        };
+      }
+
+      const paymentIntent = await stripe.paymentIntents.create({
+        amount: Math.round(deltaAmount * 100),
+        currency: "eur",
+        metadata: {
+          type: "modification",
+          modification_request_id: modReq.id,
+        },
+      });
+
+      await supabase
+        .from("reservation_modification_requests")
+        .update({
+          stripe_payment_intent_id: paymentIntent.id,
+          stripe_client_secret: paymentIntent.client_secret,
+        })
+        .eq("id", modReq.id);
+
       return {
         ok: false,
-        status: 409,
+        status: 200,
         body: {
-          success: false,
-          requiresAdditionalPayment: true,
-          error:
-            "Un supplément est nécessaire pour cette modification. La réservation invitée ne peut pas être débitée automatiquement.",
-          financial: {
-            oldAmount,
-            newAmount,
-            deltaAmount,
-            loyaltyUsed,
-          },
+          requiresPayment: true,
+          clientSecret: paymentIntent.client_secret,
+          amount: deltaAmount,
         },
       };
     }
+
+    // 🔥 sinon ton système EXISTANT continue
 
     const autoCharge = await attemptAutomaticSavedCardCharge({
       userId,

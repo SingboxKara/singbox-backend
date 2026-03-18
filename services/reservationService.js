@@ -151,7 +151,7 @@ export async function getReservationByGuestToken(token) {
     ? new Date(data.guest_manage_token_expires_at)
     : null;
 
-  if (expiresAt && !Number.isNaN(expiresAt.getTime()) && expiresAt.getTime() < Date.now()) {
+  if (expiresAt && expiresAt.getTime() < Date.now()) {
     return null;
   }
 
@@ -168,4 +168,21 @@ export async function updateReservationById(reservationId, payload) {
 
   if (error) throw error;
   return data;
+}
+
+/* 🔥 AJOUT IMPORTANT */
+export async function applyReservationModification(modReq) {
+  const { reservation_id, new_start_time, new_end_time, new_persons } = modReq;
+
+  const { error } = await supabase
+    .from("reservations")
+    .update({
+      start_time: new_start_time,
+      end_time: new_end_time,
+      persons: new_persons,
+      updated_at: new Date().toISOString()
+    })
+    .eq("id", reservation_id);
+
+  if (error) throw error;
 }
