@@ -95,7 +95,6 @@ async function createPendingModificationRequest({
   targetBoxId,
   stripePaymentIntentId = null,
   stripeClientSecret = null,
-  source = "guest",
 }) {
   const { data: modReq, error } = await supabase
     .from("reservation_modification_requests")
@@ -116,18 +115,15 @@ async function createPendingModificationRequest({
 
       box_id: targetBoxId,
       status: "pending",
-      source,
       stripe_payment_intent_id: stripePaymentIntentId,
       stripe_client_secret: stripeClientSecret,
       expires_at: new Date(Date.now() + 30 * 60 * 1000).toISOString(),
-      created_at: new Date().toISOString(),
-      updated_at: new Date().toISOString(),
     })
     .select()
     .single();
 
   if (error || !modReq) {
-    console.error(error || "Modification request introuvable après insert");
+    console.error("Erreur createPendingModificationRequest :", error || "insert vide");
     return null;
   }
 
@@ -149,14 +145,18 @@ async function attachPaymentIntentToModificationRequest({
       },
     });
 
-    await supabase
+    const { error } = await supabase
       .from("reservation_modification_requests")
       .update({
         stripe_payment_intent_id: paymentIntentId,
         stripe_client_secret: clientSecret,
-        updated_at: new Date().toISOString(),
       })
       .eq("id", modReqId);
+
+    if (error) {
+      console.error("Erreur update modification request :", error);
+      return false;
+    }
 
     return true;
   } catch (err) {
@@ -282,7 +282,6 @@ async function runReservationModification({
         targetEnd,
         safePersons,
         targetBoxId,
-        source: "guest",
       });
 
       if (!modReq) {
@@ -307,7 +306,6 @@ async function runReservationModification({
         .update({
           stripe_payment_intent_id: paymentIntent.id,
           stripe_client_secret: paymentIntent.client_secret,
-          updated_at: new Date().toISOString(),
         })
         .eq("id", modReq.id);
 
@@ -346,7 +344,6 @@ async function runReservationModification({
           targetBoxId,
           stripePaymentIntentId: autoCharge.paymentIntentId,
           stripeClientSecret: autoCharge.clientSecret,
-          source: "auth_manual",
         });
 
         if (!modReq) {

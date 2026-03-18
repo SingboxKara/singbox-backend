@@ -47,8 +47,7 @@ router.post(
             try {
               await applyReservationModification({
                 ...modReq,
-                stripe_payment_intent_id:
-                  modReq.stripe_payment_intent_id || intent.id,
+                stripe_payment_intent_id: modReq.stripe_payment_intent_id || intent.id,
               });
 
               await supabase
@@ -56,9 +55,6 @@ router.post(
                 .update({
                   status: "applied",
                   stripe_payment_intent_id: modReq.stripe_payment_intent_id || intent.id,
-                  paid_at: new Date().toISOString(),
-                  applied_at: new Date().toISOString(),
-                  updated_at: new Date().toISOString(),
                 })
                 .eq("id", modId);
             } catch (applyErr) {
@@ -68,8 +64,6 @@ router.post(
                 .from("reservation_modification_requests")
                 .update({
                   status: "failed",
-                  failure_reason: applyErr.message || "Erreur application modification",
-                  updated_at: new Date().toISOString(),
                 })
                 .eq("id", modId);
             }
@@ -77,10 +71,10 @@ router.post(
         }
       }
 
-      res.json({ received: true });
+      return res.json({ received: true });
     } catch (err) {
       console.error("Webhook processing error:", err);
-      res.sendStatus(500);
+      return res.sendStatus(500);
     }
   }
 );
