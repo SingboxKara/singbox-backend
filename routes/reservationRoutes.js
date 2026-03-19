@@ -66,7 +66,10 @@ import {
   LOYALTY_POINTS_COST,
 } from "../constants/booking.js";
 
-import { sendReservationEmail } from "../services/emailService.js";
+import {
+  sendReservationEmail,
+  sendReservationModificationEmail,
+} from "../services/emailService.js";
 import { validatePromoCode } from "../services/promoService.js";
 
 const router = express.Router();
@@ -200,6 +203,11 @@ async function runReservationModification({
       },
     };
   }
+
+  const previousStartTime = reservation.start_time;
+  const previousEndTime = reservation.end_time;
+  const previousBoxId = Number(reservation.box_id || 1);
+  const previousPersons = Number(reservation.persons || 2);
 
   const safePersons = clampPersons(newPersons || getReservationPersons(reservation));
 
@@ -463,6 +471,30 @@ async function runReservationModification({
     last_auto_charge_amount: deltaAmount > 0 ? deltaAmount : 0,
     updated_at: new Date().toISOString(),
   });
+
+  const scheduleChanged =
+    previousStartTime !== updatedReservation.start_time ||
+    previousEndTime !== updatedReservation.end_time ||
+    previousBoxId !== Number(updatedReservation.box_id || 1);
+
+  const personsChanged =
+    previousPersons !== Number(updatedReservation.persons || 2);
+
+  if (updatedReservation?.email && (scheduleChanged || personsChanged)) {
+    try {
+      await sendReservationModificationEmail(updatedReservation, {
+        scheduleChanged,
+        personsChanged,
+        previousStartTime,
+        previousEndTime,
+      });
+    } catch (mailErr) {
+      console.error(
+        "Erreur envoi email confirmation modification réservation :",
+        mailErr
+      );
+    }
+  }
 
   return {
     ok: true,
