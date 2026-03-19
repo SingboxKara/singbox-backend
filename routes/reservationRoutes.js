@@ -59,7 +59,6 @@ import {
 
 import { roundMoney } from "../utils/formatters.js";
 import {
-  PRICE_PER_SLOT_EUR,
   MODIFICATION_DEADLINE_HOURS,
   REFUND_DEADLINE_HOURS,
   SLOT_DURATION_MINUTES,
@@ -651,10 +650,11 @@ router.post("/api/verify-cart", async (req, res) => {
       }
 
       const persons = clampPersons(slot.persons || slot.nb_personnes || 2);
+      const startDate = new Date(times.start_time);
       const price =
         typeof slot.price === "number" && !Number.isNaN(slot.price)
           ? slot.price
-          : PRICE_PER_SLOT_EUR;
+          : computeSessionCashAmount(startDate, persons, { loyaltyUsed: false });
 
       normalizedItems.push({
         ...slot,

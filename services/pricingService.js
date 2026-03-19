@@ -4,18 +4,22 @@ import {
   SLOT_DURATION_MINUTES,
   MIN_BILLABLE_PERSONS,
   LOYALTY_FREE_BILLABLE_PERSONS,
-  OFF_PEAK_START_HOUR,
-  OFF_PEAK_END_HOUR,
-  OFF_PEAK_RATE,
-  STANDARD_RATE,
+  WEEKDAY_MORNING_RATE,
+  WEEKDAY_MIDDAY_RATE,
+  WEEKDAY_EVENING_RATE,
+  WEEKEND_BEFORE_15_RATE,
+  WEEKEND_AFTER_15_RATE,
+  WEEKDAY_MORNING_START_HOUR,
+  WEEKDAY_MIDDAY_START_HOUR,
+  WEEKDAY_EVENING_START_HOUR,
+  WEEKDAY_END_NIGHT_HOUR,
+  WEEKEND_AFTERNOON_SWITCH_HOUR,
 } from "../constants/booking.js";
 
-import { VACANCES_ZONE_C } from "../constants/holidays.js";
 import {
   parseDateOrNull,
   formatDateToYYYYMMDD,
   addDaysToDateString,
-  isDateInRange,
 } from "../utils/dates.js";
 import { clampPersons, getNumericBoxId } from "../utils/validators.js";
 import { isReservationPaidWithLoyalty } from "./loyaltyService.js";
@@ -31,23 +35,49 @@ export function isWeekend(dateObj) {
   return day === 0 || day === 6;
 }
 
-export function isHolidayLike(dateObj) {
-  const iso = formatDateToYYYYMMDD(dateObj);
-  return VACANCES_ZONE_C.some((p) => isDateInRange(iso, p.start, p.end));
+export function isFriday(dateObj) {
+  return dateObj.getDay() === 5;
 }
 
+/**
+ * Retourne le tarif / personne selon :
+ * - le jour de début du créneau
+ * - l'heure de début du créneau
+ *
+ * Plus aucune logique "vacances scolaires".
+ */
 export function getPerPersonRateForDate(dateObj) {
   const hour = dateObj.getHours();
+  const isFridayDate = isFriday(dateObj);
+  const isWeekendDate = isWeekend(dateObj);
 
-  if (isWeekend(dateObj) || isHolidayLike(dateObj)) {
-    return STANDARD_RATE;
+  // Vendredi + week-end
+  if (isFridayDate || isWeekendDate) {
+    if (hour >= WEEKEND_AFTERNOON_SWITCH_HOUR || hour < WEEKDAY_END_NIGHT_HOUR) {
+      return WEEKEND_AFTER_15_RATE;
+    }
+    return WEEKEND_BEFORE_15_RATE;
   }
 
-  if (hour >= OFF_PEAK_START_HOUR && hour < OFF_PEAK_END_HOUR) {
-    return OFF_PEAK_RATE;
+  // Semaine classique : lundi à jeudi
+  if (hour >= WEEKDAY_MORNING_START_HOUR && hour < WEEKDAY_MIDDAY_START_HOUR) {
+    return WEEKDAY_MORNING_RATE;
   }
 
-  return STANDARD_RATE;
+  if (hour >= WEEKDAY_MIDDAY_START_HOUR && hour < WEEKDAY_EVENING_START_HOUR) {
+    return WEEKDAY_MIDDAY_RATE;
+  }
+
+  // De 15h à 23h59 + de 00h à 01h59
+  if (hour >= WEEKDAY_EVENING_START_HOUR || hour < WEEKDAY_END_NIGHT_HOUR) {
+    return WEEKDAY_EVENING_RATE;
+  }
+
+  /**
+   * Sécurité si jamais un horaire tombe hors de la grille attendue
+   * (ex: 02h-07h, normalement non proposé au front)
+   */
+  return WEEKDAY_MORNING_RATE;
 }
 
 export function generateStandardSlotStarts() {

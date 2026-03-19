@@ -14,10 +14,40 @@ export const MIN_BILLABLE_PERSONS = 2;
 export const LOYALTY_POINTS_COST = 100;
 export const LOYALTY_FREE_BILLABLE_PERSONS = 2;
 
-export const OFF_PEAK_START_HOUR = 4;
-export const OFF_PEAK_END_HOUR = 14;
-export const OFF_PEAK_RATE = 7.9;
-export const STANDARD_RATE = 9.9;
+/**
+ * Nouvelle grille tarifaire Singbox
+ *
+ * Règles :
+ * - Semaine (lundi à jeudi)
+ *   - 08h–12h : 4.99€
+ *   - 12h–15h : 9.99€
+ *   - 15h–02h : 11.99€
+ *
+ * - Vendredi
+ *   - avant 15h : 12.99€
+ *   - à partir de 15h : 14.99€
+ *
+ * - Samedi / dimanche
+ *   - avant 15h : 12.99€
+ *   - à partir de 15h : 14.99€
+ *
+ * Important :
+ * - plus aucune majoration "vacances scolaires"
+ * - le tarif dépend uniquement du jour + heure de début du créneau
+ */
+export const WEEKDAY_MORNING_RATE = 4.99;     // 08h00 -> 11h59
+export const WEEKDAY_MIDDAY_RATE = 9.99;      // 12h00 -> 14h59
+export const WEEKDAY_EVENING_RATE = 11.99;    // 15h00 -> 01h59
+
+export const WEEKEND_BEFORE_15_RATE = 12.99;  // vendredi avant 15h + samedi/dimanche avant 15h
+export const WEEKEND_AFTER_15_RATE = 14.99;   // vendredi dès 15h + samedi/dimanche dès 15h
+
+export const WEEKDAY_MORNING_START_HOUR = 8;
+export const WEEKDAY_MIDDAY_START_HOUR = 12;
+export const WEEKDAY_EVENING_START_HOUR = 15;
+export const WEEKDAY_END_NIGHT_HOUR = 2;
+
+export const WEEKEND_AFTERNOON_SWITCH_HOUR = 15;
 
 export const GUEST_MANAGE_TOKEN_BYTES = 32;
 export const GUEST_MANAGE_TOKEN_TTL_DAYS = 90;
