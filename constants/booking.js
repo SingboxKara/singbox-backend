@@ -36,11 +36,11 @@ export const LOYALTY_FREE_BILLABLE_PERSONS = 2;
  * - le tarif dépend uniquement du jour + heure de début du créneau
  */
 export const WEEKDAY_MORNING_RATE = 4.99;     // 08h00 -> 11h59
-export const WEEKDAY_MIDDAY_RATE = 9.99;      // 12h00 -> 14h59
-export const WEEKDAY_EVENING_RATE = 11.99;    // 15h00 -> 01h59
+export const WEEKDAY_MIDDAY_RATE = 8.99;      // 12h00 -> 14h59
+export const WEEKDAY_EVENING_RATE = 10.99;    // 15h00 -> 01h59
 
-export const WEEKEND_BEFORE_15_RATE = 12.99;  // vendredi avant 15h + samedi/dimanche avant 15h
-export const WEEKEND_AFTER_15_RATE = 14.99;   // vendredi dès 15h + samedi/dimanche dès 15h
+export const WEEKEND_BEFORE_15_RATE = 11.99;  // vendredi avant 15h + samedi/dimanche avant 15h
+export const WEEKEND_AFTER_15_RATE = 13.99;   // vendredi dès 15h + samedi/dimanche dès 15h
 
 export const WEEKDAY_MORNING_START_HOUR = 8;
 export const WEEKDAY_MIDDAY_START_HOUR = 12;
