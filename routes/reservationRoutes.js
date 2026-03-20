@@ -47,7 +47,6 @@ import {
 } from "../services/stripeCustomerService.js";
 
 import {
-  safeText,
   clampPersons,
   getNumericBoxId,
 } from "../utils/validators.js";
@@ -75,7 +74,19 @@ const router = express.Router();
 
 function buildGuestReservationResponse(reservation) {
   return {
-    reservation,
+    reservation: {
+      id: reservation?.id ?? null,
+      name: reservation?.name ?? null,
+      email: reservation?.email ?? null,
+      date: reservation?.date ?? null,
+      start_time: reservation?.start_time ?? null,
+      end_time: reservation?.end_time ?? null,
+      box_id: reservation?.box_id ?? null,
+      persons: reservation?.persons ?? null,
+      status: reservation?.status ?? null,
+      montant: reservation?.montant ?? null,
+      free_session: reservation?.free_session ?? false,
+    },
     accessMode: "guest",
     rules: {
       modificationDeadlineHours: MODIFICATION_DEADLINE_HOURS,
@@ -693,7 +704,7 @@ router.get("/api/my-reservations", authMiddleware, async (req, res) => {
 
     const { data: reservations, error } = await supabase
       .from("reservations")
-      .select("*")
+      .select("id, name, email, date, start_time, end_time, box_id, persons, status, montant, free_session, created_at")
       .eq("email", user.email)
       .order("start_time", { ascending: false });
 
@@ -922,7 +933,7 @@ router.post("/api/confirm-reservation", async (req, res) => {
   let loyaltyPointsDebitedAmount = 0;
 
   try {
-    const { panier, customer, promoCode, paymentIntentId, loyaltyUsed, isFree } = req.body || {};
+    const { panier, customer, promoCode, paymentIntentId, loyaltyUsed } = req.body || {};
 
     if (!panier || !Array.isArray(panier) || panier.length === 0) {
       return res.status(400).json({ error: "Panier vide" });
@@ -945,7 +956,7 @@ router.post("/api/confirm-reservation", async (req, res) => {
       }
     }
 
-    const isFreeReservationFlag = !!isFree || totalCashDue <= 0;
+    const isFreeReservationFlag = totalCashDue <= 0;
 
     try {
       const authHeader = req.headers.authorization;
@@ -968,13 +979,26 @@ router.post("/api/confirm-reservation", async (req, res) => {
       if (!paymentIntentId) {
         return res.status(400).json({ error: "paymentIntentId manquant" });
       }
+
       if (!stripe) {
         return res.status(500).json({ error: "Stripe non configuré" });
       }
 
       const pi = await stripe.paymentIntents.retrieve(paymentIntentId);
+
       if (pi.status !== "succeeded") {
         return res.status(400).json({ error: "Paiement non validé par Stripe" });
+      }
+
+      const expectedAmountCents = Math.round(Number(totalCashDue || 0) * 100);
+      const paidAmountCents = Number(pi.amount_received || pi.amount || 0);
+
+      if (paidAmountCents !== expectedAmountCents) {
+        return res.status(400).json({
+          error: "Montant Stripe incohérent avec le total calculé côté serveur",
+          expectedAmountCents,
+          paidAmountCents,
+        });
       }
     }
 
@@ -1110,8 +1134,24 @@ router.post("/api/confirm-reservation", async (req, res) => {
     try {
       if (promo && promoDiscountAmount > 0) {
         const totalAfterDiscount = Math.max(0, totalCashDue);
+        const currentUsed = Number(promo.used_count || 0);
 
-        await supabase.from("promo_usages").insert({
+        const { data: updatedPromoRows, error: promoUpdateError } = await supabase
+          .from("promo_codes")
+          .update({ used_count: currentUsed + 1 })
+          .eq("id", promo.id)
+          .eq("used_count", currentUsed)
+          .select("id, used_count");
+
+        if (promoUpdateError) {
+          throw promoUpdateError;
+        }
+
+        if (!updatedPromoRows || updatedPromoRows.length === 0) {
+          throw new Error("Le code promo a été utilisé en même temps par une autre requête");
+        }
+
+        const { error: promoUsageError } = await supabase.from("promo_usages").insert({
           promo_id: promo.id,
           code: promo.code,
           email: customer?.email || null,
@@ -1121,11 +1161,9 @@ router.post("/api/confirm-reservation", async (req, res) => {
           discount_amount: promoDiscountAmount,
         });
 
-        const currentUsed = Number(promo.used_count || 0);
-        await supabase
-          .from("promo_codes")
-          .update({ used_count: currentUsed + 1 })
-          .eq("id", promo.id);
+        if (promoUsageError) {
+          console.error("Erreur insert promo_usages :", promoUsageError);
+        }
       }
     } catch (promoErr) {
       console.error("Erreur promo usages :", promoErr);

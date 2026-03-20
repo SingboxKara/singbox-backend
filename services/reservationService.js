@@ -19,6 +19,26 @@ import {
   formatDateToYYYYMMDD,
 } from "../utils/dates.js";
 
+function assertSupabaseConfigured() {
+  if (!supabase) {
+    throw new Error("Supabase non configuré");
+  }
+}
+
+function isValidReservationId(reservationId) {
+  return typeof reservationId === "string" || typeof reservationId === "number";
+}
+
+function isLikelyGuestToken(token) {
+  const safeToken = String(token || "").trim();
+  if (!safeToken) return false;
+
+  const expectedHexLength = Number(GUEST_MANAGE_TOKEN_BYTES || 0) * 2;
+  if (expectedHexLength > 0 && safeToken.length !== expectedHexLength) return false;
+
+  return /^[a-f0-9]+$/i.test(safeToken);
+}
+
 export function normalizeReservationStatus(statusRaw) {
   return String(statusRaw || "")
     .normalize("NFD")
@@ -70,7 +90,12 @@ export async function getPotentiallyConflictingReservations({
   localDate,
   excludeReservationId = null,
 }) {
-  if (!supabase) throw new Error("Supabase non configuré");
+  assertSupabaseConfigured();
+
+  const safeBoxId = Number(boxId);
+  if (!Number.isFinite(safeBoxId) || safeBoxId <= 0) {
+    throw new Error("boxId invalide");
+  }
 
   const candidateDates = [];
   if (localDate) {
@@ -82,7 +107,7 @@ export async function getPotentiallyConflictingReservations({
   let query = supabase
     .from("reservations")
     .select("id, box_id, start_time, end_time, status, date")
-    .eq("box_id", boxId);
+    .eq("box_id", safeBoxId);
 
   if (candidateDates.length > 0) {
     query = query.in("date", [...new Set(candidateDates)]);
@@ -118,42 +143,42 @@ export async function hasReservationConflict({
 }
 
 export async function getReservationById(reservationId) {
-  if (!supabase) throw new Error("Supabase non configuré");
+  assertSupabaseConfigured();
+
+  if (!isValidReservationId(reservationId)) {
+    throw new Error("reservationId invalide");
+  }
 
   const { data, error } = await supabase
     .from("reservations")
     .select("*")
     .eq("id", reservationId)
-    .single();
+    .maybeSingle();
 
   if (error) throw error;
-  return data;
+  return data || null;
 }
 
 export async function getReservationByGuestToken(token) {
-  if (!supabase) throw new Error("Supabase non configuré");
+  assertSupabaseConfigured();
 
   const safeToken = String(token || "").trim();
-  if (!safeToken) return null;
+  if (!isLikelyGuestToken(safeToken)) return null;
 
   const { data, error } = await supabase
     .from("reservations")
     .select("*")
     .eq("guest_manage_token", safeToken)
-    .single();
+    .maybeSingle();
 
-  if (error) {
-    if (error.code === "PGRST116") return null;
-    throw error;
-  }
-
+  if (error) throw error;
   if (!data) return null;
 
   const expiresAt = data.guest_manage_token_expires_at
     ? new Date(data.guest_manage_token_expires_at)
     : null;
 
-  if (expiresAt && expiresAt.getTime() < Date.now()) {
+  if (expiresAt && Number.isFinite(expiresAt.getTime()) && expiresAt.getTime() < Date.now()) {
     return null;
   }
 
@@ -161,6 +186,16 @@ export async function getReservationByGuestToken(token) {
 }
 
 export async function updateReservationById(reservationId, payload) {
+  assertSupabaseConfigured();
+
+  if (!isValidReservationId(reservationId)) {
+    throw new Error("reservationId invalide");
+  }
+
+  if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
+    throw new Error("payload de réservation invalide");
+  }
+
   const { data, error } = await supabase
     .from("reservations")
     .update(payload)
@@ -173,6 +208,8 @@ export async function updateReservationById(reservationId, payload) {
 }
 
 export async function applyReservationModification(modReq) {
+  assertSupabaseConfigured();
+
   if (!modReq?.reservation_id) {
     throw new Error("Modification request invalide");
   }
