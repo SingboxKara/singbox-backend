@@ -38,7 +38,7 @@ import {
   getReservationPersons,
   consumeLoyaltyPointsForUser,
   refundPointsToUser,
-} from "../services/loyaltyService.js";
+} from "../services/singcoinService.js";
 
 import {
   attemptAutomaticSavedCardCharge,
