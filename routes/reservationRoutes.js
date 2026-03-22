@@ -33,11 +33,11 @@ import {
 } from "../services/userService.js";
 
 import {
-  isReservationPaidWithLoyalty,
-  getReservationLoyaltyPointsUsed,
+  isReservationPaidWithSingcoins,
+  getReservationSingcoinsUsed,
   getReservationPersons,
-  consumeLoyaltyPointsForUser,
-  refundPointsToUser,
+  spendSingcoins,
+  refundSingcoinsToUser,
 } from "../services/singcoinService.js";
 
 import {
@@ -57,7 +57,7 @@ import {
   MODIFICATION_DEADLINE_HOURS,
   REFUND_DEADLINE_HOURS,
   SLOT_DURATION_MINUTES,
-  LOYALTY_POINTS_COST,
+  SINGCOINS_REWARD_COST,
 } from "../constants/booking.js";
 
 import {
@@ -320,9 +320,9 @@ async function runReservationModification({
     };
   }
 
-  const loyaltyUsed = isReservationPaidWithLoyalty(reservation);
+  const singcoinsRewardUsed = isReservationPaidWithSingcoins(reservation);
 
-  if (isGuest && loyaltyUsed) {
+  if (isGuest && singcoinsRewardUsed) {
     return {
       ok: false,
       status: 409,
@@ -468,7 +468,7 @@ async function runReservationModification({
             oldAmount,
             newAmount,
             deltaAmount,
-            loyaltyUsed,
+            singcoinsRewardUsed,
           },
         },
       };
@@ -498,7 +498,7 @@ async function runReservationModification({
             oldAmount,
             newAmount,
             deltaAmount,
-            loyaltyUsed,
+            singcoinsRewardUsed,
           },
         },
       };
@@ -517,8 +517,10 @@ async function runReservationModification({
     billable_persons: Math.max(safePersons, 2),
     montant: newAmount,
     free_session: newAmount <= 0,
-    loyalty_used: loyaltyUsed,
-    points_spent: loyaltyUsed ? LOYALTY_POINTS_COST : 0,
+    singcoins_used: singcoinsRewardUsed,
+    singcoins_spent: singcoinsRewardUsed ? SINGCOINS_REWARD_COST : 0,
+    loyalty_used: singcoinsRewardUsed,
+    points_spent: singcoinsRewardUsed ? SINGCOINS_REWARD_COST : 0,
     latest_payment_intent_id:
       newPaymentIntentId ||
       reservation.latest_payment_intent_id ||
@@ -581,7 +583,7 @@ async function runReservationModification({
         oldAmount,
         newAmount,
         deltaAmount,
-        loyaltyUsed,
+        singcoinsRewardUsed,
         autoChargeDone,
         refundDone,
       },
@@ -621,13 +623,13 @@ async function runReservationRefund({
     };
   }
 
-  const loyaltyUsed = isReservationPaidWithLoyalty(reservation);
-  const loyaltyPointsToRefund = loyaltyUsed
-    ? Number(getReservationLoyaltyPointsUsed(reservation))
+  const singcoinsRewardUsed = isReservationPaidWithSingcoins(reservation);
+  const singcoinsToRefund = singcoinsRewardUsed
+    ? Number(getReservationSingcoinsUsed(reservation))
     : 0;
   const cashAmountToRefund = Number(reservation.montant || 0);
 
-  if (isGuest && loyaltyPointsToRefund > 0) {
+  if (isGuest && singcoinsToRefund > 0) {
     return {
       ok: false,
       status: 409,
@@ -639,7 +641,7 @@ async function runReservationRefund({
   }
 
   let stripeRefundDone = false;
-  let loyaltyRefundDone = false;
+  let singcoinsRefundDone = false;
 
   if (cashAmountToRefund > 0) {
     const refundResult = await attemptAutomaticRefundAcrossPaymentIntents(
@@ -662,9 +664,9 @@ async function runReservationRefund({
     stripeRefundDone = true;
   }
 
-  if (loyaltyPointsToRefund > 0 && userId) {
-    await refundPointsToUser(userId, loyaltyPointsToRefund);
-    loyaltyRefundDone = true;
+  if (singcoinsToRefund > 0 && userId) {
+    await refundSingcoinsToUser(userId, singcoinsToRefund);
+    singcoinsRefundDone = true;
   }
 
   const updatedReservation = await updateReservationById(reservation.id, {
@@ -682,17 +684,17 @@ async function runReservationRefund({
     body: {
       success: true,
       message:
-        loyaltyRefundDone && stripeRefundDone
+        singcoinsRefundDone && stripeRefundDone
           ? "Réservation annulée. Paiement remboursé et Singcoins recrédités."
-          : loyaltyRefundDone
+          : singcoinsRefundDone
             ? "Réservation annulée. Les Singcoins ont été recrédités."
             : stripeRefundDone
               ? "Réservation annulée. Le paiement a été remboursé."
               : "Réservation annulée.",
       reservation: updatedReservation,
       stripeRefundDone,
-      loyaltyRefundDone,
-      loyaltyPointsRefunded: loyaltyPointsToRefund,
+      singcoinsRefundDone,
+      singcoinsRefunded: singcoinsToRefund,
       cashRefundAmount: cashAmountToRefund,
     },
   };
@@ -737,7 +739,7 @@ router.post("/api/verify-cart", async (req, res) => {
       const price =
         typeof slot.price === "number" && !Number.isNaN(slot.price)
           ? slot.price
-          : computeSessionCashAmount(startDate, persons, { loyaltyUsed: false });
+          : computeSessionCashAmount(startDate, persons, { singcoinsUsed: false });
 
       normalizedItems.push({
         ...slot,
@@ -874,7 +876,7 @@ router.post("/api/reservation-modification-options", authMiddleware, async (req,
     const reservationDate = reservation.date || formatDateToYYYYMMDD(currentStart);
     const boxId = reservation.box_id;
     const currentPersons = getReservationPersons(reservation);
-    const loyaltyUsed = isReservationPaidWithLoyalty(reservation);
+    const singcoinsRewardUsed = isReservationPaidWithSingcoins(reservation);
 
     const options = [];
 
@@ -908,7 +910,7 @@ router.post("/api/reservation-modification-options", authMiddleware, async (req,
         boxId,
         boxName: `Box ${boxId}`,
         estimatedAmount: computeSessionCashAmount(startDate, currentPersons, {
-          loyaltyUsed,
+          singcoinsUsed: singcoinsRewardUsed,
         }),
       });
     }
@@ -916,9 +918,9 @@ router.post("/api/reservation-modification-options", authMiddleware, async (req,
     return res.json({
       reservationId: reservation.id,
       options,
-      loyaltyUsed,
+      singcoinsRewardUsed,
       currentPersons,
-      loyaltyPointsUsed: getReservationLoyaltyPointsUsed(reservation),
+      singcoinsUsed: getReservationSingcoinsUsed(reservation),
       slotStarts: STANDARD_SLOT_STARTS,
     });
   } catch (e) {
@@ -1003,11 +1005,11 @@ router.post("/api/guest-modify-reservation", async (req, res) => {
 
 router.post("/api/confirm-reservation", async (req, res) => {
   let userIdFromToken = null;
-  let loyaltyPointsDebited = false;
-  let loyaltyPointsDebitedAmount = 0;
+  let singcoinsDebited = false;
+  let singcoinsDebitedAmount = 0;
 
   try {
-    const { panier, customer, promoCode, paymentIntentId, loyaltyUsed } =
+    const { panier, customer, promoCode, paymentIntentId, singcoinsUsed } =
       req.body || {};
 
     if (!panier || !Array.isArray(panier) || panier.length === 0) {
@@ -1025,9 +1027,9 @@ router.post("/api/confirm-reservation", async (req, res) => {
       return res.status(400).json({ error: "Nom client manquant" });
     }
 
-    const pricing = computeCartPricing(panier, { loyaltyUsed: !!loyaltyUsed });
+    const pricing = computeCartPricing(panier, { singcoinsUsed: !!singcoinsUsed });
     const theoreticalTotal = pricing.totalBeforeDiscount;
-    const loyaltyDiscount = pricing.loyaltyDiscount;
+    const singcoinsDiscount = pricing.singcoinsDiscount;
     let totalCashDue = pricing.totalCashDue;
 
     let promoDiscountAmount = 0;
@@ -1071,7 +1073,7 @@ router.post("/api/confirm-reservation", async (req, res) => {
       console.warn("⚠️ Token invalide sur /api/confirm-reservation :", e.message);
     }
 
-    if (loyaltyUsed && !userIdFromToken) {
+    if (singcoinsUsed && !userIdFromToken) {
       return res.status(401).json({
         error: "Connexion requise pour utiliser les Singcoins",
       });
@@ -1115,22 +1117,22 @@ router.post("/api/confirm-reservation", async (req, res) => {
       return res.json({ status: "ok (sans enregistrement Supabase)" });
     }
 
-    if (loyaltyUsed) {
-      const loyaltyConsume = await consumeLoyaltyPointsForUser(
+    if (singcoinsUsed) {
+      const singcoinsSpendResult = await spendSingcoins(
         userIdFromToken,
-        LOYALTY_POINTS_COST
+        SINGCOINS_REWARD_COST
       );
 
-      if (!loyaltyConsume.success) {
+      if (!singcoinsSpendResult.success) {
         return res.status(400).json({
-          error: loyaltyConsume.reason || "Pas assez de Singcoins",
-          currentSingcoins: loyaltyConsume.currentPoints ?? null,
-          requiredSingcoins: loyaltyConsume.requiredPoints ?? LOYALTY_POINTS_COST,
+          error: singcoinsSpendResult.reason || "Pas assez de Singcoins",
+          currentSingcoins: singcoinsSpendResult.current ?? null,
+          requiredSingcoins: singcoinsSpendResult.required ?? SINGCOINS_REWARD_COST,
         });
       }
 
-      loyaltyPointsDebited = true;
-      loyaltyPointsDebitedAmount = LOYALTY_POINTS_COST;
+      singcoinsDebited = true;
+      singcoinsDebitedAmount = SINGCOINS_REWARD_COST;
     }
 
     try {
@@ -1147,7 +1149,6 @@ router.post("/api/confirm-reservation", async (req, res) => {
     const rows = pricing.normalizedItems.map((it) => {
       const start = new Date(it.start_time);
       const end = new Date(it.end_time);
-
       const hour = start.getHours();
       const day = start.getDay();
 
@@ -1169,8 +1170,12 @@ router.post("/api/confirm-reservation", async (req, res) => {
         montant: totalCashDue,
 
         free_session: totalCashDue <= 0,
-        loyalty_used: !!loyaltyUsed,
-        points_spent: loyaltyUsed ? LOYALTY_POINTS_COST : 0,
+
+        singcoins_used: !!singcoinsUsed,
+        singcoins_spent: singcoinsUsed ? SINGCOINS_REWARD_COST : 0,
+
+        loyalty_used: !!singcoinsUsed,
+        points_spent: singcoinsUsed ? SINGCOINS_REWARD_COST : 0,
 
         payment_intent_id: paymentIntentId || null,
         original_payment_intent_id: paymentIntentId || null,
@@ -1201,8 +1206,8 @@ router.post("/api/confirm-reservation", async (req, res) => {
       });
 
       if (hasConflict) {
-        if (loyaltyPointsDebited && userIdFromToken && loyaltyPointsDebitedAmount > 0) {
-          await refundPointsToUser(userIdFromToken, loyaltyPointsDebitedAmount);
+        if (singcoinsDebited && userIdFromToken && singcoinsDebitedAmount > 0) {
+          await refundSingcoinsToUser(userIdFromToken, singcoinsDebitedAmount);
         }
 
         return res.status(409).json({
@@ -1214,8 +1219,8 @@ router.post("/api/confirm-reservation", async (req, res) => {
     if (!isFreeReservationFlag && paymentIntentId) {
       const alreadyUsedLate = await isPaymentIntentAlreadyUsed(paymentIntentId);
       if (alreadyUsedLate) {
-        if (loyaltyPointsDebited && userIdFromToken && loyaltyPointsDebitedAmount > 0) {
-          await refundPointsToUser(userIdFromToken, loyaltyPointsDebitedAmount);
+        if (singcoinsDebited && userIdFromToken && singcoinsDebitedAmount > 0) {
+          await refundSingcoinsToUser(userIdFromToken, singcoinsDebitedAmount);
         }
 
         return res.status(409).json({
@@ -1233,8 +1238,8 @@ router.post("/api/confirm-reservation", async (req, res) => {
         .single();
 
       if (error) {
-        if (loyaltyPointsDebited && userIdFromToken && loyaltyPointsDebitedAmount > 0) {
-          await refundPointsToUser(userIdFromToken, loyaltyPointsDebitedAmount);
+        if (singcoinsDebited && userIdFromToken && singcoinsDebitedAmount > 0) {
+          await refundSingcoinsToUser(userIdFromToken, singcoinsDebitedAmount);
         }
 
         console.error("Erreur Supabase insert reservations :", error);
@@ -1328,13 +1333,13 @@ router.post("/api/confirm-reservation", async (req, res) => {
       reservations: insertedReservations,
       pricing: {
         totalBeforeDiscount: theoreticalTotal,
-        loyaltyDiscount,
+        singcoinsDiscount,
         promoDiscountAmount,
         totalAfterDiscount: totalCashDue,
       },
-      loyalty: {
-        used: !!loyaltyUsed,
-        pointsSpent: loyaltyUsed ? loyaltyPointsDebitedAmount : 0,
+      singcoins: {
+        used: !!singcoinsUsed,
+        spent: singcoinsUsed ? singcoinsDebitedAmount : 0,
       },
       promo: promo
         ? {
@@ -1347,9 +1352,9 @@ router.post("/api/confirm-reservation", async (req, res) => {
       gamification,
     });
   } catch (err) {
-    if (loyaltyPointsDebited && userIdFromToken && loyaltyPointsDebitedAmount > 0) {
+    if (singcoinsDebited && userIdFromToken && singcoinsDebitedAmount > 0) {
       try {
-        await refundPointsToUser(userIdFromToken, loyaltyPointsDebitedAmount);
+        await refundSingcoinsToUser(userIdFromToken, singcoinsDebitedAmount);
       } catch (refundErr) {
         console.error(
           "❌ Impossible de recréditer les Singcoins après échec :",
