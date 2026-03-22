@@ -20,7 +20,7 @@ http:
             "date": "2026-04-10",
             "hour": 18,
             "boxId": 1,
-            "persons": 4
+            "persons": 2
           }
         ],
         "customer": {
@@ -29,7 +29,7 @@ http:
           "email": "testsingbox123@example.com"
         },
         "promoCode": "",
-        "finalAmountCents": 3960,
+        "finalAmountCents": 2398,
         "loyaltyUsed": false,
         "useSavedPaymentMethod": false
       }

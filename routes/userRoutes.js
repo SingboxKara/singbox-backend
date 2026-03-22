@@ -3,8 +3,14 @@ import express from "express";
 import { supabase } from "../config/supabase.js";
 import { authMiddleware } from "../middlewares/auth.js";
 import { updateUserProfileInUsersTable } from "../services/userService.js";
-import { LOYALTY_POINTS_COST } from "../constants/booking.js";
-import { getUserGamificationSnapshot } from "../services/gamificationService.js";
+import {
+  getUserGamificationSnapshot,
+} from "../services/gamificationService.js";
+import {
+  getAvailableSingcoins,
+  spendSingcoins,
+} from "../services/singcoinService.js";
+import { SINGCOINS_REWARD_COST } from "../constants/booking.js";
 
 const router = express.Router();
 
@@ -14,22 +20,32 @@ router.get("/api/me", authMiddleware, async (req, res) => {
       return res.status(500).json({ error: "Supabase non configuré" });
     }
 
-    const { data: user, error: userErr } = await supabase
-      .from("users")
-      .select(
-        "id,email,prenom,nom,telephone,pays,adresse,complement,cp,ville,naissance,points,stripe_customer_id,default_payment_method_id,card_brand,card_last4,card_exp_month,card_exp_year"
-      )
-      .eq("id", req.userId)
-      .single();
+    const [{ data: user, error: userErr }, gamification] = await Promise.all([
+      supabase
+        .from("users")
+        .select(
+          "id,email,prenom,nom,telephone,pays,adresse,complement,cp,ville,naissance,stripe_customer_id,default_payment_method_id,card_brand,card_last4,card_exp_month,card_exp_year,created_at"
+        )
+        .eq("id", req.userId)
+        .single(),
+      getUserGamificationSnapshot(req.userId).catch(() => null),
+    ]);
 
     if (userErr || !user) {
       return res.status(400).json({ error: "Utilisateur introuvable" });
     }
 
+    const singcoinsBalance = Number(gamification?.singcoins?.balance || 0);
+
     return res.json({
       id: user.id,
       email: user.email,
-      points: user.points ?? 0,
+      created_at: user.created_at || null,
+      singcoins_balance: singcoinsBalance,
+
+      // Alias compat temporaire si un front legacy lit encore "points"
+      points: singcoinsBalance,
+
       payment: {
         stripe_customer_id: user.stripe_customer_id ?? null,
         default_payment_method_id: user.default_payment_method_id ?? null,
@@ -75,50 +91,52 @@ router.post("/api/me", authMiddleware, async (req, res) => {
 });
 
 router.post("/api/add-points", authMiddleware, async (_req, res) => {
-  return res.status(403).json({
-    error: "Action non autorisée",
+  return res.status(410).json({
+    error: "Route obsolète. Utilisez désormais le système Singcoins.",
   });
 });
 
-router.post("/api/use-loyalty", authMiddleware, async (req, res) => {
+router.post("/api/use-loyalty", authMiddleware, async (_req, res) => {
+  return res.status(410).json({
+    error: "Route obsolète. Utilisez désormais le système Singcoins.",
+  });
+});
+
+router.post("/api/use-singcoins", authMiddleware, async (req, res) => {
   try {
-    if (!supabase) {
-      return res.status(500).json({ error: "Supabase non configuré" });
+    const amount = Number(req.body?.amount || SINGCOINS_REWARD_COST);
+
+    if (!Number.isFinite(amount) || amount <= 0) {
+      return res.status(400).json({ error: "Montant Singcoins invalide" });
     }
 
-    const { data: user, error } = await supabase
-      .from("users")
-      .select("points")
-      .eq("id", req.userId)
-      .single();
-
-    if (error || !user) {
-      return res.status(400).json({ error: "Utilisateur introuvable" });
+    const currentBalance = await getAvailableSingcoins(req.userId);
+    if (currentBalance < amount) {
+      return res.status(400).json({
+        error: "Pas assez de Singcoins",
+        currentSingcoins: currentBalance,
+        requiredSingcoins: amount,
+      });
     }
 
-    if (Number(user.points || 0) < LOYALTY_POINTS_COST) {
-      return res.status(400).json({ error: "Pas assez de points" });
-    }
+    const result = await spendSingcoins(req.userId, amount);
 
-    const { error: updateErr } = await supabase
-      .from("users")
-      .update({
-        points: Number(user.points) - LOYALTY_POINTS_COST,
-        updated_at: new Date().toISOString(),
-      })
-      .eq("id", req.userId);
-
-    if (updateErr) {
-      console.error(updateErr);
-      return res.status(500).json({ error: "Impossible de retirer les points" });
+    if (!result.success) {
+      return res.status(400).json({
+        error: result.reason || "Impossible d'utiliser les Singcoins",
+        currentSingcoins: result.current ?? currentBalance,
+        requiredSingcoins: result.required ?? amount,
+      });
     }
 
     return res.json({
       success: true,
-      message: `${LOYALTY_POINTS_COST} points utilisés`,
+      message: `${amount} Singcoins utilisés`,
+      deducted: result.deducted,
+      remaining: result.remaining,
     });
   } catch (e) {
-    console.error("Erreur /api/use-loyalty :", e);
+    console.error("Erreur /api/use-singcoins :", e);
     return res.status(500).json({ error: "Erreur serveur" });
   }
 });

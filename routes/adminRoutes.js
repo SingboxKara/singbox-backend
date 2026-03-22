@@ -152,8 +152,11 @@ router.post("/api/admin/create-free-reservation", requireSupabaseAdmin, async (r
       billable_persons: getBillablePersons(safePersons),
       montant: 0,
       free_session: true,
+
+      // Compatibilité DB legacy : le métier réel est désormais Singcoins
       loyalty_used: false,
       points_spent: 0,
+
       promo_code: null,
       refunded_amount: 0,
       last_auto_charge_amount: 0,

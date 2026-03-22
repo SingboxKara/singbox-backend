@@ -23,7 +23,6 @@ import {
   updateReservationById,
   getReservationByGuestToken,
   generateGuestManageToken,
-  computeGuestManageTokenExpiresAt,
   normalizeReservationStatus,
   isPaymentIntentAlreadyUsed,
 } from "../services/reservationService.js";
@@ -47,8 +46,8 @@ import {
 } from "../services/stripeCustomerService.js";
 
 import {
+  creditSingcoins,
   getUserGamificationSnapshot,
-  processReservationGamification,
 } from "../services/gamificationService.js";
 
 import { clampPersons, getNumericBoxId } from "../utils/validators.js";
@@ -329,7 +328,7 @@ async function runReservationModification({
       status: 409,
       body: {
         error:
-          "Cette réservation liée à la fidélité doit être modifiée depuis un compte connecté.",
+          "Cette réservation liée aux Singcoins doit être modifiée depuis un compte connecté.",
       },
     };
   }
@@ -634,7 +633,7 @@ async function runReservationRefund({
       status: 409,
       body: {
         error:
-          "Cette réservation liée à la fidélité doit être remboursée depuis un compte connecté.",
+          "Cette réservation liée aux Singcoins doit être remboursée depuis un compte connecté.",
       },
     };
   }
@@ -684,9 +683,9 @@ async function runReservationRefund({
       success: true,
       message:
         loyaltyRefundDone && stripeRefundDone
-          ? "Réservation annulée. Paiement remboursé et points recrédités."
+          ? "Réservation annulée. Paiement remboursé et Singcoins recrédités."
           : loyaltyRefundDone
-            ? "Réservation annulée. Les points de fidélité ont été recrédités."
+            ? "Réservation annulée. Les Singcoins ont été recrédités."
             : stripeRefundDone
               ? "Réservation annulée. Le paiement a été remboursé."
               : "Réservation annulée.",
@@ -778,7 +777,7 @@ router.get("/api/my-reservations", authMiddleware, async (req, res) => {
     const { data: reservations, error } = await supabase
       .from("reservations")
       .select(
-        "id, name, email, date, start_time, end_time, box_id, persons, status, montant, free_session, created_at"
+        "id, name, email, date, start_time, end_time, box_id, persons, status, montant, free_session, created_at, checked_in_at, completed_at"
       )
       .or(`user_id.eq.${req.userId},email.eq.${user.email}`)
       .order("start_time", { ascending: false });
@@ -1074,7 +1073,7 @@ router.post("/api/confirm-reservation", async (req, res) => {
 
     if (loyaltyUsed && !userIdFromToken) {
       return res.status(401).json({
-        error: "Connexion requise pour utiliser la fidélité",
+        error: "Connexion requise pour utiliser les Singcoins",
       });
     }
 
@@ -1124,9 +1123,9 @@ router.post("/api/confirm-reservation", async (req, res) => {
 
       if (!loyaltyConsume.success) {
         return res.status(400).json({
-          error: loyaltyConsume.reason || "Pas assez de points de fidélité",
-          currentPoints: loyaltyConsume.currentPoints ?? null,
-          requiredPoints: loyaltyConsume.requiredPoints ?? LOYALTY_POINTS_COST,
+          error: loyaltyConsume.reason || "Pas assez de Singcoins",
+          currentSingcoins: loyaltyConsume.currentPoints ?? null,
+          requiredSingcoins: loyaltyConsume.requiredPoints ?? LOYALTY_POINTS_COST,
         });
       }
 
@@ -1256,29 +1255,21 @@ router.post("/api/confirm-reservation", async (req, res) => {
     }
 
     try {
-      await Promise.allSettled(
-        insertedReservations.map((row) => processReservationGamification(row.id))
-      );
-    } catch (gErr) {
-      console.error("Erreur gamification confirm-reservation :", gErr);
-    }
-
-    try {
       const isActuallyFree = totalCashDue <= 0;
       if (userIdFromToken && !isActuallyFree) {
-        const pointsToAdd = panier.length * 10;
+        const singcoinsToAdd = insertedReservations.length * 10;
 
-        const { error: pointsError } = await supabase.rpc("increment_points", {
-          user_id: userIdFromToken,
-          points_to_add: pointsToAdd,
+        await creditSingcoins({
+          userId: userIdFromToken,
+          amount: singcoinsToAdd,
+          type: "reservation_purchase_reward",
+          referenceType: "payment_intent",
+          referenceId: paymentIntentId || insertedReservations.map((r) => String(r.id)).join(","),
+          label: `${insertedReservations.length} réservation(s) payée(s)`,
         });
-
-        if (pointsError) {
-          console.error("Erreur ajout points fidélité :", pointsError);
-        }
       }
-    } catch (pointsErr) {
-      console.error("Erreur lors de l'ajout automatique des points :", pointsErr);
+    } catch (singcoinsErr) {
+      console.error("Erreur lors de l'ajout automatique des Singcoins :", singcoinsErr);
     }
 
     try {
@@ -1361,7 +1352,7 @@ router.post("/api/confirm-reservation", async (req, res) => {
         await refundPointsToUser(userIdFromToken, loyaltyPointsDebitedAmount);
       } catch (refundErr) {
         console.error(
-          "❌ Impossible de recréditer les points après échec :",
+          "❌ Impossible de recréditer les Singcoins après échec :",
           refundErr
         );
       }

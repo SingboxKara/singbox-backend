@@ -3,7 +3,7 @@
 import {
   SLOT_DURATION_MINUTES,
   MIN_BILLABLE_PERSONS,
-  LOYALTY_FREE_BILLABLE_PERSONS,
+  SINGCOINS_FREE_BILLABLE_PERSONS,
   WEEKDAY_MORNING_RATE,
   WEEKDAY_MIDDAY_RATE,
   WEEKDAY_EVENING_RATE,
@@ -17,12 +17,10 @@ import {
 } from "../constants/booking.js";
 
 import {
-  parseDateOrNull,
-  formatDateToYYYYMMDD,
   addDaysToDateString,
 } from "../utils/dates.js";
 import { clampPersons, getNumericBoxId } from "../utils/validators.js";
-import { isReservationPaidWithLoyalty } from "./loyaltyService.js";
+import { isReservationPaidWithSingcoins } from "./singcoinService.js";
 
 export function getBillablePersons(persons) {
   const n = Number(persons);
@@ -39,19 +37,11 @@ export function isFriday(dateObj) {
   return dateObj.getDay() === 5;
 }
 
-/**
- * Retourne le tarif / personne selon :
- * - le jour de début du créneau
- * - l'heure de début du créneau
- *
- * Plus aucune logique "vacances scolaires".
- */
 export function getPerPersonRateForDate(dateObj) {
   const hour = dateObj.getHours();
   const isFridayDate = isFriday(dateObj);
   const isWeekendDate = isWeekend(dateObj);
 
-  // Vendredi + week-end
   if (isFridayDate || isWeekendDate) {
     if (hour >= WEEKEND_AFTERNOON_SWITCH_HOUR || hour < WEEKDAY_END_NIGHT_HOUR) {
       return WEEKEND_AFTER_15_RATE;
@@ -59,7 +49,6 @@ export function getPerPersonRateForDate(dateObj) {
     return WEEKEND_BEFORE_15_RATE;
   }
 
-  // Semaine classique : lundi à jeudi
   if (hour >= WEEKDAY_MORNING_START_HOUR && hour < WEEKDAY_MIDDAY_START_HOUR) {
     return WEEKDAY_MORNING_RATE;
   }
@@ -68,15 +57,10 @@ export function getPerPersonRateForDate(dateObj) {
     return WEEKDAY_MIDDAY_RATE;
   }
 
-  // De 15h à 23h59 + de 00h à 01h59
   if (hour >= WEEKDAY_EVENING_START_HOUR || hour < WEEKDAY_END_NIGHT_HOUR) {
     return WEEKDAY_EVENING_RATE;
   }
 
-  /**
-   * Sécurité si jamais un horaire tombe hors de la grille attendue
-   * (ex: 02h-07h, normalement non proposé au front)
-   */
   return WEEKDAY_MORNING_RATE;
 }
 
@@ -180,22 +164,22 @@ export function buildSlotIsoRange(dateStr, slotHourFloat) {
 export function computeSessionCashAmount(startDate, persons, options = {}) {
   const billablePersons = getBillablePersons(persons);
   const perPersonRate = getPerPersonRateForDate(startDate);
-  const loyaltyUsed = !!options.loyaltyUsed;
+  const singcoinsUsed = !!options.singcoinsUsed;
 
-  if (!loyaltyUsed) {
+  if (!singcoinsUsed) {
     return Number((billablePersons * perPersonRate).toFixed(2));
   }
 
   const extraBillablePersons = Math.max(
     0,
-    billablePersons - LOYALTY_FREE_BILLABLE_PERSONS
+    billablePersons - SINGCOINS_FREE_BILLABLE_PERSONS
   );
 
   return Number((extraBillablePersons * perPersonRate).toFixed(2));
 }
 
 export function computeCartPricing(panier, options = {}) {
-  const loyaltyUsed = !!options.loyaltyUsed;
+  const singcoinsUsed = !!options.singcoinsUsed;
 
   const normalizedItems = panier.map((slot) => {
     const times = buildTimesFromSlot(slot);
@@ -209,14 +193,14 @@ export function computeCartPricing(panier, options = {}) {
     const billablePersons = getBillablePersons(persons);
 
     const theoreticalFullAmount = computeSessionCashAmount(startDate, persons, {
-      loyaltyUsed: false,
+      singcoinsUsed: false,
     });
 
     const cashAmountDue = computeSessionCashAmount(startDate, persons, {
-      loyaltyUsed,
+      singcoinsUsed,
     });
 
-    const loyaltyDiscountAmount = Number(
+    const singcoinsDiscountAmount = Number(
       (theoreticalFullAmount - cashAmountDue).toFixed(2)
     );
 
@@ -231,7 +215,7 @@ export function computeCartPricing(panier, options = {}) {
       datetime: times.datetime,
       theoreticalFullAmount,
       cashAmountDue,
-      loyaltyDiscountAmount,
+      singcoinsDiscountAmount,
     };
   });
 
@@ -240,8 +224,8 @@ export function computeCartPricing(panier, options = {}) {
     0
   );
 
-  const loyaltyDiscount = normalizedItems.reduce(
-    (sum, item) => sum + item.loyaltyDiscountAmount,
+  const singcoinsDiscount = normalizedItems.reduce(
+    (sum, item) => sum + item.singcoinsDiscountAmount,
     0
   );
 
@@ -253,32 +237,28 @@ export function computeCartPricing(panier, options = {}) {
   return {
     normalizedItems,
     totalBeforeDiscount: Number(totalBeforeDiscount.toFixed(2)),
-    loyaltyDiscount: Number(loyaltyDiscount.toFixed(2)),
+    singcoinsDiscount: Number(singcoinsDiscount.toFixed(2)),
     totalCashDue: Number(totalCashDue.toFixed(2)),
   };
 }
 
-export function computeReservationTargetAmount({ reservation, targetStart, targetPersons }) {
-  const loyaltyUsed = isReservationPaidWithLoyalty(reservation);
+export function computeModificationDelta({
+  reservation,
+  targetStart,
+  targetPersons,
+}) {
+  const currentAmount = Number(reservation?.montant || 0);
+  const singcoinsUsed = isReservationPaidWithSingcoins(reservation);
 
-  return computeSessionCashAmount(targetStart, targetPersons, {
-    loyaltyUsed,
+  const newAmount = computeSessionCashAmount(targetStart, targetPersons, {
+    singcoinsUsed,
   });
-}
 
-export function computeModificationDelta({ reservation, targetStart, targetPersons }) {
-  const oldAmount = Number(Number(reservation?.montant || 0).toFixed(2));
-  const newAmount = Number(
-    computeReservationTargetAmount({
-      reservation,
-      targetStart,
-      targetPersons,
-    }).toFixed(2)
-  );
+  const deltaAmount = Number((newAmount - currentAmount).toFixed(2));
 
   return {
-    oldAmount,
+    oldAmount: currentAmount,
     newAmount,
-    deltaAmount: Number((newAmount - oldAmount).toFixed(2)),
+    deltaAmount,
   };
 }

@@ -5,8 +5,10 @@ info:
 
 http:
   method: GET
-  url: /api/account/gamification
-  auth: inherit
+  url: https://singbox-backend.onrender.com/api/admin/mark-reservation-completed
+  auth:
+    type: bearer
+    token: eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJ1c2VySWQiOiIwZDQ2OThiYy0wOTJmLTQzNjctOWQxOS0xODE0NzA3YzM4YTciLCJlbWFpbCI6InRlc3RzaW5nYm94MTIzQGV4YW1wbGUuY29tIiwidHlwZSI6InVzZXIiLCJpYXQiOjE3NzQxNDAxMDcsImV4cCI6MTc3NDc0NDkwN30._MrxRYSf9pDGJs60De-8AkXqDJrNRCz1VH34dU03mPE
 
 settings:
   encodeUrl: true

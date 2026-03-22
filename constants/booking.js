@@ -11,8 +11,8 @@ export const MIN_ALLOWED_PERSONS = 1;
 export const MAX_ALLOWED_PERSONS = 8;
 export const MIN_BILLABLE_PERSONS = 2;
 
-export const LOYALTY_POINTS_COST = 100;
-export const LOYALTY_FREE_BILLABLE_PERSONS = 2;
+export const SINGCOINS_REWARD_COST = 100;
+export const SINGCOINS_FREE_BILLABLE_PERSONS = 2;
 
 /**
  * Nouvelle grille tarifaire Singbox

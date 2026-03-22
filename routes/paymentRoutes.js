@@ -11,18 +11,15 @@ import {
   ensureStripeCustomer,
   saveDefaultCardToUsersTable,
 } from "../services/stripeCustomerService.js";
-import {
-  getUserById,
-} from "../services/userService.js";
-import {
-  computeCartPricing,
-} from "../services/pricingService.js";
+import { getUserById } from "../services/userService.js";
+import { computeCartPricing } from "../services/pricingService.js";
 import {
   validatePromoCode,
   sanitizePromoForClient,
 } from "../services/promoService.js";
 import { updateReservationById } from "../services/reservationService.js";
-import { DEPOSIT_AMOUNT_EUR } from "../constants/booking.js";
+import { getAvailableSingcoins } from "../services/singcoinService.js";
+import { DEPOSIT_AMOUNT_EUR, SINGCOINS_REWARD_COST } from "../constants/booking.js";
 
 const router = express.Router();
 
@@ -58,7 +55,7 @@ router.get("/api/payment-methods", authMiddleware, async (req, res) => {
 
     const { customerId } = await ensureStripeCustomer(req.userId);
 
-    const pms = await stripe.paymentMethods.list({
+    const paymentMethods = await stripe.paymentMethods.list({
       customer: customerId,
       type: "card",
     });
@@ -68,12 +65,12 @@ router.get("/api/payment-methods", authMiddleware, async (req, res) => {
     return res.json({
       customerId,
       defaultPaymentMethodId: user.default_payment_method_id ?? null,
-      methods: (pms.data || []).map((pm) => ({
-        id: pm.id,
-        brand: pm.card?.brand ?? null,
-        last4: pm.card?.last4 ?? null,
-        exp_month: pm.card?.exp_month ?? null,
-        exp_year: pm.card?.exp_year ?? null,
+      methods: (paymentMethods.data || []).map((paymentMethod) => ({
+        id: paymentMethod.id,
+        brand: paymentMethod.card?.brand ?? null,
+        last4: paymentMethod.card?.last4 ?? null,
+        exp_month: paymentMethod.card?.exp_month ?? null,
+        exp_year: paymentMethod.card?.exp_year ?? null,
       })),
     });
   } catch (e) {
@@ -107,8 +104,8 @@ router.post("/api/set-default-payment-method", authMiddleware, async (req, res) 
       invoice_settings: { default_payment_method: paymentMethodId },
     });
 
-    const pm = await stripe.paymentMethods.retrieve(paymentMethodId);
-    await saveDefaultCardToUsersTable(req.userId, pm);
+    const paymentMethod = await stripe.paymentMethods.retrieve(paymentMethodId);
+    await saveDefaultCardToUsersTable(req.userId, paymentMethod);
 
     return res.json({ ok: true });
   } catch (e) {
@@ -119,7 +116,7 @@ router.post("/api/set-default-payment-method", authMiddleware, async (req, res) 
 
 router.post("/api/validate-promo", async (req, res) => {
   try {
-    const { code, panier, loyaltyUsed } = req.body || {};
+    const { code, panier, singcoinsUsed } = req.body || {};
 
     if (!code || !String(code).trim()) {
       return res.status(400).json({
@@ -128,10 +125,10 @@ router.post("/api/validate-promo", async (req, res) => {
       });
     }
 
-    if (loyaltyUsed) {
+    if (singcoinsUsed) {
       return res.status(400).json({
         valid: false,
-        error: "Un code promo ne peut pas être utilisé en même temps que la fidélité.",
+        error: "Un code promo ne peut pas être utilisé en même temps que les Singcoins.",
       });
     }
 
@@ -178,7 +175,7 @@ router.post("/api/create-payment-intent", optionalAuthMiddleware, async (req, re
       customer,
       promoCode,
       finalAmountCents,
-      loyaltyUsed,
+      singcoinsUsed,
       useSavedPaymentMethod,
       paymentMethodId,
     } = req.body || {};
@@ -192,9 +189,26 @@ router.post("/api/create-payment-intent", optionalAuthMiddleware, async (req, re
       return res.status(400).json({ error: "Email client requis" });
     }
 
-    const pricing = computeCartPricing(panier, { loyaltyUsed: !!loyaltyUsed });
-    const theoreticalTotal = pricing.totalBeforeDiscount;
-    const loyaltyDiscount = pricing.loyaltyDiscount;
+    if (singcoinsUsed && !req.userId) {
+      return res.status(401).json({
+        error: "Connexion requise pour utiliser les Singcoins",
+      });
+    }
+
+    if (singcoinsUsed && req.userId) {
+      const currentSingcoins = await getAvailableSingcoins(req.userId);
+      if (currentSingcoins < SINGCOINS_REWARD_COST) {
+        return res.status(400).json({
+          error: "Pas assez de Singcoins",
+          currentSingcoins,
+          requiredSingcoins: SINGCOINS_REWARD_COST,
+        });
+      }
+    }
+
+    const pricing = computeCartPricing(panier, { loyaltyUsed: !!singcoinsUsed });
+    const totalBeforeDiscount = pricing.totalBeforeDiscount;
+    const singcoinsDiscount = pricing.loyaltyDiscount;
     let totalAmountEur = pricing.totalCashDue;
     let promoDiscountAmount = 0;
     let promo = null;
@@ -224,17 +238,11 @@ router.post("/api/create-payment-intent", optionalAuthMiddleware, async (req, re
       }
     }
 
-    if (loyaltyUsed && !req.userId) {
-      return res.status(401).json({
-        error: "Connexion requise pour utiliser les points de fidélité",
-      });
-    }
-
     if (totalAmountEur <= 0) {
       return res.json({
         isFree: true,
-        totalBeforeDiscount: theoreticalTotal,
-        loyaltyDiscount,
+        totalBeforeDiscount,
+        singcoinsDiscount,
         promoDiscountAmount,
         totalAfterDiscount: 0,
         promo: promo
@@ -256,13 +264,13 @@ router.post("/api/create-payment-intent", optionalAuthMiddleware, async (req, re
       const user = await getUserById(req.userId);
       const { customerId } = await ensureStripeCustomer(req.userId);
 
-      const pmToUse = paymentMethodId || user.default_payment_method_id;
-      if (!pmToUse) {
+      const paymentMethodToUse = paymentMethodId || user.default_payment_method_id;
+      if (!paymentMethodToUse) {
         return res.status(400).json({ error: "Aucune carte enregistrée disponible" });
       }
 
       try {
-        await stripe.paymentMethods.attach(pmToUse, { customer: customerId });
+        await stripe.paymentMethods.attach(paymentMethodToUse, { customer: customerId });
       } catch (e) {
         const msg = String(e?.message || "");
         if (!msg.toLowerCase().includes("already") && !msg.toLowerCase().includes("attached")) {
@@ -274,31 +282,31 @@ router.post("/api/create-payment-intent", optionalAuthMiddleware, async (req, re
         (customer?.prenom || "") + (customer?.prenom ? " " : "") + (customer?.nom || "");
 
       try {
-        const pi = await stripe.paymentIntents.create({
+        const paymentIntent = await stripe.paymentIntents.create({
           amount: amountInCents,
           currency: "eur",
           customer: customerId,
-          payment_method: pmToUse,
+          payment_method: paymentMethodToUse,
           payment_method_types: ["card"],
           metadata: {
             panier: JSON.stringify(pricing.normalizedItems),
             customer_email: customerEmail,
             customer_name: fullName,
             promo_code: promoCode || "",
-            total_before_discount: String(theoreticalTotal),
-            loyalty_discount_amount: String(loyaltyDiscount),
+            total_before_discount: String(totalBeforeDiscount),
+            singcoins_discount_amount: String(singcoinsDiscount),
             promo_discount_amount: String(promoDiscountAmount),
-            loyalty_used: loyaltyUsed ? "true" : "false",
+            singcoins_used: singcoinsUsed ? "true" : "false",
             saved_card: "true",
           },
         });
 
         return res.json({
-          clientSecret: pi.client_secret,
-          paymentIntentId: pi.id,
+          clientSecret: paymentIntent.client_secret,
+          paymentIntentId: paymentIntent.id,
           isFree: false,
-          totalBeforeDiscount: theoreticalTotal,
-          loyaltyDiscount,
+          totalBeforeDiscount,
+          singcoinsDiscount,
           promoDiscountAmount,
           totalAfterDiscount: totalAmountEur,
           promo: promo ? { id: promo.id, code: promo.code, type: promo.type, value: promo.value } : null,
@@ -323,10 +331,10 @@ router.post("/api/create-payment-intent", optionalAuthMiddleware, async (req, re
         customer_email: customerEmail,
         customer_name: (customer?.prenom || "") + " " + (customer?.nom || ""),
         promo_code: promoCode || "",
-        total_before_discount: String(theoreticalTotal),
-        loyalty_discount_amount: String(loyaltyDiscount),
+        total_before_discount: String(totalBeforeDiscount),
+        singcoins_discount_amount: String(singcoinsDiscount),
         promo_discount_amount: String(promoDiscountAmount),
-        loyalty_used: loyaltyUsed ? "true" : "false",
+        singcoins_used: singcoinsUsed ? "true" : "false",
       },
     });
 
@@ -334,8 +342,8 @@ router.post("/api/create-payment-intent", optionalAuthMiddleware, async (req, re
       clientSecret: paymentIntent.client_secret,
       paymentIntentId: paymentIntent.id,
       isFree: false,
-      totalBeforeDiscount: theoreticalTotal,
-      loyaltyDiscount,
+      totalBeforeDiscount,
+      singcoinsDiscount,
       promoDiscountAmount,
       totalAfterDiscount: totalAmountEur,
       promo: promo
@@ -375,13 +383,13 @@ router.post("/api/create-deposit-intent", optionalAuthMiddleware, async (req, re
       const user = await getUserById(req.userId);
       const { customerId } = await ensureStripeCustomer(req.userId);
 
-      const pmToUse = paymentMethodId || user.default_payment_method_id;
-      if (!pmToUse) {
+      const paymentMethodToUse = paymentMethodId || user.default_payment_method_id;
+      if (!paymentMethodToUse) {
         return res.status(400).json({ error: "Aucune carte enregistrée disponible pour la caution" });
       }
 
       try {
-        await stripe.paymentMethods.attach(pmToUse, { customer: customerId });
+        await stripe.paymentMethods.attach(paymentMethodToUse, { customer: customerId });
       } catch (e) {
         const msg = String(e?.message || "");
         if (!msg.toLowerCase().includes("already") && !msg.toLowerCase().includes("attached")) {
@@ -389,11 +397,11 @@ router.post("/api/create-deposit-intent", optionalAuthMiddleware, async (req, re
         }
       }
 
-      const pi = await stripe.paymentIntents.create({
+      const paymentIntent = await stripe.paymentIntents.create({
         amount: amountInCents,
         currency: "eur",
         customer: customerId,
-        payment_method: pmToUse,
+        payment_method: paymentMethodToUse,
         payment_method_types: ["card"],
         capture_method: "manual",
         metadata: {
@@ -407,7 +415,7 @@ router.post("/api/create-deposit-intent", optionalAuthMiddleware, async (req, re
 
       if (supabase && reservationId) {
         await updateReservationById(reservationId, {
-          deposit_payment_intent_id: pi.id,
+          deposit_payment_intent_id: paymentIntent.id,
           deposit_amount_cents: amountInCents,
           deposit_status: "created",
           updated_at: new Date().toISOString(),
@@ -415,8 +423,8 @@ router.post("/api/create-deposit-intent", optionalAuthMiddleware, async (req, re
       }
 
       return res.json({
-        clientSecret: pi.client_secret,
-        paymentIntentId: pi.id,
+        clientSecret: paymentIntent.client_secret,
+        paymentIntentId: paymentIntent.id,
         depositAmountEur: DEPOSIT_AMOUNT_EUR,
       });
     }

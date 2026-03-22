@@ -8,7 +8,7 @@ import {
   REFUND_DEADLINE_HOURS,
   GUEST_MANAGE_TOKEN_BYTES,
   GUEST_MANAGE_TOKEN_TTL_DAYS,
-  LOYALTY_POINTS_COST,
+  SINGCOINS_REWARD_COST,
 } from "../constants/booking.js";
 import {
   addDaysToDateString,
@@ -298,7 +298,9 @@ export async function applyReservationModification(modReq) {
     throw new Error("Le nouveau créneau n’est plus disponible");
   }
 
-  const loyaltyUsed = Boolean(reservation.loyalty_used);
+  const singcoinsUsed = Boolean(
+    reservation.singcoins_used ?? reservation.loyalty_used
+  );
   const newAmount = Number(modReq.new_amount ?? reservation.montant ?? 0);
   const deltaAmount = Number(modReq.delta_amount ?? 0);
   const paymentIntentId =
@@ -318,8 +320,19 @@ export async function applyReservationModification(modReq) {
     billable_persons: Math.max(newPersons, 2),
     montant: newAmount,
     free_session: newAmount <= 0,
-    loyalty_used: loyaltyUsed,
-    points_spent: loyaltyUsed ? Number(reservation.points_spent || LOYALTY_POINTS_COST) : 0,
+
+    // Nouveaux champs propres
+    singcoins_used: singcoinsUsed,
+    singcoins_spent: singcoinsUsed
+      ? Number(reservation.singcoins_spent || reservation.points_spent || SINGCOINS_REWARD_COST)
+      : 0,
+
+    // Compat DB legacy conservée temporairement
+    loyalty_used: singcoinsUsed,
+    points_spent: singcoinsUsed
+      ? Number(reservation.points_spent || reservation.singcoins_spent || SINGCOINS_REWARD_COST)
+      : 0,
+
     latest_payment_intent_id: paymentIntentId,
     original_payment_intent_id:
       reservation.original_payment_intent_id ||
