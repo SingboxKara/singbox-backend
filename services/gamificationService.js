@@ -11,45 +11,37 @@ function computeLevel(xp) {
 }
 
 export async function getUserGamificationSnapshot(userId) {
-  // gamification
-  const { data: gamification } = await supabaseAdmin
+  // 🔥 IMPORTANT → pas de .single()
+  const { data: gamification } = await supabase
     .from('user_gamification')
     .select('*')
     .eq('user_id', userId)
-    .single();
+    .maybeSingle();
 
-  // stats
-  const { data: stats } = await supabaseAdmin
+  const { data: stats } = await supabase
     .from('user_stats')
     .select('*')
     .eq('user_id', userId)
-    .single();
+    .maybeSingle();
 
-  // badges
-  const { data: badges } = await supabaseAdmin
+  const { data: badges } = await supabase
     .from('user_badges')
     .select('*')
     .eq('user_id', userId);
 
-  // missions
-  const { data: missions } = await supabaseAdmin
+  const { data: missions } = await supabase
     .from('user_mission_progress')
     .select('*')
     .eq('user_id', userId);
 
-  const level = computeLevel(gamification?.xp_total || 0);
+  const xp = gamification?.xp_total || 0;
+  const level = computeLevel(xp);
 
   return {
-    identity: {
-      displayName: "Utilisateur",
-      memberSince: null,
-      status: "Membre"
-    },
     singcoins: {
       balance: gamification?.singcoins_balance || 0,
       earned: gamification?.singcoins_earned_total || 0,
-      used: gamification?.singcoins_used_total || 0,
-      nextReward: "100 Singcoins"
+      used: gamification?.singcoins_used_total || 0
     },
     level: {
       current: level.level,
@@ -59,18 +51,12 @@ export async function getUserGamificationSnapshot(userId) {
     },
     streak: {
       current: gamification?.streak_current || 0,
-      best: gamification?.streak_best || 0,
-      status: "active"
+      best: gamification?.streak_best || 0
     },
     stats: {
       totalSessions: stats?.sessions_completed || 0,
       totalTime: `${Math.floor((stats?.minutes_sung_total || 0) / 60)}h`,
-      totalSongs: stats?.songs_total || 0,
-      lastSession: stats?.last_session_at || null
-    },
-    records: {
-      bestStreak: gamification?.streak_best || 0,
-      biggestSession: stats?.largest_group_size || 0
+      totalSongs: stats?.songs_total || 0
     },
     missions: missions || [],
     badges: badges || []
