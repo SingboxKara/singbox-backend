@@ -1,5 +1,3 @@
-// backend/routes/adminRoutes.js
-
 import express from "express";
 
 import { supabase } from "../config/supabase.js";
@@ -32,6 +30,10 @@ import {
 } from "../services/reviewService.js";
 
 import { sendReservationEmail } from "../services/emailService.js";
+import {
+  processReservationGamification,
+  getUserGamificationSnapshot,
+} from "../services/gamificationService.js";
 
 const router = express.Router();
 
@@ -77,6 +79,7 @@ router.post("/api/admin/create-free-reservation", requireSupabaseAdmin, async (r
       start_minutes,
       persons,
       status,
+      user_id,
     } = req.body || {};
 
     const safeName = safeText(name, 120);
@@ -86,6 +89,7 @@ router.post("/api/admin/create-free-reservation", requireSupabaseAdmin, async (r
     const safeStartMinutes = Number(start_minutes);
     const safePersons = clampPersons(persons || 2);
     const safeStatus = safeText(status, 40) || "confirmed";
+    const safeUserId = safeText(user_id, 120) || null;
 
     if (!safeName || !safeEmail || !safeDate) {
       return res.status(400).json({
@@ -97,7 +101,11 @@ router.post("/api/admin/create-free-reservation", requireSupabaseAdmin, async (r
       return res.status(400).json({ error: "date invalide (YYYY-MM-DD attendu)" });
     }
 
-    if (!Number.isFinite(safeStartMinutes) || safeStartMinutes < 0 || safeStartMinutes >= 24 * 60) {
+    if (
+      !Number.isFinite(safeStartMinutes) ||
+      safeStartMinutes < 0 ||
+      safeStartMinutes >= 24 * 60
+    ) {
       return res.status(400).json({ error: "start_minutes invalide" });
     }
 
@@ -119,11 +127,14 @@ router.post("/api/admin/create-free-reservation", requireSupabaseAdmin, async (r
       });
     }
 
+    const startDate = new Date(startIso);
+    const endDate = new Date(endIso);
     const nowIso = new Date().toISOString();
 
     const reservationRow = {
       name: safeName,
       email: safeEmail,
+      user_id: safeUserId,
       datetime: startIso,
       created_at: nowIso,
       start_time: startIso,
@@ -132,6 +143,8 @@ router.post("/api/admin/create-free-reservation", requireSupabaseAdmin, async (r
       date: safeDate,
       end_time: endIso,
       payment_intent_id: null,
+      original_payment_intent_id: null,
+      latest_payment_intent_id: null,
       deposit_payment_intent_id: null,
       deposit_amount_cents: 0,
       deposit_status: null,
@@ -144,6 +157,14 @@ router.post("/api/admin/create-free-reservation", requireSupabaseAdmin, async (r
       promo_code: null,
       refunded_amount: 0,
       last_auto_charge_amount: 0,
+      checked_in_at: null,
+      completed_at: null,
+      cancelled_at: null,
+      refunded_at: null,
+      is_weekend: startDate.getDay() === 0 || startDate.getDay() === 6,
+      is_daytime: startDate.getHours() >= 12 && startDate.getHours() < 18,
+      is_group_session: safePersons >= 3,
+      session_minutes: Math.floor((endDate - startDate) / 60000),
       updated_at: nowIso,
     };
 
@@ -172,6 +193,7 @@ router.post("/api/admin/create-free-reservation", requireSupabaseAdmin, async (r
       target_id: insertedReservation.id,
       metadata: {
         email: insertedReservation.email || null,
+        user_id: insertedReservation.user_id || null,
         date: insertedReservation.date || null,
         start_time: insertedReservation.start_time || null,
         box_id: insertedReservation.box_id || null,
@@ -192,6 +214,107 @@ router.post("/api/admin/create-free-reservation", requireSupabaseAdmin, async (r
   }
 });
 
+router.post("/api/admin/mark-reservation-completed", requireSupabaseAdmin, async (req, res) => {
+  try {
+    if (!supabase) {
+      return res.status(500).json({ error: "Supabase non configuré" });
+    }
+
+    const { reservationId, completedAt, checkedInAt } = req.body || {};
+
+    if (!reservationId) {
+      return res.status(400).json({ error: "reservationId manquant" });
+    }
+
+    const reservation = await getReservationById(reservationId);
+    if (!reservation) {
+      return res.status(404).json({ error: "Réservation introuvable" });
+    }
+
+    const nowIso = new Date().toISOString();
+    const safeCheckedInAt =
+      checkedInAt || reservation.checked_in_at || reservation.start_time || nowIso;
+    const safeCompletedAt =
+      completedAt || reservation.completed_at || reservation.end_time || nowIso;
+
+    const startDate = new Date(reservation.start_time);
+    const endDate = new Date(reservation.end_time);
+
+    const updatePayload = {
+      status: "completed",
+      checked_in_at: safeCheckedInAt,
+      completed_at: safeCompletedAt,
+      is_weekend:
+        reservation.is_weekend ??
+        (startDate.getDay() === 0 || startDate.getDay() === 6),
+      is_daytime:
+        reservation.is_daytime ??
+        (startDate.getHours() >= 12 && startDate.getHours() < 18),
+      is_group_session:
+        reservation.is_group_session ??
+        Number(reservation.persons || 0) >= 3,
+      session_minutes:
+        reservation.session_minutes ??
+        Math.floor((endDate - startDate) / 60000),
+      updated_at: nowIso,
+    };
+
+    const { data: updatedReservation, error: updateError } = await supabase
+      .from("reservations")
+      .update(updatePayload)
+      .eq("id", reservationId)
+      .select()
+      .single();
+
+    if (updateError || !updatedReservation) {
+      console.error("Erreur mark reservation completed :", updateError);
+      return res.status(500).json({
+        error: "Impossible de marquer la réservation comme complétée",
+      });
+    }
+
+    let gamification = null;
+    try {
+      gamification = await processReservationGamification(updatedReservation.id);
+    } catch (gErr) {
+      console.error("Erreur processReservationGamification :", gErr);
+    }
+
+    if (!gamification && updatedReservation.user_id) {
+      try {
+        gamification = await getUserGamificationSnapshot(updatedReservation.user_id);
+      } catch (snapshotErr) {
+        console.error("Erreur snapshot après completed :", snapshotErr);
+      }
+    }
+
+    await writeAdminAuditLog(req, {
+      action: "mark_reservation_completed",
+      target_table: "reservations",
+      target_id: updatedReservation.id,
+      metadata: {
+        email: updatedReservation.email || null,
+        user_id: updatedReservation.user_id || null,
+        previous_status: reservation.status || null,
+        new_status: updatedReservation.status || null,
+        checked_in_at: updatedReservation.checked_in_at || null,
+        completed_at: updatedReservation.completed_at || null,
+      },
+    });
+
+    return res.json({
+      success: true,
+      reservation: updatedReservation,
+      gamification,
+    });
+  } catch (e) {
+    console.error("Erreur /api/admin/mark-reservation-completed :", e);
+    return res.status(500).json({
+      error: "Erreur serveur lors de la validation de la réservation",
+    });
+  }
+});
+
 router.post("/api/admin/send-review-request", requireSupabaseAdmin, async (req, res) => {
   try {
     if (!supabase) {
@@ -208,9 +331,9 @@ router.post("/api/admin/send-review-request", requireSupabaseAdmin, async (req, 
       return res.status(404).json({ error: "Réservation introuvable" });
     }
 
-    if (!isReservationStatusConfirmed(reservation.status)) {
+    if (!isReservationStatusConfirmed(reservation.status) && reservation.status !== "completed") {
       return res.status(400).json({
-        error: "La réservation doit être confirmée pour envoyer une demande d’avis",
+        error: "La réservation doit être confirmée ou complétée pour envoyer une demande d’avis",
       });
     }
 
@@ -269,7 +392,9 @@ router.all("/api/admin/send-completed-review-requests", requireAdminOrCron, asyn
     }
 
     const confirmedFinishedReservations = (reservations || []).filter(
-      (row) => isReservationStatusConfirmed(row.status) && isReservationFinished(row)
+      (row) =>
+        (isReservationStatusConfirmed(row.status) || row.status === "completed") &&
+        isReservationFinished(row)
     );
 
     const results = [];
