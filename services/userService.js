@@ -37,13 +37,13 @@ export function getUserEmailOrThrow(user) {
 
 export async function getUserById(userId) {
   if (!supabase) throw new Error("Supabase non configuré");
+
   const { data, error } = await supabase
     .from("users")
-    .select(
-      "id,email,points,stripe_customer_id,default_payment_method_id,card_brand,card_last4,card_exp_month,card_exp_year"
-    )
+    .select("*")
     .eq("id", userId)
     .single();
+
   if (error) throw error;
   return data;
 }
@@ -64,24 +64,25 @@ export async function getAuthenticatedUserById(userId) {
   return data;
 }
 
+// 🔥 FIX ICI
 export async function getReservationOwnedByUser(reservationId, userId, userEmail) {
-  // 1. nouveau système
-  let { data } = await supabaseAdmin
-    .from('reservations')
-    .select('*')
-    .eq('id', reservationId)
-    .eq('user_id', userId)
-    .single();
+  // nouveau système
+  let { data } = await supabase
+    .from("reservations")
+    .select("*")
+    .eq("id", reservationId)
+    .eq("user_id", userId)
+    .maybeSingle();
 
   if (data) return data;
 
-  // 2. fallback ancien système
-  const fallback = await supabaseAdmin
-    .from('reservations')
-    .select('*')
-    .eq('id', reservationId)
-    .eq('email', userEmail)
-    .single();
+  // fallback email
+  const { data: fallback } = await supabase
+    .from("reservations")
+    .select("*")
+    .eq("id", reservationId)
+    .eq("email", userEmail)
+    .maybeSingle();
 
-  return fallback.data;
+  return fallback;
 }

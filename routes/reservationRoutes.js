@@ -1140,39 +1140,35 @@ router.post("/api/confirm-reservation", async (req, res) => {
     const nowIso = new Date().toISOString();
 
 const rows = pricing.normalizedItems.map((it) => {
-  const start = new Date(it.start);
-  const end = new Date(it.end);
+  const start = new Date(it.start_time);
+  const end = new Date(it.end_time);
 
   const hour = start.getHours();
   const day = start.getDay();
 
   return {
-    name,
-    email,
+    name: fullName,
+    email: normalizedCustomerEmail,
     user_id: userIdFromToken || null,
 
     datetime: start,
     start_time: start,
     end_time: end,
-    date: start.toISOString().slice(0, 10),
+    date: it.date,
 
-    box_id: it.boxId,
-    status: 'confirmed',
+    box_id: it.box_id,
+    status: "confirmed",
 
-    persons: personsForInsert,
-    billable_persons: billableForInsert,
-    montant: total,
+    persons: it.persons,
+    billable_persons: Math.max(it.persons, 2),
+    montant: totalCashDue,
 
-    free_session: !!free_session,
-    loyalty_used: !!loyalty_used,
-    points_spent: pointsSpent,
+    free_session: totalCashDue <= 0,
+    loyalty_used: !!loyaltyUsed,
+    points_spent: loyaltyUsed ? LOYALTY_POINTS_COST : 0,
 
-    payment_intent_id: paymentIntent.id,
-    deposit_payment_intent_id: depositPaymentIntentId,
-    deposit_amount_cents: depositAmountCents,
-    deposit_status: depositStatus,
+    payment_intent_id: paymentIntentId || null,
 
-    // 🔥 NOUVEAU
     checked_in_at: null,
     completed_at: null,
     cancelled_at: null,
@@ -1180,8 +1176,8 @@ const rows = pricing.normalizedItems.map((it) => {
 
     is_weekend: day === 0 || day === 6,
     is_daytime: hour >= 12 && hour < 18,
-    is_group_session: personsForInsert >= 3,
-    session_minutes: Math.floor((end - start) / 60000)
+    is_group_session: it.persons >= 3,
+    session_minutes: Math.floor((end - start) / 60000),
   };
 });
 

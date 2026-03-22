@@ -6,6 +6,7 @@ import { supabase } from "../config/supabase.js";
 import { authMiddleware } from "../middlewares/auth.js";
 import { updateUserProfileInUsersTable } from "../services/userService.js";
 import { LOYALTY_POINTS_COST } from "../constants/booking.js";
+import { getUserGamificationSnapshot } from "../services/gamificationService.js";
 
 const router = express.Router();
 
@@ -75,12 +76,6 @@ router.post("/api/me", authMiddleware, async (req, res) => {
   }
 });
 
-/**
- * IMPORTANT :
- * On supprime la possibilité d'ajouter des points librement depuis le front.
- * Les points doivent être crédités uniquement par la logique serveur métier
- * (réservation payée, fidélité, admin contrôlé, etc.)
- */
 router.post("/api/add-points", authMiddleware, async (_req, res) => {
   return res.status(403).json({
     error: "Action non autorisée",
@@ -130,18 +125,18 @@ router.post("/api/use-loyalty", authMiddleware, async (req, res) => {
   }
 });
 
-import { getUserGamificationSnapshot } from '../services/gamificationService.js';
 
-router.get('/account/gamification', authMiddleware, async (req, res) => {
+// 🔥 NOUVEL ENDPOINT (propre, sans casser l’existant)
+router.get("/api/account/gamification", authMiddleware, async (req, res) => {
   try {
-    const userId = req.user.id;
+    const userId = req.userId; // ✅ FIX IMPORTANT
 
     const data = await getUserGamificationSnapshot(userId);
 
     res.json(data);
   } catch (err) {
-    console.error('gamification error', err);
-    res.status(500).json({ error: 'gamification_error' });
+    console.error("gamification error", err);
+    res.status(500).json({ error: "Erreur serveur interne" });
   }
 });
 
