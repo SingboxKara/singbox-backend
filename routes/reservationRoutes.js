@@ -46,10 +46,13 @@ import {
   attemptAutomaticRefundAcrossPaymentIntents,
 } from "../services/stripeCustomerService.js";
 
+import {
+  getUserGamificationSnapshot,
+  processReservationGamification,
+} from "../services/gamificationService.js";
+
 import { clampPersons, getNumericBoxId } from "../utils/validators.js";
-
 import { parseDateOrNull, formatDateToYYYYMMDD } from "../utils/dates.js";
-
 import { roundMoney } from "../utils/formatters.js";
 import {
   MODIFICATION_DEADLINE_HOURS,
@@ -532,6 +535,10 @@ async function runReservationModification({
         (deltaAmount < 0 ? Math.abs(deltaAmount) : 0)
     ),
     last_auto_charge_amount: deltaAmount > 0 ? deltaAmount : 0,
+    is_weekend: targetStart.getDay() === 0 || targetStart.getDay() === 6,
+    is_daytime: targetStart.getHours() >= 12 && targetStart.getHours() < 18,
+    is_group_session: safePersons >= 3,
+    session_minutes: Math.floor((targetEnd - targetStart) / 60000),
     updated_at: new Date().toISOString(),
   });
 
@@ -663,6 +670,7 @@ async function runReservationRefund({
 
   const updatedReservation = await updateReservationById(reservation.id, {
     status: "cancelled",
+    cancelled_at: new Date().toISOString(),
     refunded_amount: roundMoney(
       Number(reservation.refunded_amount || 0) + cashAmountToRefund
     ),
@@ -772,7 +780,7 @@ router.get("/api/my-reservations", authMiddleware, async (req, res) => {
       .select(
         "id, name, email, date, start_time, end_time, box_id, persons, status, montant, free_session, created_at"
       )
-      .eq("email", user.email)
+      .or(`user_id.eq.${req.userId},email.eq.${user.email}`)
       .order("start_time", { ascending: false });
 
     if (error) {
@@ -1137,49 +1145,53 @@ router.post("/api/confirm-reservation", async (req, res) => {
       );
     }
 
-    const nowIso = new Date().toISOString();
+    const rows = pricing.normalizedItems.map((it) => {
+      const start = new Date(it.start_time);
+      const end = new Date(it.end_time);
 
-const rows = pricing.normalizedItems.map((it) => {
-  const start = new Date(it.start_time);
-  const end = new Date(it.end_time);
+      const hour = start.getHours();
+      const day = start.getDay();
 
-  const hour = start.getHours();
-  const day = start.getDay();
+      return {
+        name: fullName,
+        email: normalizedCustomerEmail,
+        user_id: userIdFromToken || null,
 
-  return {
-    name: fullName,
-    email: normalizedCustomerEmail,
-    user_id: userIdFromToken || null,
+        datetime: start.toISOString(),
+        start_time: start.toISOString(),
+        end_time: end.toISOString(),
+        date: it.date,
 
-    datetime: start,
-    start_time: start,
-    end_time: end,
-    date: it.date,
+        box_id: it.box_id,
+        status: "confirmed",
 
-    box_id: it.box_id,
-    status: "confirmed",
+        persons: it.persons,
+        billable_persons: Math.max(it.persons, 2),
+        montant: totalCashDue,
 
-    persons: it.persons,
-    billable_persons: Math.max(it.persons, 2),
-    montant: totalCashDue,
+        free_session: totalCashDue <= 0,
+        loyalty_used: !!loyaltyUsed,
+        points_spent: loyaltyUsed ? LOYALTY_POINTS_COST : 0,
 
-    free_session: totalCashDue <= 0,
-    loyalty_used: !!loyaltyUsed,
-    points_spent: loyaltyUsed ? LOYALTY_POINTS_COST : 0,
+        payment_intent_id: paymentIntentId || null,
+        original_payment_intent_id: paymentIntentId || null,
+        latest_payment_intent_id: paymentIntentId || null,
+        deposit_payment_intent_id: null,
+        deposit_amount_cents: null,
+        deposit_status: null,
 
-    payment_intent_id: paymentIntentId || null,
+        checked_in_at: null,
+        completed_at: null,
+        cancelled_at: null,
+        refunded_at: null,
 
-    checked_in_at: null,
-    completed_at: null,
-    cancelled_at: null,
-    refunded_at: null,
-
-    is_weekend: day === 0 || day === 6,
-    is_daytime: hour >= 12 && hour < 18,
-    is_group_session: it.persons >= 3,
-    session_minutes: Math.floor((end - start) / 60000),
-  };
-});
+        is_weekend: day === 0 || day === 6,
+        is_daytime: hour >= 12 && hour < 18,
+        is_group_session: it.persons >= 3,
+        session_minutes: Math.floor((end - start) / 60000),
+        updated_at: new Date().toISOString(),
+      };
+    });
 
     for (const row of rows) {
       const hasConflict = await hasReservationConflict({
@@ -1244,6 +1256,14 @@ const rows = pricing.normalizedItems.map((it) => {
     }
 
     try {
+      await Promise.allSettled(
+        insertedReservations.map((row) => processReservationGamification(row.id))
+      );
+    } catch (gErr) {
+      console.error("Erreur gamification confirm-reservation :", gErr);
+    }
+
+    try {
       const isActuallyFree = totalCashDue <= 0;
       if (userIdFromToken && !isActuallyFree) {
         const pointsToAdd = panier.length * 10;
@@ -1303,6 +1323,15 @@ const rows = pricing.normalizedItems.map((it) => {
       console.error("Erreur promo usages :", promoErr);
     }
 
+    let gamification = null;
+    if (userIdFromToken) {
+      try {
+        gamification = await getUserGamificationSnapshot(userIdFromToken);
+      } catch (e) {
+        console.error("Erreur snapshot gamification après réservation :", e);
+      }
+    }
+
     return res.json({
       status: "ok",
       reservations: insertedReservations,
@@ -1324,6 +1353,7 @@ const rows = pricing.normalizedItems.map((it) => {
             totalAfter: totalCashDue,
           }
         : null,
+      gamification,
     });
   } catch (err) {
     if (loyaltyPointsDebited && userIdFromToken && loyaltyPointsDebitedAmount > 0) {

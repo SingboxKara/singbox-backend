@@ -1,5 +1,3 @@
-// backend/routes/userRoutes.js
-
 import express from "express";
 
 import { supabase } from "../config/supabase.js";
@@ -125,18 +123,13 @@ router.post("/api/use-loyalty", authMiddleware, async (req, res) => {
   }
 });
 
-
-// 🔥 NOUVEL ENDPOINT (propre, sans casser l’existant)
 router.get("/api/account/gamification", authMiddleware, async (req, res) => {
   try {
-    const userId = req.userId; // ✅ FIX IMPORTANT
-
-    const data = await getUserGamificationSnapshot(userId);
-
-    res.json(data);
+    const data = await getUserGamificationSnapshot(req.userId);
+    return res.json(data);
   } catch (err) {
     console.error("gamification error", err);
-    res.status(500).json({ error: "Erreur serveur interne" });
+    return res.status(500).json({ error: "Erreur serveur interne" });
   }
 });
 

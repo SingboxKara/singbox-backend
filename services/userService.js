@@ -1,5 +1,3 @@
-// backend/services/userService.js
-
 import { supabase } from "../config/supabase.js";
 import {
   safeText,
@@ -37,13 +35,13 @@ export function getUserEmailOrThrow(user) {
 
 export async function getUserById(userId) {
   if (!supabase) throw new Error("Supabase non configuré");
-
   const { data, error } = await supabase
     .from("users")
-    .select("*")
+    .select(
+      "id,email,points,stripe_customer_id,default_payment_method_id,card_brand,card_last4,card_exp_month,card_exp_year"
+    )
     .eq("id", userId)
     .single();
-
   if (error) throw error;
   return data;
 }
@@ -64,24 +62,37 @@ export async function getAuthenticatedUserById(userId) {
   return data;
 }
 
-// 🔥 FIX ICI
+async function resolveUserEmail(userId, userEmail) {
+  if (userEmail) return String(userEmail).trim().toLowerCase();
+  if (!userId || !supabase) return null;
+
+  const { data } = await supabase
+    .from("users")
+    .select("email")
+    .eq("id", userId)
+    .maybeSingle();
+
+  return data?.email ? String(data.email).trim().toLowerCase() : null;
+}
+
 export async function getReservationOwnedByUser(reservationId, userId, userEmail) {
-  // nouveau système
-  let { data } = await supabase
+  const { data: direct } = await supabase
     .from("reservations")
     .select("*")
     .eq("id", reservationId)
     .eq("user_id", userId)
     .maybeSingle();
 
-  if (data) return data;
+  if (direct) return direct;
 
-  // fallback email
+  const safeEmail = await resolveUserEmail(userId, userEmail);
+  if (!safeEmail) return null;
+
   const { data: fallback } = await supabase
     .from("reservations")
     .select("*")
     .eq("id", reservationId)
-    .eq("email", userEmail)
+    .eq("email", safeEmail)
     .maybeSingle();
 
   return fallback;
