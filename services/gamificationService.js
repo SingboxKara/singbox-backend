@@ -1,4 +1,4 @@
-import { supabaseAdmin } from '../config/supabase.js';
+import { supabase } from '../config/supabase.js';
 
 function computeLevel(xp) {
   const level = Math.min(100, Math.floor(xp / 100) + 1);
