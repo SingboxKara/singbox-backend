@@ -6,6 +6,7 @@ import { stripe } from "../config/stripe.js";
 import { supabase } from "../config/supabase.js";
 import { authMiddleware, optionalAuthMiddleware } from "../middlewares/auth.js";
 import { authMiddleware as requireAuth } from "../middlewares/auth.js";
+import { requireSupabaseAdmin } from "../middlewares/admin.js";
 import {
   ensureStripeCustomer,
   saveDefaultCardToUsersTable,
@@ -24,6 +25,10 @@ import { updateReservationById } from "../services/reservationService.js";
 import { DEPOSIT_AMOUNT_EUR } from "../constants/booking.js";
 
 const router = express.Router();
+
+function normalizeEmail(email) {
+  return String(email || "").trim().toLowerCase();
+}
 
 router.post("/api/create-setup-intent", requireAuth, async (req, res) => {
   try {
@@ -182,6 +187,11 @@ router.post("/api/create-payment-intent", optionalAuthMiddleware, async (req, re
       return res.status(400).json({ error: "Panier vide" });
     }
 
+    const customerEmail = normalizeEmail(customer?.email);
+    if (!customerEmail) {
+      return res.status(400).json({ error: "Email client requis" });
+    }
+
     const pricing = computeCartPricing(panier, { loyaltyUsed: !!loyaltyUsed });
     const theoreticalTotal = pricing.totalBeforeDiscount;
     const loyaltyDiscount = pricing.loyaltyDiscount;
@@ -206,8 +216,11 @@ router.post("/api/create-payment-intent", optionalAuthMiddleware, async (req, re
       Number.isFinite(finalAmountCents)
     ) {
       const frontTotal = finalAmountCents / 100;
+
       if (Math.abs(frontTotal - totalAmountEur) > 0.01) {
-        console.warn("⚠️ Écart entre total front et back :", frontTotal, totalAmountEur);
+        return res.status(400).json({
+          error: "Montant invalide (désynchronisation front/back)",
+        });
       }
     }
 
@@ -269,7 +282,7 @@ router.post("/api/create-payment-intent", optionalAuthMiddleware, async (req, re
           payment_method_types: ["card"],
           metadata: {
             panier: JSON.stringify(pricing.normalizedItems),
-            customer_email: customer?.email || "",
+            customer_email: customerEmail,
             customer_name: fullName,
             promo_code: promoCode || "",
             total_before_discount: String(theoreticalTotal),
@@ -307,7 +320,7 @@ router.post("/api/create-payment-intent", optionalAuthMiddleware, async (req, re
       payment_method_types: ["card"],
       metadata: {
         panier: JSON.stringify(pricing.normalizedItems),
-        customer_email: customer?.email || "",
+        customer_email: customerEmail,
         customer_name: (customer?.prenom || "") + " " + (customer?.nom || ""),
         promo_code: promoCode || "",
         total_before_discount: String(theoreticalTotal),
@@ -342,6 +355,11 @@ router.post("/api/create-deposit-intent", optionalAuthMiddleware, async (req, re
 
     const { reservationId, customer, useSavedPaymentMethod, paymentMethodId } = req.body || {};
     const amountInCents = Math.round(DEPOSIT_AMOUNT_EUR * 100);
+
+    const customerEmail = normalizeEmail(customer?.email);
+    if (!customerEmail) {
+      return res.status(400).json({ error: "Email client requis" });
+    }
 
     const fullName =
       (customer?.prenom || "") + (customer?.prenom ? " " : "") + (customer?.nom || "");
@@ -381,7 +399,7 @@ router.post("/api/create-deposit-intent", optionalAuthMiddleware, async (req, re
         metadata: {
           type: "singbox_deposit",
           reservation_id: reservationId || "",
-          customer_email: customer?.email || "",
+          customer_email: customerEmail,
           customer_name: fullName,
           saved_card: "true",
         },
@@ -411,7 +429,7 @@ router.post("/api/create-deposit-intent", optionalAuthMiddleware, async (req, re
       metadata: {
         type: "singbox_deposit",
         reservation_id: reservationId || "",
-        customer_email: customer?.email || "",
+        customer_email: customerEmail,
         customer_name: fullName,
       },
     });
@@ -437,7 +455,7 @@ router.post("/api/create-deposit-intent", optionalAuthMiddleware, async (req, re
   }
 });
 
-router.post("/api/capture-deposit", async (req, res) => {
+router.post("/api/capture-deposit", requireSupabaseAdmin, async (req, res) => {
   try {
     if (!stripe) {
       return res.status(500).json({ error: "Stripe non configuré" });
@@ -470,7 +488,7 @@ router.post("/api/capture-deposit", async (req, res) => {
   }
 });
 
-router.post("/api/cancel-deposit", async (req, res) => {
+router.post("/api/cancel-deposit", requireSupabaseAdmin, async (req, res) => {
   try {
     if (!stripe) {
       return res.status(500).json({ error: "Stripe non configuré" });

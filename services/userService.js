@@ -64,22 +64,24 @@ export async function getAuthenticatedUserById(userId) {
   return data;
 }
 
-export async function getReservationOwnedByUser(reservationId, userId) {
-  if (!supabase) throw new Error("Supabase non configuré");
-
-  const user = await getAuthenticatedUserById(userId);
-  const email = getUserEmailOrThrow(user);
-
-  const { data, error } = await supabase
-    .from("reservations")
-    .select("*")
-    .eq("id", reservationId)
-    .eq("email", email)
+export async function getReservationOwnedByUser(reservationId, userId, userEmail) {
+  // 1. nouveau système
+  let { data } = await supabaseAdmin
+    .from('reservations')
+    .select('*')
+    .eq('id', reservationId)
+    .eq('user_id', userId)
     .single();
 
-  if (error || !data) {
-    return null;
-  }
+  if (data) return data;
 
-  return data;
+  // 2. fallback ancien système
+  const fallback = await supabaseAdmin
+    .from('reservations')
+    .select('*')
+    .eq('id', reservationId)
+    .eq('email', userEmail)
+    .single();
+
+  return fallback.data;
 }

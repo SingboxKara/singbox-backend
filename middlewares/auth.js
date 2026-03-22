@@ -3,22 +3,46 @@
 import jwt from "jsonwebtoken";
 import { JWT_SECRET } from "../config/env.js";
 
+function extractBearerToken(req) {
+  const authHeader = req.headers.authorization || "";
+
+  if (!authHeader.startsWith("Bearer ")) {
+    return null;
+  }
+
+  return authHeader.replace("Bearer ", "").trim();
+}
+
+function verifyUserToken(token) {
+  if (!JWT_SECRET) {
+    throw new Error("JWT_SECRET manquant");
+  }
+
+  const decoded = jwt.verify(token, JWT_SECRET, {
+    algorithms: ["HS256"],
+  });
+
+  if (!decoded || !decoded.userId) {
+    throw new Error("Payload token invalide");
+  }
+
+  return decoded;
+}
+
 export function authMiddleware(req, res, next) {
   try {
-    const authHeader = req.headers.authorization || "";
+    const token = extractBearerToken(req);
 
-    if (!authHeader.startsWith("Bearer ")) {
+    if (!token) {
       return res.status(401).json({ error: "Token manquant" });
     }
 
-    const token = authHeader.replace("Bearer ", "").trim();
-
-    const decoded = jwt.verify(token, JWT_SECRET);
+    const decoded = verifyUserToken(token);
 
     req.user = decoded;
     req.userId = decoded.userId;
 
-    next();
+    return next();
   } catch (error) {
     console.error("❌ Auth error:", error.message);
     return res.status(401).json({ error: "Token invalide" });
@@ -27,20 +51,18 @@ export function authMiddleware(req, res, next) {
 
 export function optionalAuthMiddleware(req, res, next) {
   try {
-    const authHeader = req.headers.authorization || "";
+    const token = extractBearerToken(req);
 
-    if (!authHeader.startsWith("Bearer ")) {
+    if (!token) {
       return next();
     }
 
-    const token = authHeader.replace("Bearer ", "").trim();
-
-    const decoded = jwt.verify(token, JWT_SECRET);
+    const decoded = verifyUserToken(token);
 
     req.user = decoded;
     req.userId = decoded.userId;
 
-    next();
+    return next();
   } catch (_error) {
     return next();
   }

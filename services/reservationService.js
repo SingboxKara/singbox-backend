@@ -1,5 +1,3 @@
-// backend/services/reservationService.js
-
 import crypto from "crypto";
 
 import { supabase } from "../config/supabase.js";
@@ -27,6 +25,10 @@ function assertSupabaseConfigured() {
 
 function isValidReservationId(reservationId) {
   return typeof reservationId === "string" || typeof reservationId === "number";
+}
+
+function normalizeEmail(email) {
+  return String(email || "").trim().toLowerCase();
 }
 
 function isLikelyGuestToken(token) {
@@ -178,11 +180,62 @@ export async function getReservationByGuestToken(token) {
     ? new Date(data.guest_manage_token_expires_at)
     : null;
 
-  if (expiresAt && Number.isFinite(expiresAt.getTime()) && expiresAt.getTime() < Date.now()) {
+  if (
+    expiresAt &&
+    Number.isFinite(expiresAt.getTime()) &&
+    expiresAt.getTime() < Date.now()
+  ) {
     return null;
   }
 
   return data;
+}
+
+export async function isPaymentIntentAlreadyUsed(paymentIntentId) {
+  assertSupabaseConfigured();
+
+  const safePaymentIntentId = String(paymentIntentId || "").trim();
+  if (!safePaymentIntentId) return false;
+
+  const { data, error } = await supabase
+    .from("reservations")
+    .select("id")
+    .or(
+      [
+        `payment_intent_id.eq.${safePaymentIntentId}`,
+        `latest_payment_intent_id.eq.${safePaymentIntentId}`,
+        `original_payment_intent_id.eq.${safePaymentIntentId}`,
+        `deposit_payment_intent_id.eq.${safePaymentIntentId}`,
+      ].join(",")
+    )
+    .limit(1);
+
+  if (error) throw error;
+  return Array.isArray(data) && data.length > 0;
+}
+
+export async function getReservationByPaymentIntentId(paymentIntentId) {
+  assertSupabaseConfigured();
+
+  const safePaymentIntentId = String(paymentIntentId || "").trim();
+  if (!safePaymentIntentId) return null;
+
+  const { data, error } = await supabase
+    .from("reservations")
+    .select("*")
+    .or(
+      [
+        `payment_intent_id.eq.${safePaymentIntentId}`,
+        `latest_payment_intent_id.eq.${safePaymentIntentId}`,
+        `original_payment_intent_id.eq.${safePaymentIntentId}`,
+        `deposit_payment_intent_id.eq.${safePaymentIntentId}`,
+      ].join(",")
+    )
+    .limit(1)
+    .maybeSingle();
+
+  if (error) throw error;
+  return data || null;
 }
 
 export async function updateReservationById(reservationId, payload) {
@@ -196,9 +249,17 @@ export async function updateReservationById(reservationId, payload) {
     throw new Error("payload de réservation invalide");
   }
 
+  const safePayload = { ...payload };
+
+  if ("email" in safePayload) {
+    safePayload.email = normalizeEmail(safePayload.email);
+  }
+
+  safePayload.updated_at = new Date().toISOString();
+
   const { data, error } = await supabase
     .from("reservations")
-    .update(payload)
+    .update(safePayload)
     .eq("id", reservationId)
     .select()
     .single();

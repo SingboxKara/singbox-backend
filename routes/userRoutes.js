@@ -23,8 +23,8 @@ router.get("/api/me", authMiddleware, async (req, res) => {
       .eq("id", req.userId)
       .single();
 
-    if (userErr) {
-      return res.status(400).json({ error: userErr.message });
+    if (userErr || !user) {
+      return res.status(400).json({ error: "Utilisateur introuvable" });
     }
 
     return res.json({
@@ -75,33 +75,16 @@ router.post("/api/me", authMiddleware, async (req, res) => {
   }
 });
 
-router.post("/api/add-points", authMiddleware, async (req, res) => {
-  try {
-    const { points } = req.body || {};
-
-    if (!points) {
-      return res.status(400).json({ error: "Nombre de points manquant" });
-    }
-
-    if (!supabase) {
-      return res.status(500).json({ error: "Supabase non configuré" });
-    }
-
-    const { error } = await supabase.rpc("increment_points", {
-      user_id: req.userId,
-      points_to_add: points,
-    });
-
-    if (error) {
-      console.error(error);
-      return res.status(400).json({ error: error.message });
-    }
-
-    return res.json({ message: "Points ajoutés !" });
-  } catch (err) {
-    console.error("Erreur add-points :", err);
-    return res.status(500).json({ error: "Erreur serveur" });
-  }
+/**
+ * IMPORTANT :
+ * On supprime la possibilité d'ajouter des points librement depuis le front.
+ * Les points doivent être crédités uniquement par la logique serveur métier
+ * (réservation payée, fidélité, admin contrôlé, etc.)
+ */
+router.post("/api/add-points", authMiddleware, async (_req, res) => {
+  return res.status(403).json({
+    error: "Action non autorisée",
+  });
 });
 
 router.post("/api/use-loyalty", authMiddleware, async (req, res) => {
@@ -120,14 +103,14 @@ router.post("/api/use-loyalty", authMiddleware, async (req, res) => {
       return res.status(400).json({ error: "Utilisateur introuvable" });
     }
 
-    if (user.points < LOYALTY_POINTS_COST) {
+    if (Number(user.points || 0) < LOYALTY_POINTS_COST) {
       return res.status(400).json({ error: "Pas assez de points" });
     }
 
     const { error: updateErr } = await supabase
       .from("users")
       .update({
-        points: user.points - LOYALTY_POINTS_COST,
+        points: Number(user.points) - LOYALTY_POINTS_COST,
         updated_at: new Date().toISOString(),
       })
       .eq("id", req.userId);
@@ -144,6 +127,21 @@ router.post("/api/use-loyalty", authMiddleware, async (req, res) => {
   } catch (e) {
     console.error("Erreur /api/use-loyalty :", e);
     return res.status(500).json({ error: "Erreur serveur" });
+  }
+});
+
+import { getUserGamificationSnapshot } from '../services/gamificationService.js';
+
+router.get('/account/gamification', authMiddleware, async (req, res) => {
+  try {
+    const userId = req.user.id;
+
+    const data = await getUserGamificationSnapshot(userId);
+
+    res.json(data);
+  } catch (err) {
+    console.error('gamification error', err);
+    res.status(500).json({ error: 'gamification_error' });
   }
 });
 

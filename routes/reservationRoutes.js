@@ -1,5 +1,3 @@
-// backend/routes/reservationRoutes.js
-
 import express from "express";
 import jwt from "jsonwebtoken";
 
@@ -26,6 +24,8 @@ import {
   getReservationByGuestToken,
   generateGuestManageToken,
   computeGuestManageTokenExpiresAt,
+  normalizeReservationStatus,
+  isPaymentIntentAlreadyUsed,
 } from "../services/reservationService.js";
 
 import {
@@ -46,15 +46,9 @@ import {
   attemptAutomaticRefundAcrossPaymentIntents,
 } from "../services/stripeCustomerService.js";
 
-import {
-  clampPersons,
-  getNumericBoxId,
-} from "../utils/validators.js";
+import { clampPersons, getNumericBoxId } from "../utils/validators.js";
 
-import {
-  parseDateOrNull,
-  formatDateToYYYYMMDD,
-} from "../utils/dates.js";
+import { parseDateOrNull, formatDateToYYYYMMDD } from "../utils/dates.js";
 
 import { roundMoney } from "../utils/formatters.js";
 import {
@@ -71,6 +65,10 @@ import {
 import { validatePromoCode } from "../services/promoService.js";
 
 const router = express.Router();
+
+function normalizeEmail(email) {
+  return String(email || "").trim().toLowerCase();
+}
 
 function buildGuestReservationResponse(reservation) {
   return {
@@ -95,6 +93,57 @@ function buildGuestReservationResponse(reservation) {
       canRefund: isWithinRefundWindow(reservation.start_time),
     },
   };
+}
+
+function buildFullName(customer) {
+  const prenom = String(customer?.prenom || "").trim();
+  const nom = String(customer?.nom || "").trim();
+  return `${prenom}${prenom && nom ? " " : ""}${nom}`.trim();
+}
+
+async function isFirstReservationForEmail(email) {
+  const safeEmail = normalizeEmail(email);
+  if (!safeEmail || !supabase) return null;
+
+  const { data, error } = await supabase
+    .from("reservations")
+    .select("id, status")
+    .eq("email", safeEmail)
+    .limit(20);
+
+  if (error) {
+    console.error("Erreur vérification première réservation :", error);
+    return null;
+  }
+
+  const activeReservations = (data || []).filter((row) => {
+    const status = normalizeReservationStatus(row.status);
+    return ![
+      "cancelled",
+      "annulee",
+      "annulée",
+      "refunded",
+      "remboursee",
+      "remboursée",
+    ].includes(status);
+  });
+
+  return activeReservations.length === 0;
+}
+
+async function invalidateGuestManageToken(reservationId) {
+  if (!supabase || !reservationId) return;
+
+  try {
+    await updateReservationById(reservationId, {
+      guest_manage_token: generateGuestManageToken(),
+      guest_manage_token_created_at: new Date().toISOString(),
+      guest_manage_token_expires_at: new Date().toISOString(),
+      updated_at: new Date().toISOString(),
+    });
+  } catch (e) {
+    console.error("Erreur invalidation guest_manage_token :", e);
+  }
 }
 
 async function createPendingModificationRequest({
@@ -136,7 +185,10 @@ async function createPendingModificationRequest({
     .single();
 
   if (error || !modReq) {
-    console.error("Erreur createPendingModificationRequest :", error || "insert vide");
+    console.error(
+      "Erreur createPendingModificationRequest :",
+      error || "insert vide"
+    );
     return null;
   }
 
@@ -476,7 +528,8 @@ async function runReservationModification({
       reservation.payment_intent_id ||
       null,
     refunded_amount: roundMoney(
-      Number(reservation.refunded_amount || 0) + (deltaAmount < 0 ? Math.abs(deltaAmount) : 0)
+      Number(reservation.refunded_amount || 0) +
+        (deltaAmount < 0 ? Math.abs(deltaAmount) : 0)
     ),
     last_auto_charge_amount: deltaAmount > 0 ? deltaAmount : 0,
     updated_at: new Date().toISOString(),
@@ -588,9 +641,19 @@ async function runReservationRefund({
       cashAmountToRefund
     );
 
-    if (refundResult.success) {
-      stripeRefundDone = true;
+    if (!refundResult.success) {
+      return {
+        ok: false,
+        status: 500,
+        body: {
+          error:
+            refundResult.reason ||
+            "Impossible d’effectuer automatiquement le remboursement Stripe.",
+        },
+      };
     }
+
+    stripeRefundDone = true;
   }
 
   if (loyaltyPointsToRefund > 0 && userId) {
@@ -657,7 +720,9 @@ router.post("/api/verify-cart", async (req, res) => {
       if (hasConflict) {
         return res
           .status(409)
-          .send(`Le créneau ${times.date} pour la box ${numericBoxId} n'est plus disponible.`);
+          .send(
+            `Le créneau ${times.date} pour la box ${numericBoxId} n'est plus disponible.`
+          );
       }
 
       const persons = clampPersons(slot.persons || slot.nb_personnes || 2);
@@ -704,13 +769,17 @@ router.get("/api/my-reservations", authMiddleware, async (req, res) => {
 
     const { data: reservations, error } = await supabase
       .from("reservations")
-      .select("id, name, email, date, start_time, end_time, box_id, persons, status, montant, free_session, created_at")
+      .select(
+        "id, name, email, date, start_time, end_time, box_id, persons, status, montant, free_session, created_at"
+      )
       .eq("email", user.email)
       .order("start_time", { ascending: false });
 
     if (error) {
       console.error("Erreur Supabase my-reservations :", error);
-      return res.status(500).json({ error: "Erreur en chargeant les réservations" });
+      return res
+        .status(500)
+        .json({ error: "Erreur en chargeant les réservations" });
     }
 
     return res.json({ reservations: reservations || [] });
@@ -885,7 +954,9 @@ router.post("/api/modify-reservation", authMiddleware, async (req, res) => {
     return res.status(result.status).json(result.body);
   } catch (e) {
     console.error("Erreur /api/modify-reservation :", e);
-    return res.status(500).json({ error: "Erreur serveur lors de la modification" });
+    return res
+      .status(500)
+      .json({ error: "Erreur serveur lors de la modification" });
   }
 });
 
@@ -895,13 +966,7 @@ router.post("/api/guest-modify-reservation", async (req, res) => {
       return res.status(500).json({ error: "Supabase non configuré" });
     }
 
-    const {
-      token,
-      newStartTime,
-      newEndTime,
-      newPersons,
-      boxId,
-    } = req.body || {};
+    const { token, newStartTime, newEndTime, newPersons, boxId } = req.body || {};
 
     const safeToken = String(token || "").trim();
     if (!safeToken) {
@@ -923,7 +988,9 @@ router.post("/api/guest-modify-reservation", async (req, res) => {
     return res.status(result.status).json(result.body);
   } catch (e) {
     console.error("Erreur /api/guest-modify-reservation :", e);
-    return res.status(500).json({ error: "Erreur serveur lors de la modification" });
+    return res
+      .status(500)
+      .json({ error: "Erreur serveur lors de la modification" });
   }
 });
 
@@ -933,10 +1000,22 @@ router.post("/api/confirm-reservation", async (req, res) => {
   let loyaltyPointsDebitedAmount = 0;
 
   try {
-    const { panier, customer, promoCode, paymentIntentId, loyaltyUsed } = req.body || {};
+    const { panier, customer, promoCode, paymentIntentId, loyaltyUsed } =
+      req.body || {};
 
     if (!panier || !Array.isArray(panier) || panier.length === 0) {
       return res.status(400).json({ error: "Panier vide" });
+    }
+
+    const normalizedCustomerEmail = normalizeEmail(customer?.email);
+    const fullName = buildFullName(customer);
+
+    if (!normalizedCustomerEmail) {
+      return res.status(400).json({ error: "Email client manquant" });
+    }
+
+    if (!fullName) {
+      return res.status(400).json({ error: "Nom client manquant" });
     }
 
     const pricing = computeCartPricing(panier, { loyaltyUsed: !!loyaltyUsed });
@@ -948,19 +1027,35 @@ router.post("/api/confirm-reservation", async (req, res) => {
     let promo = null;
 
     if (promoCode) {
-      const result = await validatePromoCode(promoCode, totalCashDue);
-      if (result.ok) {
-        totalCashDue = result.newTotal;
-        promoDiscountAmount = result.discountAmount;
-        promo = result.promo;
+      const isFirstSession = normalizedCustomerEmail
+        ? await isFirstReservationForEmail(normalizedCustomerEmail)
+        : null;
+
+      const result = await validatePromoCode(promoCode, totalCashDue, {
+        email: normalizedCustomerEmail || null,
+        isFirstSession,
+        enforceAdvancedRules: true,
+      });
+
+      if (!result.ok) {
+        return res.status(400).json({
+          error: result.reason || "Code promo invalide",
+          promo: result.promoPublic || result.promo || null,
+        });
       }
+
+      totalCashDue = result.newTotal;
+      promoDiscountAmount = result.discountAmount;
+      promo = result.promo;
     }
 
     const isFreeReservationFlag = totalCashDue <= 0;
 
     try {
       const authHeader = req.headers.authorization;
-      const token = authHeader?.startsWith("Bearer ") ? authHeader.split(" ")[1] : null;
+      const token = authHeader?.startsWith("Bearer ")
+        ? authHeader.split(" ")[1]
+        : null;
       if (token) {
         const decoded = jwt.verify(token, JWT_SECRET);
         userIdFromToken = decoded.userId;
@@ -982,6 +1077,13 @@ router.post("/api/confirm-reservation", async (req, res) => {
 
       if (!stripe) {
         return res.status(500).json({ error: "Stripe non configuré" });
+      }
+
+      const alreadyUsedEarly = await isPaymentIntentAlreadyUsed(paymentIntentId);
+      if (alreadyUsedEarly) {
+        return res.status(409).json({
+          error: "Ce paiement a déjà été utilisé pour une réservation",
+        });
       }
 
       const pi = await stripe.paymentIntents.retrieve(paymentIntentId);
@@ -1029,44 +1131,59 @@ router.post("/api/confirm-reservation", async (req, res) => {
         await updateUserProfileInUsersTable(userIdFromToken, customer);
       }
     } catch (e) {
-      console.warn("⚠️ update users (confirm-reservation) a échoué:", e.message);
+      console.warn(
+        "⚠️ update users (confirm-reservation) a échoué:",
+        e.message
+      );
     }
-
-    const fullName =
-      (customer?.prenom || "") + (customer?.prenom ? " " : "") + (customer?.nom || "");
 
     const nowIso = new Date().toISOString();
 
-    const rows = pricing.normalizedItems.map((slot) => ({
-      name: fullName || null,
-      email: customer?.email || null,
-      datetime: slot.datetime,
-      created_at: nowIso,
-      start_time: slot.start_time,
-      box_id: slot.box_id,
-      status: "confirmed",
-      date: slot.date,
-      end_time: slot.end_time,
-      payment_intent_id: paymentIntentId || null,
-      original_payment_intent_id: paymentIntentId || null,
-      latest_payment_intent_id: paymentIntentId || null,
-      deposit_payment_intent_id: null,
-      deposit_amount_cents: 0,
-      deposit_status: null,
-      persons: slot.persons,
-      billable_persons: slot.billablePersons,
-      montant: slot.cashAmountDue,
-      free_session: slot.cashAmountDue <= 0,
-      loyalty_used: !!loyaltyUsed,
-      points_spent: loyaltyUsed ? LOYALTY_POINTS_COST : 0,
-      promo_code: promo?.code || null,
-      refunded_amount: 0,
-      last_auto_charge_amount: 0,
-      guest_manage_token: generateGuestManageToken(),
-      guest_manage_token_created_at: nowIso,
-      guest_manage_token_expires_at: computeGuestManageTokenExpiresAt(new Date()),
-      updated_at: nowIso,
-    }));
+const rows = pricing.normalizedItems.map((it) => {
+  const start = new Date(it.start);
+  const end = new Date(it.end);
+
+  const hour = start.getHours();
+  const day = start.getDay();
+
+  return {
+    name,
+    email,
+    user_id: userIdFromToken || null,
+
+    datetime: start,
+    start_time: start,
+    end_time: end,
+    date: start.toISOString().slice(0, 10),
+
+    box_id: it.boxId,
+    status: 'confirmed',
+
+    persons: personsForInsert,
+    billable_persons: billableForInsert,
+    montant: total,
+
+    free_session: !!free_session,
+    loyalty_used: !!loyalty_used,
+    points_spent: pointsSpent,
+
+    payment_intent_id: paymentIntent.id,
+    deposit_payment_intent_id: depositPaymentIntentId,
+    deposit_amount_cents: depositAmountCents,
+    deposit_status: depositStatus,
+
+    // 🔥 NOUVEAU
+    checked_in_at: null,
+    completed_at: null,
+    cancelled_at: null,
+    refunded_at: null,
+
+    is_weekend: day === 0 || day === 6,
+    is_daytime: hour >= 12 && hour < 18,
+    is_group_session: personsForInsert >= 3,
+    session_minutes: Math.floor((end - start) / 60000)
+  };
+});
 
     for (const row of rows) {
       const hasConflict = await hasReservationConflict({
@@ -1087,6 +1204,19 @@ router.post("/api/confirm-reservation", async (req, res) => {
       }
     }
 
+    if (!isFreeReservationFlag && paymentIntentId) {
+      const alreadyUsedLate = await isPaymentIntentAlreadyUsed(paymentIntentId);
+      if (alreadyUsedLate) {
+        if (loyaltyPointsDebited && userIdFromToken && loyaltyPointsDebitedAmount > 0) {
+          await refundPointsToUser(userIdFromToken, loyaltyPointsDebitedAmount);
+        }
+
+        return res.status(409).json({
+          error: "Ce paiement a déjà été utilisé pour une réservation",
+        });
+      }
+    }
+
     const insertedReservations = [];
     for (const row of rows) {
       const { data, error } = await supabase
@@ -1101,14 +1231,18 @@ router.post("/api/confirm-reservation", async (req, res) => {
         }
 
         console.error("Erreur Supabase insert reservations :", error);
-        return res.status(500).json({ error: "Erreur en enregistrant la réservation" });
+        return res
+          .status(500)
+          .json({ error: "Erreur en enregistrant la réservation" });
       }
 
       insertedReservations.push(data);
     }
 
     try {
-      await Promise.allSettled(insertedReservations.map((row) => sendReservationEmail(row)));
+      await Promise.allSettled(
+        insertedReservations.map((row) => sendReservationEmail(row))
+      );
     } catch (mailErr) {
       console.error("Erreur globale envoi mails :", mailErr);
     }
@@ -1148,18 +1282,22 @@ router.post("/api/confirm-reservation", async (req, res) => {
         }
 
         if (!updatedPromoRows || updatedPromoRows.length === 0) {
-          throw new Error("Le code promo a été utilisé en même temps par une autre requête");
+          throw new Error(
+            "Le code promo a été utilisé en même temps par une autre requête"
+          );
         }
 
-        const { error: promoUsageError } = await supabase.from("promo_usages").insert({
-          promo_id: promo.id,
-          code: promo.code,
-          email: customer?.email || null,
-          payment_intent_id: paymentIntentId || null,
-          total_before: pricing.totalCashDue,
-          total_after: totalAfterDiscount,
-          discount_amount: promoDiscountAmount,
-        });
+        const { error: promoUsageError } = await supabase
+          .from("promo_usages")
+          .insert({
+            promo_id: promo.id,
+            code: promo.code,
+            email: normalizedCustomerEmail || null,
+            payment_intent_id: paymentIntentId || null,
+            total_before: pricing.totalCashDue,
+            total_after: totalAfterDiscount,
+            discount_amount: promoDiscountAmount,
+          });
 
         if (promoUsageError) {
           console.error("Erreur insert promo_usages :", promoUsageError);
@@ -1196,12 +1334,17 @@ router.post("/api/confirm-reservation", async (req, res) => {
       try {
         await refundPointsToUser(userIdFromToken, loyaltyPointsDebitedAmount);
       } catch (refundErr) {
-        console.error("❌ Impossible de recréditer les points après échec :", refundErr);
+        console.error(
+          "❌ Impossible de recréditer les points après échec :",
+          refundErr
+        );
       }
     }
 
     console.error("Erreur confirm-reservation :", err);
-    return res.status(500).json({ error: "Erreur serveur lors de la réservation" });
+    return res
+      .status(500)
+      .json({ error: "Erreur serveur lors de la réservation" });
   }
 });
 
@@ -1226,7 +1369,9 @@ router.post("/api/refund-reservation", authMiddleware, async (req, res) => {
     return res.status(result.status).json(result.body);
   } catch (e) {
     console.error("Erreur /api/refund-reservation :", e);
-    return res.status(500).json({ error: "Erreur serveur lors du remboursement" });
+    return res
+      .status(500)
+      .json({ error: "Erreur serveur lors du remboursement" });
   }
 });
 
@@ -1250,10 +1395,16 @@ router.post("/api/guest-refund-reservation", async (req, res) => {
       isGuest: true,
     });
 
+    if (result.ok && reservation?.id) {
+      await invalidateGuestManageToken(reservation.id);
+    }
+
     return res.status(result.status).json(result.body);
   } catch (e) {
     console.error("Erreur /api/guest-refund-reservation :", e);
-    return res.status(500).json({ error: "Erreur serveur lors du remboursement" });
+    return res
+      .status(500)
+      .json({ error: "Erreur serveur lors du remboursement" });
   }
 });
 

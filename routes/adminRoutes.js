@@ -14,7 +14,11 @@ import {
   clampPersons,
 } from "../utils/validators.js";
 
-import { buildSlotIsoRange } from "../services/pricingService.js";
+import {
+  buildSlotIsoRange,
+  getBillablePersons,
+} from "../services/pricingService.js";
+
 import {
   hasReservationConflict,
   isReservationStatusConfirmed,
@@ -27,10 +31,37 @@ import {
   getExistingReviewRequestByReservationId,
 } from "../services/reviewService.js";
 
-import { getBillablePersons } from "../services/pricingService.js";
 import { sendReservationEmail } from "../services/emailService.js";
 
 const router = express.Router();
+
+async function writeAdminAuditLog(req, payload) {
+  try {
+    if (!supabase) return;
+
+    const actorUserId = req?.user?.id || null;
+    const actorEmail = req?.user?.email || null;
+    const actorType = req?.isCron ? "cron" : "admin";
+
+    const row = {
+      actor_user_id: actorUserId,
+      actor_email: actorEmail,
+      actor_type: actorType,
+      action: payload?.action || "unknown_action",
+      target_table: payload?.target_table || null,
+      target_id: payload?.target_id != null ? String(payload.target_id) : null,
+      metadata: payload?.metadata || {},
+    };
+
+    const { error } = await supabase.from("admin_audit_logs").insert(row);
+
+    if (error) {
+      console.error("Erreur admin_audit_logs insert :", error);
+    }
+  } catch (e) {
+    console.error("Erreur writeAdminAuditLog :", e);
+  }
+}
 
 router.post("/api/admin/create-free-reservation", requireSupabaseAdmin, async (req, res) => {
   try {
@@ -72,6 +103,7 @@ router.post("/api/admin/create-free-reservation", requireSupabaseAdmin, async (r
 
     const hourFloat =
       Math.floor(safeStartMinutes / 60) + (safeStartMinutes % 60) / 60;
+
     const { startIso, endIso } = buildSlotIsoRange(safeDate, hourFloat);
 
     const hasConflict = await hasReservationConflict({
@@ -87,11 +119,13 @@ router.post("/api/admin/create-free-reservation", requireSupabaseAdmin, async (r
       });
     }
 
+    const nowIso = new Date().toISOString();
+
     const reservationRow = {
       name: safeName,
       email: safeEmail,
       datetime: startIso,
-      created_at: new Date().toISOString(),
+      created_at: nowIso,
       start_time: startIso,
       box_id: safeBoxId,
       status: safeStatus,
@@ -110,7 +144,7 @@ router.post("/api/admin/create-free-reservation", requireSupabaseAdmin, async (r
       promo_code: null,
       refunded_amount: 0,
       last_auto_charge_amount: 0,
-      updated_at: new Date().toISOString(),
+      updated_at: nowIso,
     };
 
     const { data: insertedReservation, error: insertError } = await supabase
@@ -131,6 +165,20 @@ router.post("/api/admin/create-free-reservation", requireSupabaseAdmin, async (r
     } catch (mailErr) {
       console.error("Erreur envoi mail admin free reservation :", mailErr);
     }
+
+    await writeAdminAuditLog(req, {
+      action: "create_free_reservation",
+      target_table: "reservations",
+      target_id: insertedReservation.id,
+      metadata: {
+        email: insertedReservation.email || null,
+        date: insertedReservation.date || null,
+        start_time: insertedReservation.start_time || null,
+        box_id: insertedReservation.box_id || null,
+        persons: insertedReservation.persons || null,
+        status: insertedReservation.status || null,
+      },
+    });
 
     return res.json({
       success: true,
@@ -173,6 +221,17 @@ router.post("/api/admin/send-review-request", requireSupabaseAdmin, async (req, 
     }
 
     const result = await sendReviewRequestEmail(reservation);
+
+    await writeAdminAuditLog(req, {
+      action: "send_review_request",
+      target_table: "reservations",
+      target_id: reservation.id,
+      metadata: {
+        email: reservation.email || null,
+        sent: !!result?.sent,
+        reason: result?.reason || null,
+      },
+    });
 
     return res.json({
       success: result.sent,
@@ -257,6 +316,18 @@ router.all("/api/admin/send-completed-review-requests", requireAdminOrCron, asyn
         });
       }
     }
+
+    await writeAdminAuditLog(req, {
+      action: "send_completed_review_requests_batch",
+      target_table: "reservations",
+      target_id: null,
+      metadata: {
+        limit,
+        totalProcessed: results.length,
+        mode: req.isCron ? "cron" : "admin",
+        results,
+      },
+    });
 
     return res.json({
       success: true,

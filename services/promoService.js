@@ -1,5 +1,3 @@
-// backend/services/promoService.js
-
 import { supabase } from "../config/supabase.js";
 
 function getTodayIsoDate() {
@@ -10,6 +8,16 @@ function normalizePromoCode(code) {
   return String(code || "").trim().toUpperCase();
 }
 
+function normalizeEmail(email) {
+  return String(email || "").trim().toLowerCase();
+}
+
+function normalizeAmount(amount) {
+  const safeAmount = Number(amount);
+  if (!Number.isFinite(safeAmount)) return 0;
+  return Math.max(0, safeAmount);
+}
+
 function isLikelyPromoCode(code) {
   const safeCode = normalizePromoCode(code);
   if (!safeCode) return false;
@@ -18,12 +26,16 @@ function isLikelyPromoCode(code) {
 }
 
 function getEmailDomain(email) {
-  const safeEmail = String(email || "").trim().toLowerCase();
+  const safeEmail = normalizeEmail(email);
   const atIndex = safeEmail.lastIndexOf("@");
   if (atIndex <= 0 || atIndex === safeEmail.length - 1) return null;
   return safeEmail.slice(atIndex + 1);
 }
 
+/**
+ * Version SAFE pour le front :
+ * on ne renvoie pas la logique interne exploitable.
+ */
 function sanitizePromoForClient(promo) {
   if (!promo) return null;
 
@@ -32,15 +44,8 @@ function sanitizePromoForClient(promo) {
     code: promo.code ?? null,
     type: promo.type ?? null,
     value: Number(promo.value) || 0,
-    is_active: promo.is_active !== false,
     valid_from: promo.valid_from ?? null,
     valid_to: promo.valid_to ?? null,
-    max_uses: promo.max_uses ?? null,
-    used_count: promo.used_count ?? 0,
-    max_uses_per_user: promo.max_uses_per_user ?? null,
-    first_session_only: promo.first_session_only ?? false,
-    email_domain: promo.email_domain ?? null,
-    note: promo.note ?? null,
   };
 }
 
@@ -109,10 +114,10 @@ export function isPromoValidNow(promo) {
 }
 
 export function computePromoDiscount(promo, totalAmountEur) {
-  const safeTotal = Math.max(0, Number(totalAmountEur) || 0);
+  const safeTotal = normalizeAmount(totalAmountEur);
   if (!promo || safeTotal <= 0) return 0;
 
-  const type = promo.type;
+  const type = String(promo.type || "").trim().toLowerCase();
   const value = Number(promo.value) || 0;
 
   let discountAmount = 0;
@@ -125,13 +130,16 @@ export function computePromoDiscount(promo, totalAmountEur) {
     discountAmount = safeTotal;
   }
 
-  return Math.max(0, Number(discountAmount) || 0);
+  const safeDiscount = Math.max(0, Number(discountAmount) || 0);
+  return Math.min(safeDiscount, safeTotal);
 }
 
 async function hasUserExceededPromoUsage(promo, email) {
   if (!supabase) return false;
   if (!promo?.id) return false;
-  if (!email) return false;
+
+  const safeEmail = normalizeEmail(email);
+  if (!safeEmail) return false;
 
   const maxUsesPerUser =
     promo.max_uses_per_user === null || promo.max_uses_per_user === undefined
@@ -146,7 +154,7 @@ async function hasUserExceededPromoUsage(promo, email) {
     .from("promo_usages")
     .select("id", { count: "exact", head: true })
     .eq("promo_id", promo.id)
-    .eq("email", String(email).trim().toLowerCase());
+    .eq("email", safeEmail);
 
   if (error) {
     console.error("Erreur lecture promo_usages :", error);
@@ -162,7 +170,7 @@ function parsePromoValidationContext(context = {}) {
   }
 
   return {
-    email: context.email ? String(context.email).trim().toLowerCase() : null,
+    email: context.email ? normalizeEmail(context.email) : null,
     isFirstSession:
       typeof context.isFirstSession === "boolean" ? context.isFirstSession : null,
     enforceAdvancedRules: context.enforceAdvancedRules === true,
@@ -245,8 +253,9 @@ export async function validatePromoCode(code, totalAmountEur = 0, context = {}) 
     }
   }
 
-  const discountAmount = computePromoDiscount(promo, totalAmountEur);
-  const newTotal = Math.max(0, (Number(totalAmountEur) || 0) - discountAmount);
+  const safeTotal = normalizeAmount(totalAmountEur);
+  const discountAmount = computePromoDiscount(promo, safeTotal);
+  const newTotal = Math.max(0, safeTotal - discountAmount);
 
   return {
     ok: true,
@@ -257,4 +266,4 @@ export async function validatePromoCode(code, totalAmountEur = 0, context = {}) 
   };
 }
 
-export { sanitizePromoForClient, normalizePromoCode };
+export { sanitizePromoForClient, normalizePromoCode, normalizeEmail };
