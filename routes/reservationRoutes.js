@@ -13,6 +13,7 @@ import {
   computeModificationDelta,
   buildSlotIsoRange,
   STANDARD_SLOT_STARTS,
+  getBillablePersons,
 } from "../services/pricingService.js";
 
 import {
@@ -48,9 +49,14 @@ import {
 import {
   creditSingcoins,
   getUserGamificationSnapshot,
+  createGamificationEvent,
 } from "../services/gamificationService.js";
 
-import { clampPersons, getNumericBoxId } from "../utils/validators.js";
+import {
+  safeText,
+  clampPersons,
+  getNumericBoxId,
+} from "../utils/validators.js";
 import { parseDateOrNull, formatDateToYYYYMMDD } from "../utils/dates.js";
 import { roundMoney } from "../utils/formatters.js";
 import {
@@ -67,6 +73,10 @@ import {
 import { validatePromoCode } from "../services/promoService.js";
 
 const router = express.Router();
+
+/* =========================================================
+   HELPERS
+========================================================= */
 
 function normalizeEmail(email) {
   return String(email || "").trim().toLowerCase();
@@ -146,6 +156,167 @@ async function invalidateGuestManageToken(reservationId) {
   } catch (e) {
     console.error("Erreur invalidation guest_manage_token :", e);
   }
+}
+
+async function findUserIdByEmail(email) {
+  const safeEmail = normalizeEmail(email);
+  if (!supabase || !safeEmail) return null;
+
+  try {
+    const { data, error } = await supabase
+      .from("users")
+      .select("id")
+      .eq("email", safeEmail)
+      .maybeSingle();
+
+    if (error) {
+      console.error("findUserIdByEmail error:", error);
+      return null;
+    }
+
+    return data?.id || null;
+  } catch (e) {
+    console.error("findUserIdByEmail catch:", e);
+    return null;
+  }
+}
+
+async function resolveReservationUserId({ explicitUserId = null, email = null }) {
+  if (explicitUserId) return explicitUserId;
+  if (!email) return null;
+  return await findUserIdByEmail(email);
+}
+
+async function safeCreateReservationGamificationEvent(reservation) {
+  try {
+    if (!supabase || !reservation?.id || !reservation?.user_id) {
+      return {
+        created: false,
+        skipped: true,
+        reason: "missing_user_or_reservation",
+      };
+    }
+
+    const referenceId = String(reservation.id);
+
+    const { data: existingEvent, error: existingError } = await supabase
+      .from("gamification_events")
+      .select("id")
+      .eq("user_id", reservation.user_id)
+      .eq("event_type", "reservation_created")
+      .eq("reference_type", "reservation")
+      .eq("reference_id", referenceId)
+      .maybeSingle();
+
+    if (existingError) {
+      console.error(
+        "safeCreateReservationGamificationEvent check error:",
+        existingError
+      );
+    }
+
+    if (existingEvent?.id) {
+      return {
+        created: false,
+        skipped: true,
+        reason: "already_exists",
+      };
+    }
+
+    await createGamificationEvent({
+      user_id: reservation.user_id,
+      event_type: "reservation_created",
+      reference_type: "reservation",
+      reference_id: referenceId,
+      payload: {
+        reservation_id: reservation.id,
+        persons: Number(reservation.persons || 0),
+        billable_persons: Number(reservation.billable_persons || 0),
+        is_group: !!reservation.is_group_session,
+        is_weekend: !!reservation.is_weekend,
+        is_daytime: !!reservation.is_daytime,
+        session_minutes: Number(reservation.session_minutes || 0),
+        amount: Number(reservation.montant || 0),
+        free_session: !!reservation.free_session,
+        created_at: reservation.created_at || new Date().toISOString(),
+      },
+    });
+
+    return {
+      created: true,
+      skipped: false,
+      reason: null,
+    };
+  } catch (gErr) {
+    console.error("safeCreateReservationGamificationEvent create error:", gErr);
+    return {
+      created: false,
+      skipped: false,
+      reason: "create_failed",
+      error: gErr,
+    };
+  }
+}
+
+function buildReservationRow({
+  item,
+  fullName,
+  normalizedCustomerEmail,
+  resolvedUserId,
+  totalCashDue,
+  singcoinsUsed,
+  paymentIntentId,
+}) {
+  const start = new Date(item.start_time);
+  const end = new Date(item.end_time);
+  const hour = start.getHours();
+  const day = start.getDay();
+  const nowIso = new Date().toISOString();
+
+  return {
+    name: fullName,
+    email: normalizedCustomerEmail,
+    user_id: resolvedUserId || null,
+
+    datetime: start.toISOString(),
+    created_at: nowIso,
+    start_time: start.toISOString(),
+    end_time: end.toISOString(),
+    date: item.date,
+
+    box_id: item.box_id,
+    status: "confirmed",
+
+    persons: item.persons,
+    billable_persons: getBillablePersons(item.persons),
+    montant: totalCashDue,
+
+    free_session: totalCashDue <= 0,
+
+    singcoins_used: !!singcoinsUsed,
+    singcoins_spent: singcoinsUsed ? SINGCOINS_REWARD_COST : 0,
+
+    loyalty_used: !!singcoinsUsed,
+    points_spent: singcoinsUsed ? SINGCOINS_REWARD_COST : 0,
+
+    payment_intent_id: paymentIntentId || null,
+    original_payment_intent_id: paymentIntentId || null,
+    latest_payment_intent_id: paymentIntentId || null,
+    deposit_payment_intent_id: null,
+    deposit_amount_cents: null,
+    deposit_status: null,
+
+    checked_in_at: null,
+    completed_at: null,
+    cancelled_at: null,
+    refunded_at: null,
+
+    is_weekend: day === 0 || day === 6,
+    is_daytime: hour >= 12 && hour < 18,
+    is_group_session: item.persons >= 3,
+    session_minutes: Math.floor((end - start) / 60000),
+    updated_at: nowIso,
+  };
 }
 
 async function createPendingModificationRequest({
@@ -700,6 +871,165 @@ async function runReservationRefund({
   };
 }
 
+/* =========================================================
+   SIMPLE CREATE RESERVATION
+========================================================= */
+
+router.post("/api/reservations", async (req, res) => {
+  try {
+    if (!supabase) {
+      return res.status(500).json({ error: "Supabase non configuré" });
+    }
+
+    const {
+      name,
+      email,
+      date,
+      box_id,
+      start_minutes,
+      persons,
+      user_id,
+    } = req.body || {};
+
+    const safeName = safeText(name, 120);
+    const safeEmail = normalizeEmail(email);
+    const safeDate = safeText(date, 10);
+    const safeBoxId = getNumericBoxId(box_id);
+    const safePersons = clampPersons(persons || 2);
+    const safeStartMinutes = Number(start_minutes);
+
+    if (!safeName || !safeEmail || !safeDate) {
+      return res.status(400).json({
+        error: "name, email et date requis",
+      });
+    }
+
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(safeDate)) {
+      return res.status(400).json({ error: "date invalide" });
+    }
+
+    if (!Number.isFinite(safeStartMinutes)) {
+      return res.status(400).json({ error: "start_minutes invalide" });
+    }
+
+    const resolvedUserId = await resolveReservationUserId({
+      explicitUserId: user_id,
+      email: safeEmail,
+    });
+
+    const hourFloat =
+      Math.floor(safeStartMinutes / 60) +
+      (safeStartMinutes % 60) / 60;
+
+    const { startIso, endIso } = buildSlotIsoRange(safeDate, hourFloat);
+
+    const hasConflict = await hasReservationConflict({
+      boxId: safeBoxId,
+      startTime: startIso,
+      endTime: endIso,
+      localDate: safeDate,
+    });
+
+    if (hasConflict) {
+      return res.status(409).json({
+        error: "Créneau déjà réservé",
+      });
+    }
+
+    const startDate = new Date(startIso);
+    const endDate = new Date(endIso);
+    const nowIso = new Date().toISOString();
+
+    const reservationPayload = {
+      name: safeName,
+      email: safeEmail,
+      user_id: resolvedUserId,
+
+      datetime: startIso,
+      created_at: nowIso,
+
+      start_time: startIso,
+      end_time: endIso,
+
+      date: safeDate,
+      box_id: safeBoxId,
+
+      status: "confirmed",
+
+      persons: safePersons,
+      billable_persons: getBillablePersons(safePersons),
+
+      montant: 0,
+      free_session: false,
+
+      loyalty_used: false,
+      points_spent: 0,
+
+      singcoins_used: false,
+      singcoins_spent: 0,
+
+      deposit_amount_cents: 0,
+      deposit_status: null,
+
+      is_weekend:
+        startDate.getDay() === 0 ||
+        startDate.getDay() === 6,
+
+      is_daytime:
+        startDate.getHours() >= 12 &&
+        startDate.getHours() < 18,
+
+      is_group_session: safePersons >= 3,
+
+      session_minutes: Math.floor(
+        (endDate - startDate) / 60000
+      ),
+
+      updated_at: nowIso,
+    };
+
+    const { data, error } = await supabase
+      .from("reservations")
+      .insert(reservationPayload)
+      .select()
+      .single();
+
+    if (error || !data) {
+      console.error("reservation insert error:", error);
+      return res.status(500).json({
+        error: "Erreur création réservation",
+      });
+    }
+
+    const eventResult = await safeCreateReservationGamificationEvent(data);
+
+    if (eventResult.reason === "missing_user_or_reservation") {
+      console.warn(
+        "[reservation-created] gamification skipped: user_id manquant",
+        {
+          reservationId: data.id,
+          email: data.email,
+        }
+      );
+    }
+
+    return res.json({
+      success: true,
+      reservation: data,
+      gamificationEvent: eventResult,
+    });
+  } catch (e) {
+    console.error("POST /api/reservations error:", e);
+    return res.status(500).json({
+      error: "Erreur serveur",
+    });
+  }
+});
+
+/* =========================================================
+   VERIFY CART
+========================================================= */
+
 router.post("/api/verify-cart", async (req, res) => {
   try {
     if (!supabase) {
@@ -759,6 +1089,10 @@ router.post("/api/verify-cart", async (req, res) => {
   }
 });
 
+/* =========================================================
+   MY RESERVATIONS
+========================================================= */
+
 router.get("/api/my-reservations", authMiddleware, async (req, res) => {
   try {
     if (!supabase) {
@@ -776,12 +1110,14 @@ router.get("/api/my-reservations", authMiddleware, async (req, res) => {
       return res.status(400).json({ error: "Utilisateur introuvable" });
     }
 
+    const normalizedUserEmail = normalizeEmail(user.email);
+
     const { data: reservations, error } = await supabase
       .from("reservations")
       .select(
-        "id, name, email, date, start_time, end_time, box_id, persons, status, montant, free_session, created_at, checked_in_at, completed_at"
+        "id, name, email, date, start_time, end_time, box_id, persons, status, montant, free_session, created_at, checked_in_at, completed_at, user_id"
       )
-      .or(`user_id.eq.${req.userId},email.eq.${user.email}`)
+      .or(`user_id.eq.${req.userId},email.eq.${normalizedUserEmail}`)
       .order("start_time", { ascending: false });
 
     if (error) {
@@ -817,6 +1153,10 @@ router.get("/api/my-reservations/:id", authMiddleware, async (req, res) => {
   }
 });
 
+/* =========================================================
+   GUEST RESERVATION
+========================================================= */
+
 router.get("/api/guest-reservation", async (req, res) => {
   try {
     if (!supabase) {
@@ -840,6 +1180,10 @@ router.get("/api/guest-reservation", async (req, res) => {
     return res.status(500).json({ error: "Erreur serveur" });
   }
 });
+
+/* =========================================================
+   MODIFICATION OPTIONS
+========================================================= */
 
 router.post("/api/reservation-modification-options", authMiddleware, async (req, res) => {
   try {
@@ -929,6 +1273,10 @@ router.post("/api/reservation-modification-options", authMiddleware, async (req,
   }
 });
 
+/* =========================================================
+   MODIFY RESERVATION
+========================================================= */
+
 router.post("/api/modify-reservation", authMiddleware, async (req, res) => {
   try {
     if (!supabase) {
@@ -1003,6 +1351,10 @@ router.post("/api/guest-modify-reservation", async (req, res) => {
   }
 });
 
+/* =========================================================
+   CONFIRM RESERVATION
+========================================================= */
+
 router.post("/api/confirm-reservation", async (req, res) => {
   let userIdFromToken = null;
   let singcoinsDebited = false;
@@ -1065,15 +1417,28 @@ router.post("/api/confirm-reservation", async (req, res) => {
       const token = authHeader?.startsWith("Bearer ")
         ? authHeader.split(" ")[1]
         : null;
+
       if (token) {
         const decoded = jwt.verify(token, JWT_SECRET);
-        userIdFromToken = decoded.userId;
+        userIdFromToken = decoded.userId || null;
       }
     } catch (e) {
       console.warn("⚠️ Token invalide sur /api/confirm-reservation :", e.message);
     }
 
-    if (singcoinsUsed && !userIdFromToken) {
+    const resolvedUserId = await resolveReservationUserId({
+      explicitUserId: userIdFromToken,
+      email: normalizedCustomerEmail,
+    });
+
+    if (!resolvedUserId) {
+      console.warn("[confirm-reservation] user_id non résolu", {
+        email: normalizedCustomerEmail,
+        hadToken: !!userIdFromToken,
+      });
+    }
+
+    if (singcoinsUsed && !resolvedUserId) {
       return res.status(401).json({
         error: "Connexion requise pour utiliser les Singcoins",
       });
@@ -1119,7 +1484,7 @@ router.post("/api/confirm-reservation", async (req, res) => {
 
     if (singcoinsUsed) {
       const singcoinsSpendResult = await spendSingcoins(
-        userIdFromToken,
+        resolvedUserId,
         SINGCOINS_REWARD_COST
       );
 
@@ -1136,8 +1501,8 @@ router.post("/api/confirm-reservation", async (req, res) => {
     }
 
     try {
-      if (userIdFromToken && customer) {
-        await updateUserProfileInUsersTable(userIdFromToken, customer);
+      if (resolvedUserId && customer) {
+        await updateUserProfileInUsersTable(resolvedUserId, customer);
       }
     } catch (e) {
       console.warn(
@@ -1146,56 +1511,17 @@ router.post("/api/confirm-reservation", async (req, res) => {
       );
     }
 
-    const rows = pricing.normalizedItems.map((it) => {
-      const start = new Date(it.start_time);
-      const end = new Date(it.end_time);
-      const hour = start.getHours();
-      const day = start.getDay();
-
-      return {
-        name: fullName,
-        email: normalizedCustomerEmail,
-        user_id: userIdFromToken || null,
-
-        datetime: start.toISOString(),
-        start_time: start.toISOString(),
-        end_time: end.toISOString(),
-        date: it.date,
-
-        box_id: it.box_id,
-        status: "confirmed",
-
-        persons: it.persons,
-        billable_persons: Math.max(it.persons, 2),
-        montant: totalCashDue,
-
-        free_session: totalCashDue <= 0,
-
-        singcoins_used: !!singcoinsUsed,
-        singcoins_spent: singcoinsUsed ? SINGCOINS_REWARD_COST : 0,
-
-        loyalty_used: !!singcoinsUsed,
-        points_spent: singcoinsUsed ? SINGCOINS_REWARD_COST : 0,
-
-        payment_intent_id: paymentIntentId || null,
-        original_payment_intent_id: paymentIntentId || null,
-        latest_payment_intent_id: paymentIntentId || null,
-        deposit_payment_intent_id: null,
-        deposit_amount_cents: null,
-        deposit_status: null,
-
-        checked_in_at: null,
-        completed_at: null,
-        cancelled_at: null,
-        refunded_at: null,
-
-        is_weekend: day === 0 || day === 6,
-        is_daytime: hour >= 12 && hour < 18,
-        is_group_session: it.persons >= 3,
-        session_minutes: Math.floor((end - start) / 60000),
-        updated_at: new Date().toISOString(),
-      };
-    });
+    const rows = pricing.normalizedItems.map((it) =>
+      buildReservationRow({
+        item: it,
+        fullName,
+        normalizedCustomerEmail,
+        resolvedUserId,
+        totalCashDue,
+        singcoinsUsed,
+        paymentIntentId,
+      })
+    );
 
     for (const row of rows) {
       const hasConflict = await hasReservationConflict({
@@ -1206,8 +1532,8 @@ router.post("/api/confirm-reservation", async (req, res) => {
       });
 
       if (hasConflict) {
-        if (singcoinsDebited && userIdFromToken && singcoinsDebitedAmount > 0) {
-          await refundSingcoinsToUser(userIdFromToken, singcoinsDebitedAmount);
+        if (singcoinsDebited && resolvedUserId && singcoinsDebitedAmount > 0) {
+          await refundSingcoinsToUser(resolvedUserId, singcoinsDebitedAmount);
         }
 
         return res.status(409).json({
@@ -1219,8 +1545,8 @@ router.post("/api/confirm-reservation", async (req, res) => {
     if (!isFreeReservationFlag && paymentIntentId) {
       const alreadyUsedLate = await isPaymentIntentAlreadyUsed(paymentIntentId);
       if (alreadyUsedLate) {
-        if (singcoinsDebited && userIdFromToken && singcoinsDebitedAmount > 0) {
-          await refundSingcoinsToUser(userIdFromToken, singcoinsDebitedAmount);
+        if (singcoinsDebited && resolvedUserId && singcoinsDebitedAmount > 0) {
+          await refundSingcoinsToUser(resolvedUserId, singcoinsDebitedAmount);
         }
 
         return res.status(409).json({
@@ -1230,6 +1556,7 @@ router.post("/api/confirm-reservation", async (req, res) => {
     }
 
     const insertedReservations = [];
+
     for (const row of rows) {
       const { data, error } = await supabase
         .from("reservations")
@@ -1238,8 +1565,8 @@ router.post("/api/confirm-reservation", async (req, res) => {
         .single();
 
       if (error) {
-        if (singcoinsDebited && userIdFromToken && singcoinsDebitedAmount > 0) {
-          await refundSingcoinsToUser(userIdFromToken, singcoinsDebitedAmount);
+        if (singcoinsDebited && resolvedUserId && singcoinsDebitedAmount > 0) {
+          await refundSingcoinsToUser(resolvedUserId, singcoinsDebitedAmount);
         }
 
         console.error("Erreur Supabase insert reservations :", error);
@@ -1249,6 +1576,15 @@ router.post("/api/confirm-reservation", async (req, res) => {
       }
 
       insertedReservations.push(data);
+    }
+
+    const gamificationEvents = [];
+    for (const reservation of insertedReservations) {
+      const eventResult = await safeCreateReservationGamificationEvent(reservation);
+      gamificationEvents.push({
+        reservationId: reservation.id,
+        ...eventResult,
+      });
     }
 
     try {
@@ -1261,15 +1597,17 @@ router.post("/api/confirm-reservation", async (req, res) => {
 
     try {
       const isActuallyFree = totalCashDue <= 0;
-      if (userIdFromToken && !isActuallyFree) {
+      if (resolvedUserId && !isActuallyFree) {
         const singcoinsToAdd = insertedReservations.length * 10;
 
         await creditSingcoins({
-          userId: userIdFromToken,
+          userId: resolvedUserId,
           amount: singcoinsToAdd,
           type: "reservation_purchase_reward",
           referenceType: "payment_intent",
-          referenceId: paymentIntentId || insertedReservations.map((r) => String(r.id)).join(","),
+          referenceId:
+            paymentIntentId ||
+            insertedReservations.map((r) => String(r.id)).join(","),
           label: `${insertedReservations.length} réservation(s) payée(s)`,
         });
       }
@@ -1320,9 +1658,9 @@ router.post("/api/confirm-reservation", async (req, res) => {
     }
 
     let gamification = null;
-    if (userIdFromToken) {
+    if (resolvedUserId) {
       try {
-        gamification = await getUserGamificationSnapshot(userIdFromToken);
+        gamification = await getUserGamificationSnapshot(resolvedUserId);
       } catch (e) {
         console.error("Erreur snapshot gamification après réservation :", e);
       }
@@ -1350,6 +1688,8 @@ router.post("/api/confirm-reservation", async (req, res) => {
           }
         : null,
       gamification,
+      gamificationEvents,
+      resolvedUserId: resolvedUserId || null,
     });
   } catch (err) {
     if (singcoinsDebited && userIdFromToken && singcoinsDebitedAmount > 0) {
@@ -1369,6 +1709,47 @@ router.post("/api/confirm-reservation", async (req, res) => {
       .json({ error: "Erreur serveur lors de la réservation" });
   }
 });
+
+/* =========================================================
+   USER RESERVATIONS
+========================================================= */
+
+router.get("/api/reservations/user/:userId", async (req, res) => {
+  try {
+    if (!supabase) {
+      return res.status(500).json({ error: "Supabase non configuré" });
+    }
+
+    const { userId } = req.params;
+
+    const { data, error } = await supabase
+      .from("reservations")
+      .select("*")
+      .eq("user_id", userId)
+      .order("start_time", { ascending: false });
+
+    if (error) {
+      console.error("fetch reservations error:", error);
+      return res.status(500).json({
+        error: "Erreur récupération",
+      });
+    }
+
+    return res.json({
+      success: true,
+      reservations: data || [],
+    });
+  } catch (e) {
+    console.error("GET reservations error:", e);
+    return res.status(500).json({
+      error: "Erreur serveur",
+    });
+  }
+});
+
+/* =========================================================
+   REFUND RESERVATION
+========================================================= */
 
 router.post("/api/refund-reservation", authMiddleware, async (req, res) => {
   try {
@@ -1427,6 +1808,48 @@ router.post("/api/guest-refund-reservation", async (req, res) => {
     return res
       .status(500)
       .json({ error: "Erreur serveur lors du remboursement" });
+  }
+});
+
+/* =========================================================
+   CANCEL RESERVATION
+========================================================= */
+
+router.post("/api/reservations/cancel/:id", async (req, res) => {
+  try {
+    if (!supabase) {
+      return res.status(500).json({ error: "Supabase non configuré" });
+    }
+
+    const { id } = req.params;
+
+    const { data, error } = await supabase
+      .from("reservations")
+      .update({
+        status: "cancelled",
+        cancelled_at: new Date().toISOString(),
+        updated_at: new Date().toISOString(),
+      })
+      .eq("id", id)
+      .select()
+      .single();
+
+    if (error || !data) {
+      console.error("cancel error:", error);
+      return res.status(500).json({
+        error: "Erreur annulation",
+      });
+    }
+
+    return res.json({
+      success: true,
+      reservation: data,
+    });
+  } catch (e) {
+    console.error("cancel route error:", e);
+    return res.status(500).json({
+      error: "Erreur serveur",
+    });
   }
 });
 

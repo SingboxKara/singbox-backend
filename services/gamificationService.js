@@ -121,6 +121,16 @@ function mapBadgeIcon(icon) {
   return iconMap[icon] || "★";
 }
 
+function formatHoursFromMinutes(totalMinutes) {
+  const minutes = Math.max(0, Math.floor(Number(totalMinutes || 0)));
+  const h = Math.floor(minutes / 60);
+  const m = minutes % 60;
+
+  if (!minutes) return "0h";
+  if (!m) return `${h}h`;
+  return `${h}h${String(m).padStart(2, "0")}`;
+}
+
 async function ensureUserRows(userId) {
   if (!supabase || !userId) return;
 
@@ -304,10 +314,13 @@ async function sumLedger(table, userId) {
   if (error) throw error;
 
   const amounts = (data || []).map((row) => Number(row.amount || 0));
+  const positiveAmounts = amounts.filter((v) => v > 0);
+  const negativeAmounts = amounts.filter((v) => v < 0);
 
   return {
-    positive: amounts.filter((v) => v > 0).reduce((a, b) => a + b, 0),
-    negativeAbs: Math.abs(amounts.filter((v) => v < 0).reduce((a, b) => a + b, 0)),
+    positive: positiveAmounts.reduce((a, b) => a + b, 0),
+    negativeAbs: Math.abs(negativeAmounts.reduce((a, b) => a + b, 0)),
+    negativeCount: negativeAmounts.length,
     balance: amounts.reduce((a, b) => a + b, 0),
   };
 }
@@ -440,6 +453,24 @@ async function insertGamificationEvent({
     inserted: true,
     id: data?.id || null,
   };
+}
+
+export async function createGamificationEvent({
+  user_id,
+  event_type,
+  reference_type = null,
+  reference_id = null,
+  payload = {},
+  processed = false,
+}) {
+  return insertGamificationEvent({
+    userId: user_id,
+    eventType: event_type,
+    referenceType: reference_type,
+    referenceId: reference_id,
+    payload,
+    processed,
+  });
 }
 
 export async function creditSingcoins({
@@ -678,7 +709,7 @@ async function syncUserStats(userId) {
     longest_session_minutes: longestSession,
     first_session_at: starts[0]?.toISOString() || null,
     last_session_at: starts[starts.length - 1]?.toISOString() || null,
-    singcoins_spent_count: spentLedger.negativeAbs > 0 ? 1 : 0,
+    singcoins_spent_count: spentLedger.negativeCount,
     singcoins_spent_total: spentLedger.negativeAbs,
     updated_at: new Date().toISOString(),
   };
@@ -1043,6 +1074,7 @@ export async function getUserGamificationSnapshot(userId) {
       streak: {
         current: 0,
         best: 0,
+        jokers: 0,
         lastValidatedAt: null,
         lastPeriodKey: null,
       },
@@ -1051,6 +1083,8 @@ export async function getUserGamificationSnapshot(userId) {
         totalTime: "0h",
         totalSongs: 0,
         lastSession: null,
+        sessionsLast7Days: 0,
+        sessionsLast30Days: 0,
       },
       records: {
         bestStreak: 0,
@@ -1127,6 +1161,7 @@ export async function getUserGamificationSnapshot(userId) {
         rewardXp: Number(row.reward_xp || 0),
         title: def?.title || row.badge_code,
         description: def?.description || "",
+        desc: def?.description || "",
         rarity: def?.rarity || "common",
         icon: mapBadgeIcon(def?.icon),
         sortOrder: Number(def?.sort_order || 999),
@@ -1174,14 +1209,17 @@ export async function getUserGamificationSnapshot(userId) {
     streak: {
       current: Number(gamification?.streak_current || 0),
       best: Number(gamification?.streak_best || 0),
+      jokers: Number(gamification?.jokers_available || 0),
       lastValidatedAt: gamification?.streak_last_validated_at || null,
       lastPeriodKey: gamification?.streak_last_period_key || null,
     },
     stats: {
       totalSessions: Number(stats?.sessions_completed || 0),
-      totalTime: `${Math.floor(Number(stats?.minutes_sung_total || 0) / 60)}h`,
+      totalTime: formatHoursFromMinutes(stats?.minutes_sung_total || 0),
       totalSongs: Number(stats?.songs_total || 0),
       lastSession: toIsoDate(stats?.last_session_at),
+      sessionsLast7Days: Number(stats?.sessions_last_7_days || 0),
+      sessionsLast30Days: Number(stats?.sessions_last_30_days || 0),
     },
     records: {
       bestStreak: Number(gamification?.streak_best || 0),

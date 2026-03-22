@@ -65,6 +65,78 @@ async function writeAdminAuditLog(req, payload) {
   }
 }
 
+function normalizeEmail(email) {
+  return String(email || "").trim().toLowerCase();
+}
+
+async function findUserIdByEmail(email) {
+  try {
+    if (!supabase) return null;
+
+    const safeEmail = normalizeEmail(email);
+    if (!safeEmail) return null;
+
+    const { data, error } = await supabase
+      .from("users")
+      .select("id, email")
+      .eq("email", safeEmail)
+      .maybeSingle();
+
+    if (error) {
+      console.error("Erreur findUserIdByEmail :", error);
+      return null;
+    }
+
+    return data?.id || null;
+  } catch (e) {
+    console.error("Erreur findUserIdByEmail catch :", e);
+    return null;
+  }
+}
+
+async function resolveReservationUserId({ explicitUserId = null, email = null }) {
+  const safeExplicitUserId = safeText(explicitUserId, 120) || null;
+  if (safeExplicitUserId) return safeExplicitUserId;
+
+  const byEmail = await findUserIdByEmail(email);
+  return byEmail || null;
+}
+
+async function ensureReservationHasUserId(reservation) {
+  try {
+    if (!supabase || !reservation?.id) return reservation;
+
+    if (reservation.user_id) return reservation;
+
+    const resolvedUserId = await resolveReservationUserId({
+      explicitUserId: null,
+      email: reservation.email || null,
+    });
+
+    if (!resolvedUserId) return reservation;
+
+    const { data, error } = await supabase
+      .from("reservations")
+      .update({
+        user_id: resolvedUserId,
+        updated_at: new Date().toISOString(),
+      })
+      .eq("id", reservation.id)
+      .select()
+      .single();
+
+    if (error) {
+      console.error("Erreur ensureReservationHasUserId update :", error);
+      return reservation;
+    }
+
+    return data || reservation;
+  } catch (e) {
+    console.error("Erreur ensureReservationHasUserId catch :", e);
+    return reservation;
+  }
+}
+
 router.post("/api/admin/create-free-reservation", requireSupabaseAdmin, async (req, res) => {
   try {
     if (!supabase) {
@@ -83,13 +155,17 @@ router.post("/api/admin/create-free-reservation", requireSupabaseAdmin, async (r
     } = req.body || {};
 
     const safeName = safeText(name, 120);
-    const safeEmail = safeText(email, 160);
+    const safeEmail = normalizeEmail(email);
     const safeDate = safeText(date, 10);
     const safeBoxId = getNumericBoxId(box_id);
     const safeStartMinutes = Number(start_minutes);
     const safePersons = clampPersons(persons || 2);
     const safeStatus = safeText(status, 40) || "confirmed";
-    const safeUserId = safeText(user_id, 120) || null;
+
+    const resolvedUserId = await resolveReservationUserId({
+      explicitUserId: user_id,
+      email: safeEmail,
+    });
 
     if (!safeName || !safeEmail || !safeDate) {
       return res.status(400).json({
@@ -134,7 +210,7 @@ router.post("/api/admin/create-free-reservation", requireSupabaseAdmin, async (r
     const reservationRow = {
       name: safeName,
       email: safeEmail,
-      user_id: safeUserId,
+      user_id: resolvedUserId,
       datetime: startIso,
       created_at: nowIso,
       start_time: startIso,
@@ -153,9 +229,11 @@ router.post("/api/admin/create-free-reservation", requireSupabaseAdmin, async (r
       montant: 0,
       free_session: true,
 
-      // Compatibilité DB legacy : le métier réel est désormais Singcoins
+      // Compatibilité legacy
       loyalty_used: false,
       points_spent: 0,
+      singcoins_used: false,
+      singcoins_spent: 0,
 
       promo_code: null,
       refunded_amount: 0,
@@ -229,10 +307,12 @@ router.post("/api/admin/mark-reservation-completed", requireSupabaseAdmin, async
       return res.status(400).json({ error: "reservationId manquant" });
     }
 
-    const reservation = await getReservationById(reservationId);
-    if (!reservation) {
+    const originalReservation = await getReservationById(reservationId);
+    if (!originalReservation) {
       return res.status(404).json({ error: "Réservation introuvable" });
     }
+
+    let reservation = await ensureReservationHasUserId(originalReservation);
 
     const nowIso = new Date().toISOString();
     const safeCheckedInAt =
@@ -245,6 +325,7 @@ router.post("/api/admin/mark-reservation-completed", requireSupabaseAdmin, async
 
     const updatePayload = {
       status: "completed",
+      user_id: reservation.user_id || null,
       checked_in_at: safeCheckedInAt,
       completed_at: safeCompletedAt,
       is_weekend:
@@ -276,16 +357,24 @@ router.post("/api/admin/mark-reservation-completed", requireSupabaseAdmin, async
       });
     }
 
-    let gamification = null;
-    try {
-      gamification = await processReservationGamification(updatedReservation.id);
-    } catch (gErr) {
-      console.error("Erreur processReservationGamification :", gErr);
+    let finalReservation = updatedReservation;
+    if (!finalReservation.user_id) {
+      finalReservation = await ensureReservationHasUserId(updatedReservation);
     }
 
-    if (!gamification && updatedReservation.user_id) {
+    let gamification = null;
+    let gamificationErrorMessage = null;
+
+    try {
+      gamification = await processReservationGamification(finalReservation.id);
+    } catch (gErr) {
+      console.error("Erreur processReservationGamification :", gErr);
+      gamificationErrorMessage = gErr?.message || "Erreur gamification";
+    }
+
+    if (!gamification && finalReservation.user_id) {
       try {
-        gamification = await getUserGamificationSnapshot(updatedReservation.user_id);
+        gamification = await getUserGamificationSnapshot(finalReservation.user_id);
       } catch (snapshotErr) {
         console.error("Erreur snapshot après completed :", snapshotErr);
       }
@@ -294,21 +383,27 @@ router.post("/api/admin/mark-reservation-completed", requireSupabaseAdmin, async
     await writeAdminAuditLog(req, {
       action: "mark_reservation_completed",
       target_table: "reservations",
-      target_id: updatedReservation.id,
+      target_id: finalReservation.id,
       metadata: {
-        email: updatedReservation.email || null,
-        user_id: updatedReservation.user_id || null,
-        previous_status: reservation.status || null,
-        new_status: updatedReservation.status || null,
-        checked_in_at: updatedReservation.checked_in_at || null,
-        completed_at: updatedReservation.completed_at || null,
+        email: finalReservation.email || null,
+        user_id: finalReservation.user_id || null,
+        previous_status: originalReservation.status || null,
+        new_status: finalReservation.status || null,
+        checked_in_at: finalReservation.checked_in_at || null,
+        completed_at: finalReservation.completed_at || null,
+        gamification_snapshot_returned: !!gamification,
+        gamification_error: gamificationErrorMessage,
       },
     });
 
     return res.json({
       success: true,
-      reservation: updatedReservation,
+      reservation: finalReservation,
       gamification,
+      warning:
+        !finalReservation.user_id
+          ? "Réservation complétée sans user_id : gamification potentiellement limitée."
+          : null,
     });
   } catch (e) {
     console.error("Erreur /api/admin/mark-reservation-completed :", e);
