@@ -106,28 +106,49 @@ function buildStreakFromWeekKeys(weekKeys) {
   };
 }
 
+function mapBadgeIcon(icon) {
+  const iconMap = {
+    sparkles: "🎤",
+    mic: "🔁",
+    clock3: "⏱️",
+    calendar: "📅",
+    users: "🎉",
+    trophy: "🏆",
+    flame: "🔥",
+    gift: "💰",
+  };
+
+  return iconMap[icon] || "★";
+}
+
 async function ensureUserRows(userId) {
   if (!supabase || !userId) return;
 
-  await supabase
+  const nowIso = new Date().toISOString();
+
+  const { error: gamifError } = await supabase
     .from("user_gamification")
     .upsert(
       {
         user_id: userId,
-        updated_at: new Date().toISOString(),
+        updated_at: nowIso,
       },
       { onConflict: "user_id" }
     );
 
-  await supabase
+  if (gamifError) throw gamifError;
+
+  const { error: statsError } = await supabase
     .from("user_stats")
     .upsert(
       {
         user_id: userId,
-        updated_at: new Date().toISOString(),
+        updated_at: nowIso,
       },
       { onConflict: "user_id" }
     );
+
+  if (statsError) throw statsError;
 }
 
 async function ensureBadgeDefinitions() {
@@ -224,7 +245,11 @@ async function ensureBadgeDefinitions() {
     },
   ];
 
-  await supabase.from("badge_definitions").upsert(rows, { onConflict: "code" });
+  const { error } = await supabase
+    .from("badge_definitions")
+    .upsert(rows, { onConflict: "code" });
+
+  if (error) throw error;
 }
 
 async function ensureMissionDefinitions() {
@@ -263,7 +288,11 @@ async function ensureMissionDefinitions() {
     },
   ];
 
-  await supabase.from("weekly_missions").upsert(rows, { onConflict: "code" });
+  const { error } = await supabase
+    .from("weekly_missions")
+    .upsert(rows, { onConflict: "code" });
+
+  if (error) throw error;
 }
 
 async function sumLedger(table, userId) {
@@ -275,6 +304,7 @@ async function sumLedger(table, userId) {
   if (error) throw error;
 
   const amounts = (data || []).map((row) => Number(row.amount || 0));
+
   return {
     positive: amounts.filter((v) => v > 0).reduce((a, b) => a + b, 0),
     negativeAbs: Math.abs(amounts.filter((v) => v < 0).reduce((a, b) => a + b, 0)),
@@ -289,7 +319,7 @@ async function refreshGamificationSummary(userId) {
   const xpLedger = await sumLedger("xp_ledger", userId);
   const level = computeLevel(xpLedger.balance);
 
-  await supabase
+  const { error } = await supabase
     .from("user_gamification")
     .update({
       singcoins_balance: singcoins.balance,
@@ -302,11 +332,15 @@ async function refreshGamificationSummary(userId) {
     })
     .eq("user_id", userId);
 
-  const { data } = await supabase
+  if (error) throw error;
+
+  const { data, error: readError } = await supabase
     .from("user_gamification")
     .select("*")
     .eq("user_id", userId)
     .maybeSingle();
+
+  if (readError) throw readError;
 
   return data;
 }
@@ -320,7 +354,9 @@ async function creditLedger({
   referenceId = null,
   label = null,
 }) {
-  if (!supabase || !userId || !amount) return { skipped: true };
+  if (!supabase || !userId || !amount) {
+    return { skipped: true };
+  }
 
   const payload = {
     user_id: userId,
@@ -341,6 +377,69 @@ async function creditLedger({
   }
 
   return { inserted: true };
+}
+
+async function insertGamificationEvent({
+  userId,
+  eventType,
+  referenceType = null,
+  referenceId = null,
+  payload = {},
+  processed = true,
+}) {
+  if (!supabase || !userId || !eventType) {
+    return { skipped: true };
+  }
+
+  const safeReferenceId = referenceId ? String(referenceId) : null;
+
+  if (referenceType && safeReferenceId) {
+    const { data: existing, error: existingError } = await supabase
+      .from("gamification_events")
+      .select("id, processed")
+      .eq("event_type", eventType)
+      .eq("reference_type", referenceType)
+      .eq("reference_id", safeReferenceId)
+      .maybeSingle();
+
+    if (existingError) throw existingError;
+
+    if (existing) {
+      return {
+        duplicate: true,
+        existing,
+      };
+    }
+  }
+
+  const nowIso = new Date().toISOString();
+
+  const { data, error } = await supabase
+    .from("gamification_events")
+    .insert({
+      user_id: userId,
+      event_type: eventType,
+      reference_type: referenceType,
+      reference_id: safeReferenceId,
+      payload: payload || {},
+      processed,
+      processed_at: processed ? nowIso : null,
+      created_at: nowIso,
+    })
+    .select("id")
+    .single();
+
+  if (error) {
+    if (String(error.code || "") === "23505") {
+      return { duplicate: true };
+    }
+    throw error;
+  }
+
+  return {
+    inserted: true,
+    id: data?.id || null,
+  };
 }
 
 export async function creditSingcoins({
@@ -389,6 +488,7 @@ export async function creditXp({
 
 export async function getAvailableSingcoinsForUser(userId) {
   if (!supabase || !userId) return 0;
+
   await ensureUserRows(userId);
 
   const { data, error } = await supabase
@@ -398,6 +498,7 @@ export async function getAvailableSingcoinsForUser(userId) {
     .maybeSingle();
 
   if (error) throw error;
+
   return Math.max(0, Number(data?.singcoins_balance || 0));
 }
 
@@ -410,13 +511,20 @@ export async function debitSingcoins({
   label = null,
 }) {
   const spendAmount = Math.max(0, Number(amount || 0));
+
   if (!supabase) throw new Error("Supabase non configuré");
   if (!userId) throw new Error("userId manquant");
+
   if (!spendAmount) {
-    return { success: true, deducted: 0, remainingSingcoins: await getAvailableSingcoinsForUser(userId) };
+    return {
+      success: true,
+      deducted: 0,
+      remainingSingcoins: await getAvailableSingcoinsForUser(userId),
+    };
   }
 
   const currentBalance = await getAvailableSingcoinsForUser(userId);
+
   if (currentBalance < spendAmount) {
     return {
       success: false,
@@ -453,9 +561,15 @@ export async function refundSingcoins({
   label = null,
 }) {
   const refundAmount = Math.max(0, Number(amount || 0));
+
   if (!supabase) throw new Error("Supabase non configuré");
+
   if (!userId || !refundAmount) {
-    return { success: true, refunded: 0, balance: userId ? await getAvailableSingcoinsForUser(userId) : 0 };
+    return {
+      success: true,
+      refunded: 0,
+      balance: userId ? await getAvailableSingcoinsForUser(userId) : 0,
+    };
   }
 
   await creditSingcoins({
@@ -569,7 +683,11 @@ async function syncUserStats(userId) {
     updated_at: new Date().toISOString(),
   };
 
-  await supabase.from("user_stats").upsert(payload, { onConflict: "user_id" });
+  const { error: upsertError } = await supabase
+    .from("user_stats")
+    .upsert(payload, { onConflict: "user_id" });
+
+  if (upsertError) throw upsertError;
 }
 
 async function syncStreak(userId) {
@@ -587,16 +705,20 @@ async function syncStreak(userId) {
 
   const streak = buildStreakFromWeekKeys(weekKeys);
 
-  await supabase
+  const { error: updateError } = await supabase
     .from("user_gamification")
     .update({
       streak_current: streak.current,
       streak_best: streak.best,
       streak_last_period_key: streak.lastKey,
-      streak_last_validated_at: streak.lastKey ? `${streak.lastKey}T00:00:00.000Z` : null,
+      streak_last_validated_at: streak.lastKey
+        ? `${streak.lastKey}T00:00:00.000Z`
+        : null,
       updated_at: new Date().toISOString(),
     })
     .eq("user_id", userId);
+
+  if (updateError) throw updateError;
 }
 
 async function syncWeeklyMissions(userId) {
@@ -604,6 +726,7 @@ async function syncWeeklyMissions(userId) {
 
   const now = new Date();
   const currentWeekStart = getMondayKey(now);
+
   if (!currentWeekStart) return;
 
   const weekStartTs = new Date(`${currentWeekStart}T00:00:00.000Z`).getTime();
@@ -613,7 +736,11 @@ async function syncWeeklyMissions(userId) {
     { data: missions, error: missionsError },
     { data: reservations, error: reservationsError },
   ] = await Promise.all([
-    supabase.from("weekly_missions").select("*").eq("is_active", true).order("sort_order"),
+    supabase
+      .from("weekly_missions")
+      .select("*")
+      .eq("is_active", true)
+      .order("sort_order"),
     supabase
       .from("reservations")
       .select("id,completed_at,start_time,status,persons,is_weekend")
@@ -635,7 +762,9 @@ async function syncWeeklyMissions(userId) {
     if (mission.code === "book_once_week") {
       progressValue = Math.min(1, weekReservations.length);
     } else if (mission.code === "come_with_3_people") {
-      progressValue = weekReservations.some((row) => Number(row.persons || 0) >= 3) ? 1 : 0;
+      progressValue = weekReservations.some((row) => Number(row.persons || 0) >= 3)
+        ? 1
+        : 0;
     } else if (mission.code === "weekday_booking") {
       progressValue = weekReservations.some((row) => !row.is_weekend) ? 1 : 0;
     }
@@ -643,7 +772,7 @@ async function syncWeeklyMissions(userId) {
     const targetValue = Number(mission.target_value || 1);
     const isCompleted = progressValue >= targetValue;
 
-    const { data: existing } = await supabase
+    const { data: existing, error: existingError } = await supabase
       .from("user_mission_progress")
       .select("*")
       .eq("user_id", userId)
@@ -651,38 +780,50 @@ async function syncWeeklyMissions(userId) {
       .eq("week_start", currentWeekStart)
       .maybeSingle();
 
+    if (existingError) throw existingError;
+
     if (!existing) {
-      await supabase.from("user_mission_progress").insert({
-        user_id: userId,
-        mission_code: mission.code,
-        week_start: currentWeekStart,
-        progress_value: progressValue,
-        target_value: targetValue,
-        is_completed: isCompleted,
-        completed_at: isCompleted ? new Date().toISOString() : null,
-        reward_claimed: false,
-        updated_at: new Date().toISOString(),
-      });
+      const { error: insertError } = await supabase
+        .from("user_mission_progress")
+        .insert({
+          user_id: userId,
+          mission_code: mission.code,
+          week_start: currentWeekStart,
+          progress_value: progressValue,
+          target_value: targetValue,
+          is_completed: isCompleted,
+          completed_at: isCompleted ? new Date().toISOString() : null,
+          reward_claimed: false,
+          updated_at: new Date().toISOString(),
+        });
+
+      if (insertError) throw insertError;
     } else {
-      await supabase
+      const { error: updateError } = await supabase
         .from("user_mission_progress")
         .update({
           progress_value: progressValue,
           target_value: targetValue,
           is_completed: isCompleted,
-          completed_at: isCompleted ? existing.completed_at || new Date().toISOString() : null,
+          completed_at: isCompleted
+            ? existing.completed_at || new Date().toISOString()
+            : null,
           updated_at: new Date().toISOString(),
         })
         .eq("id", existing.id);
+
+      if (updateError) throw updateError;
     }
 
-    const { data: refreshed } = await supabase
+    const { data: refreshed, error: refreshedError } = await supabase
       .from("user_mission_progress")
       .select("*")
       .eq("user_id", userId)
       .eq("mission_code", mission.code)
       .eq("week_start", currentWeekStart)
       .maybeSingle();
+
+    if (refreshedError) throw refreshedError;
 
     if (refreshed?.is_completed && !refreshed.reward_claimed) {
       const referenceId = `${mission.code}:${currentWeekStart}`;
@@ -705,13 +846,15 @@ async function syncWeeklyMissions(userId) {
         label: mission.title,
       });
 
-      await supabase
+      const { error: claimedError } = await supabase
         .from("user_mission_progress")
         .update({
           reward_claimed: true,
           updated_at: new Date().toISOString(),
         })
         .eq("id", refreshed.id);
+
+      if (claimedError) throw claimedError;
     }
   }
 }
@@ -725,10 +868,25 @@ async function evaluateBadges(userId) {
     { data: stats, error: statsError },
     { data: gamification, error: gamificationError },
   ] = await Promise.all([
-    supabase.from("badge_definitions").select("*").eq("is_active", true).order("sort_order"),
-    supabase.from("user_badges").select("badge_code").eq("user_id", userId),
-    supabase.from("user_stats").select("*").eq("user_id", userId).maybeSingle(),
-    supabase.from("user_gamification").select("*").eq("user_id", userId).maybeSingle(),
+    supabase
+      .from("badge_definitions")
+      .select("*")
+      .eq("is_active", true)
+      .order("sort_order"),
+    supabase
+      .from("user_badges")
+      .select("badge_code")
+      .eq("user_id", userId),
+    supabase
+      .from("user_stats")
+      .select("*")
+      .eq("user_id", userId)
+      .maybeSingle(),
+    supabase
+      .from("user_gamification")
+      .select("*")
+      .eq("user_id", userId)
+      .maybeSingle(),
   ]);
 
   if (defsError) throw defsError;
@@ -743,28 +901,41 @@ async function evaluateBadges(userId) {
 
     let unlockedNow = false;
 
-    if (def.code === "first_session") unlockedNow = Number(stats?.sessions_completed || 0) >= 1;
-    if (def.code === "two_sessions") unlockedNow = Number(stats?.sessions_completed || 0) >= 2;
-    if (def.code === "three_hours") unlockedNow = Number(stats?.minutes_sung_total || 0) >= 180;
-    if (def.code === "weekday_regular") unlockedNow = Number(stats?.sessions_weekday_total || 0) >= 3;
-    if (def.code === "group_vibes") unlockedNow = Number(stats?.largest_group_size || 0) >= 3;
-    if (def.code === "ten_sessions") unlockedNow = Number(stats?.sessions_completed || 0) >= 10;
-    if (def.code === "four_week_streak") unlockedNow = Number(gamification?.streak_best || 0) >= 4;
-    if (def.code === "spent_singcoins_once") unlockedNow = Number(stats?.singcoins_spent_total || 0) > 0;
+    if (def.code === "first_session") {
+      unlockedNow = Number(stats?.sessions_completed || 0) >= 1;
+    } else if (def.code === "two_sessions") {
+      unlockedNow = Number(stats?.sessions_completed || 0) >= 2;
+    } else if (def.code === "three_hours") {
+      unlockedNow = Number(stats?.minutes_sung_total || 0) >= 180;
+    } else if (def.code === "weekday_regular") {
+      unlockedNow = Number(stats?.sessions_weekday_total || 0) >= 3;
+    } else if (def.code === "group_vibes") {
+      unlockedNow = Number(stats?.largest_group_size || 0) >= 3;
+    } else if (def.code === "ten_sessions") {
+      unlockedNow = Number(stats?.sessions_completed || 0) >= 10;
+    } else if (def.code === "four_week_streak") {
+      unlockedNow = Number(gamification?.streak_best || 0) >= 4;
+    } else if (def.code === "spent_singcoins_once") {
+      unlockedNow = Number(stats?.singcoins_spent_total || 0) > 0;
+    }
 
     if (!unlockedNow) continue;
 
-    const { error: insertError } = await supabase.from("user_badges").insert({
-      user_id: userId,
-      badge_code: def.code,
-      unlocked_at: new Date().toISOString(),
-      reward_singcoins: Number(def.reward_singcoins || 0),
-      reward_xp: Number(def.reward_xp || 0),
-      source_event_id: def.code,
-    });
+    const { error: insertError } = await supabase
+      .from("user_badges")
+      .insert({
+        user_id: userId,
+        badge_code: def.code,
+        unlocked_at: new Date().toISOString(),
+        reward_singcoins: Number(def.reward_singcoins || 0),
+        reward_xp: Number(def.reward_xp || 0),
+        source_event_id: def.code,
+      });
 
     if (insertError) {
-      if (String(insertError.code || "") !== "23505") throw insertError;
+      if (String(insertError.code || "") !== "23505") {
+        throw insertError;
+      }
     } else {
       await creditSingcoins({
         userId,
@@ -799,45 +970,35 @@ export async function processReservationGamification(reservationId) {
   if (error) throw error;
   if (!reservation) return null;
   if (!reservation.user_id) return null;
-
-  const reservationStatus = normalizeStatus(reservation.status);
-  if (reservationStatus !== "completed") return null;
+  if (!qualifiesForGamification(reservation.status)) return null;
 
   const userId = reservation.user_id;
 
   await ensureUserRows(userId);
 
-  const { data: existingEvent, error: existingEventError } = await supabase
-    .from("gamification_events")
-    .select("id, processed")
-    .eq("event_type", "reservation_processed")
-    .eq("reference_type", "reservation")
-    .eq("reference_id", String(reservation.id))
-    .maybeSingle();
+  const eventResult = await insertGamificationEvent({
+    userId,
+    eventType: "reservation_completed",
+    referenceType: "reservation",
+    referenceId: reservation.id,
+    payload: {
+      reservation_id: reservation.id,
+      status: reservation.status,
+      start_time: reservation.start_time,
+      end_time: reservation.end_time,
+      completed_at: reservation.completed_at,
+      persons: reservation.persons,
+      is_weekend: reservation.is_weekend,
+      is_daytime: reservation.is_daytime,
+      is_group_session: reservation.is_group_session,
+      session_minutes: reservation.session_minutes,
+    },
+    processed: true,
+  });
 
-  if (existingEventError) throw existingEventError;
-  if (existingEvent?.processed) {
+  if (eventResult.duplicate) {
     return getUserGamificationSnapshot(userId);
   }
-
-  await supabase.from("gamification_events").upsert(
-    {
-      user_id: userId,
-      event_type: "reservation_processed",
-      reference_type: "reservation",
-      reference_id: String(reservation.id),
-      payload: {
-        status: reservation.status,
-        start_time: reservation.start_time,
-        end_time: reservation.end_time,
-        completed_at: reservation.completed_at,
-      },
-      processed: true,
-      processed_at: new Date().toISOString(),
-      created_at: new Date().toISOString(),
-    },
-    { onConflict: "event_type,reference_type,reference_id" }
-  );
 
   await creditSingcoins({
     userId,
@@ -872,10 +1033,30 @@ export async function getUserGamificationSnapshot(userId) {
   if (!supabase || !userId) {
     return {
       singcoins: { balance: 0, earned: 0, used: 0 },
-      level: { current: 1, name: "Nouveau", xpCurrent: 0, xpNextLevel: 100 },
-      streak: { current: 0, best: 0 },
-      stats: { totalSessions: 0, totalTime: "0h", totalSongs: 0, lastSession: null },
-      records: { bestStreak: 0, biggestSession: 0, longestSessionMinutes: 0 },
+      level: {
+        current: 1,
+        name: "Nouveau",
+        xpCurrent: 0,
+        xpNextLevel: 100,
+        xpTotal: 0,
+      },
+      streak: {
+        current: 0,
+        best: 0,
+        lastValidatedAt: null,
+        lastPeriodKey: null,
+      },
+      stats: {
+        totalSessions: 0,
+        totalTime: "0h",
+        totalSongs: 0,
+        lastSession: null,
+      },
+      records: {
+        bestStreak: 0,
+        biggestSession: 0,
+        longestSessionMinutes: 0,
+      },
       missions: [],
       badges: [],
     };
@@ -886,44 +1067,75 @@ export async function getUserGamificationSnapshot(userId) {
   await ensureBadgeDefinitions();
 
   const [
-    { data: gamification },
-    { data: stats },
-    { data: badgeDefs },
-    { data: userBadges },
-    { data: missionDefs },
-    { data: missionProgress },
+    { data: gamification, error: gamificationError },
+    { data: stats, error: statsError },
+    { data: badgeDefs, error: badgeDefsError },
+    { data: userBadges, error: userBadgesError },
+    { data: missionDefs, error: missionDefsError },
+    { data: missionProgress, error: missionProgressError },
   ] = await Promise.all([
-    supabase.from("user_gamification").select("*").eq("user_id", userId).maybeSingle(),
-    supabase.from("user_stats").select("*").eq("user_id", userId).maybeSingle(),
-    supabase.from("badge_definitions").select("*").eq("is_active", true).order("sort_order"),
-    supabase.from("user_badges").select("*").eq("user_id", userId),
-    supabase.from("weekly_missions").select("*").eq("is_active", true).order("sort_order"),
-    supabase.from("user_mission_progress").select("*").eq("user_id", userId),
+    supabase
+      .from("user_gamification")
+      .select("*")
+      .eq("user_id", userId)
+      .maybeSingle(),
+    supabase
+      .from("user_stats")
+      .select("*")
+      .eq("user_id", userId)
+      .maybeSingle(),
+    supabase
+      .from("badge_definitions")
+      .select("*")
+      .eq("is_active", true)
+      .order("sort_order"),
+    supabase
+      .from("user_badges")
+      .select("*")
+      .eq("user_id", userId),
+    supabase
+      .from("weekly_missions")
+      .select("*")
+      .eq("is_active", true)
+      .order("sort_order"),
+    supabase
+      .from("user_mission_progress")
+      .select("*")
+      .eq("user_id", userId),
   ]);
+
+  if (gamificationError) throw gamificationError;
+  if (statsError) throw statsError;
+  if (badgeDefsError) throw badgeDefsError;
+  if (userBadgesError) throw userBadgesError;
+  if (missionDefsError) throw missionDefsError;
+  if (missionProgressError) throw missionProgressError;
 
   const xp = Number(gamification?.xp_total || 0);
   const level = computeLevel(xp);
 
   const badgeMap = new Map((badgeDefs || []).map((row) => [row.code, row]));
+
   const badges = (userBadges || [])
-    .map((row) => ({
-      code: row.badge_code,
-      unlockedAt: row.unlocked_at,
-      rewardSingcoins: Number(row.reward_singcoins || 0),
-      rewardXp: Number(row.reward_xp || 0),
-      ...(badgeMap.get(row.badge_code)
-        ? {
-            title: badgeMap.get(row.badge_code).title,
-            description: badgeMap.get(row.badge_code).description,
-            rarity: badgeMap.get(row.badge_code).rarity,
-            icon: badgeMap.get(row.badge_code).icon,
-            sortOrder: badgeMap.get(row.badge_code).sort_order,
-          }
-        : {}),
-    }))
+    .map((row) => {
+      const def = badgeMap.get(row.badge_code) || null;
+
+      return {
+        code: row.badge_code,
+        unlockedAt: row.unlocked_at,
+        rewardSingcoins: Number(row.reward_singcoins || 0),
+        rewardXp: Number(row.reward_xp || 0),
+        title: def?.title || row.badge_code,
+        description: def?.description || "",
+        rarity: def?.rarity || "common",
+        icon: mapBadgeIcon(def?.icon),
+        sortOrder: Number(def?.sort_order || 999),
+      };
+    })
     .sort((a, b) => Number(a.sortOrder || 0) - Number(b.sortOrder || 0));
 
   const currentWeek = getMondayKey(new Date());
+
   const missionByKey = new Map(
     (missionProgress || []).map((row) => [`${row.mission_code}:${row.week_start}`, row])
   );
