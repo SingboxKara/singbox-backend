@@ -1,6 +1,8 @@
 // backend/middlewares/admin.js
 
-import { CRON_SECRET } from "../config/env.js";
+import jwt from "jsonwebtoken";
+
+import { CRON_SECRET, JWT_SECRET } from "../config/env.js";
 import { supabase } from "../config/supabase.js";
 
 function extractBearerToken(req) {
@@ -18,6 +20,73 @@ export function isCronAuthorized(req) {
   return bearerToken === CRON_SECRET || headerSecret === CRON_SECRET;
 }
 
+async function resolveAppJwtUser(token) {
+  if (!JWT_SECRET) {
+    throw new Error("JWT_SECRET non configuré");
+  }
+
+  const decoded = jwt.verify(token, JWT_SECRET);
+  const userId = decoded?.userId || decoded?.id || null;
+
+  if (!userId) {
+    return null;
+  }
+
+  const { data: user, error } = await supabase
+    .from("users")
+    .select("id, email")
+    .eq("id", userId)
+    .maybeSingle();
+
+  if (error) {
+    throw error;
+  }
+
+  if (!user) {
+    return null;
+  }
+
+  return {
+    id: user.id,
+    email: user.email || null,
+    source: "app_jwt",
+  };
+}
+
+async function resolveSupabaseAuthUser(token) {
+  const { data: userData, error: userError } = await supabase.auth.getUser(token);
+
+  if (userError || !userData?.user) {
+    return null;
+  }
+
+  return {
+    id: userData.user.id,
+    email: userData.user.email || null,
+    source: "supabase_auth",
+  };
+}
+
+async function resolveUserFromToken(token) {
+  // 1. priorité au JWT de ton backend (/api/login)
+  try {
+    const appUser = await resolveAppJwtUser(token);
+    if (appUser) return appUser;
+  } catch (_err) {
+    // on tente ensuite le token Supabase Auth
+  }
+
+  // 2. fallback éventuel si un vrai token Supabase est utilisé
+  try {
+    const supabaseUser = await resolveSupabaseAuthUser(token);
+    if (supabaseUser) return supabaseUser;
+  } catch (_err) {
+    // ignore
+  }
+
+  return null;
+}
+
 async function resolveSupabaseUserAndAdmin(req) {
   if (!supabase) {
     throw new Error("Supabase non configuré");
@@ -28,22 +97,38 @@ async function resolveSupabaseUserAndAdmin(req) {
     return { ok: false, status: 401, error: "Token manquant" };
   }
 
-  const { data: userData, error: userError } = await supabase.auth.getUser(token);
+  const user = await resolveUserFromToken(token);
 
-  if (userError || !userData?.user) {
+  if (!user) {
     return { ok: false, status: 401, error: "Token invalide" };
   }
 
-  const user = userData.user;
+  let adminRow = null;
 
-  const { data: adminRow, error: adminError } = await supabase
+  const { data: adminByUserId, error: adminByUserIdError } = await supabase
     .from("admin_users")
     .select("user_id, email")
     .eq("user_id", user.id)
     .maybeSingle();
 
-  if (adminError) {
-    throw adminError;
+  if (adminByUserIdError) {
+    throw adminByUserIdError;
+  }
+
+  adminRow = adminByUserId || null;
+
+  if (!adminRow && user.email) {
+    const { data: adminByEmail, error: adminByEmailError } = await supabase
+      .from("admin_users")
+      .select("user_id, email")
+      .ilike("email", user.email)
+      .maybeSingle();
+
+    if (adminByEmailError) {
+      throw adminByEmailError;
+    }
+
+    adminRow = adminByEmail || null;
   }
 
   req.user = {
