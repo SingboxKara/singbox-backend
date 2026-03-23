@@ -53,6 +53,17 @@ import {
 } from "../services/gamificationService.js";
 
 import {
+  ensureUserReferralCode,
+  getUserByReferralCode,
+  createPendingReferralForReservation,
+  validateReferralByReservationId,
+  markReferralCancelledByReservationId,
+  getUserReferralSummary,
+  getAvailableFreeSessionReward,
+  consumeFreeSessionReward,
+} from "../services/referralService.js";
+
+import {
   safeText,
   clampPersons,
   getNumericBoxId,
@@ -65,6 +76,10 @@ import {
   SLOT_DURATION_MINUTES,
   SINGCOINS_REWARD_COST,
 } from "../constants/booking.js";
+import {
+  REFERRAL_REQUIRED_VALID_COUNT,
+  REFERRAL_FREE_SESSION_INCLUDED_PERSONS,
+} from "../constants/referral.js";
 
 import {
   sendReservationEmail,
@@ -187,6 +202,66 @@ async function resolveReservationUserId({ explicitUserId = null, email = null })
   return await findUserIdByEmail(email);
 }
 
+async function resolveReferralContext({
+  referralCode,
+  resolvedUserId,
+  normalizedCustomerEmail,
+  customer,
+}) {
+  const safeReferralCode = String(referralCode || "").trim().toUpperCase();
+  if (!safeReferralCode) {
+    return { ok: true, referralCode: null, referrer: null };
+  }
+
+  if (!resolvedUserId) {
+    return {
+      ok: false,
+      reason: "Connexion requise pour attacher un parrainage à un compte client",
+    };
+  }
+
+  const referrer = await getUserByReferralCode(safeReferralCode);
+
+  if (!referrer) {
+    return {
+      ok: false,
+      reason: "Code de parrainage introuvable",
+    };
+  }
+
+  if (referrer.id === resolvedUserId) {
+    return {
+      ok: false,
+      reason: "Tu ne peux pas utiliser ton propre code de parrainage",
+    };
+  }
+
+  if (
+    String(referrer.email || "").trim().toLowerCase() === normalizedCustomerEmail
+  ) {
+    return {
+      ok: false,
+      reason: "Ce code de parrainage ne peut pas être utilisé sur le même email",
+    };
+  }
+
+  const customerPhone = String(customer?.telephone || "").trim();
+  const referrerPhone = String(referrer.telephone || "").trim();
+
+  if (customerPhone && referrerPhone && customerPhone === referrerPhone) {
+    return {
+      ok: false,
+      reason: "Ce code de parrainage ne peut pas être utilisé avec le même téléphone",
+    };
+  }
+
+  return {
+    ok: true,
+    referralCode: safeReferralCode,
+    referrer,
+  };
+}
+
 async function safeCreateReservationGamificationEvent(reservation) {
   try {
     if (!supabase || !reservation?.id || !reservation?.user_id) {
@@ -265,6 +340,7 @@ function buildReservationRow({
   resolvedUserId,
   singcoinsUsed,
   paymentIntentId,
+  referralFreeSessionApplied = false,
 }) {
   const start = new Date(item.start_time);
   const end = new Date(item.end_time);
@@ -294,7 +370,7 @@ function buildReservationRow({
     billable_persons: getBillablePersons(item.persons),
 
     montant: lineAmount,
-    free_session: lineAmount <= 0,
+    free_session: referralFreeSessionApplied || lineAmount <= 0,
 
     singcoins_used: !!singcoinsUsed,
     singcoins_spent: !!singcoinsUsed ? SINGCOINS_REWARD_COST : 0,
@@ -320,11 +396,9 @@ function buildReservationRow({
     session_minutes: Math.floor((end - start) / 60000),
     updated_at: nowIso,
 
-    // champs utiles si tu veux tracer proprement la ligne
     last_auto_charge_amount: 0,
     refunded_amount: 0,
 
-    // valeurs calculées par ligne
     theoretical_full_amount: lineTheoreticalFullAmount,
     singcoins_discount_amount: lineSingcoinsDiscountAmount,
   };
@@ -360,6 +434,7 @@ async function createPendingModificationRequest({
       delta_amount: deltaAmount,
 
       box_id: targetBoxId,
+      loyalty_used: !!reservation.loyalty_used,
       status: "pending",
       stripe_payment_intent_id: stripePaymentIntentId,
       stripe_client_secret: stripeClientSecret,
@@ -859,6 +934,15 @@ async function runReservationRefund({
     ),
     updated_at: new Date().toISOString(),
   });
+
+  try {
+    await markReferralCancelledByReservationId(
+      reservation.id,
+      "reservation_cancelled_or_refunded"
+    );
+  } catch (refErr) {
+    console.error("Erreur annulation referral :", refErr);
+  }
 
   return {
     ok: true,
@@ -1372,8 +1456,15 @@ router.post("/api/confirm-reservation", async (req, res) => {
   let singcoinsDebitedAmount = 0;
 
   try {
-    const { panier, customer, promoCode, paymentIntentId, singcoinsUsed } =
-      req.body || {};
+    const {
+      panier,
+      customer,
+      promoCode,
+      paymentIntentId,
+      singcoinsUsed,
+      referralCode,
+      useReferralFreeSession,
+    } = req.body || {};
 
     if (!panier || !Array.isArray(panier) || panier.length === 0) {
       return res.status(400).json({ error: "Panier vide" });
@@ -1403,7 +1494,7 @@ router.post("/api/confirm-reservation", async (req, res) => {
         ? await isFirstReservationForEmail(normalizedCustomerEmail)
         : null;
 
-     const result = await validatePromoCode(promoCode, totalCashDue, {
+      const result = await validatePromoCode(promoCode, totalCashDue, {
         email: normalizedCustomerEmail || null,
         isFirstSession,
         enforceAdvancedRules: true,
@@ -1443,6 +1534,41 @@ router.post("/api/confirm-reservation", async (req, res) => {
       email: normalizedCustomerEmail,
     });
 
+    let referralContext = { ok: true, referralCode: null, referrer: null };
+
+    if (referralCode) {
+      referralContext = await resolveReferralContext({
+        referralCode,
+        resolvedUserId,
+        normalizedCustomerEmail,
+        customer,
+      });
+
+      if (!referralContext.ok) {
+        return res.status(400).json({
+          error: referralContext.reason || "Code de parrainage invalide",
+        });
+      }
+    }
+
+    let referralFreeSessionReward = null;
+
+    if (useReferralFreeSession === true) {
+      if (!resolvedUserId) {
+        return res.status(401).json({
+          error: "Connexion requise pour utiliser une session offerte parrainage",
+        });
+      }
+
+      referralFreeSessionReward = await getAvailableFreeSessionReward(resolvedUserId);
+
+      if (!referralFreeSessionReward) {
+        return res.status(400).json({
+          error: "Aucune session offerte parrainage disponible",
+        });
+      }
+    }
+
     if (!resolvedUserId) {
       console.warn("[confirm-reservation] user_id non résolu", {
         email: normalizedCustomerEmail,
@@ -1456,7 +1582,36 @@ router.post("/api/confirm-reservation", async (req, res) => {
       });
     }
 
-    if (!isFreeReservationFlag) {
+    if (referralFreeSessionReward) {
+      const coveredPersons = REFERRAL_FREE_SESSION_INCLUDED_PERSONS;
+
+      if (pricing.normalizedItems.length !== 1) {
+        return res.status(400).json({
+          error: "La session offerte parrainage est limitée à une seule réservation par utilisation",
+        });
+      }
+
+      const firstItem = pricing.normalizedItems[0];
+      const persons = Number(firstItem.persons || 2);
+      const billablePersons = Math.max(persons, 2);
+      const newBillablePersons = Math.max(
+        billablePersons - coveredPersons,
+        0
+      );
+
+      const fullLineAmount = Number(firstItem.cashAmountDue || 0);
+      const unitPrice = billablePersons > 0 ? fullLineAmount / billablePersons : 0;
+      const newAmount = Number((unitPrice * newBillablePersons).toFixed(2));
+
+      pricing.normalizedItems[0] = {
+        ...firstItem,
+        cashAmountDue: newAmount,
+      };
+
+      totalCashDue = Number(newAmount.toFixed(2));
+    }
+
+    if (!isFreeReservationFlag && !referralFreeSessionReward) {
       if (!paymentIntentId) {
         return res.status(400).json({ error: "paymentIntentId manquant" });
       }
@@ -1523,16 +1678,18 @@ router.post("/api/confirm-reservation", async (req, res) => {
       );
     }
 
-const rows = pricing.normalizedItems.map((it) =>
-  buildReservationRow({
-    item: it,
-    fullName,
-    normalizedCustomerEmail,
-    resolvedUserId,
-    singcoinsUsed,
-    paymentIntentId,
-  })
-);
+    const rows = pricing.normalizedItems.map((it, index) =>
+      buildReservationRow({
+        item: it,
+        fullName,
+        normalizedCustomerEmail,
+        resolvedUserId,
+        singcoinsUsed,
+        paymentIntentId,
+        referralFreeSessionApplied:
+          !!referralFreeSessionReward && index === 0,
+      })
+    );
 
     for (const row of rows) {
       const hasConflict = await hasReservationConflict({
@@ -1553,7 +1710,7 @@ const rows = pricing.normalizedItems.map((it) =>
       }
     }
 
-    if (!isFreeReservationFlag && paymentIntentId) {
+    if (!isFreeReservationFlag && !referralFreeSessionReward && paymentIntentId) {
       const alreadyUsedLate = await isPaymentIntentAlreadyUsed(paymentIntentId);
       if (alreadyUsedLate) {
         if (singcoinsDebited && resolvedUserId && singcoinsDebitedAmount > 0) {
@@ -1587,6 +1744,44 @@ const rows = pricing.normalizedItems.map((it) =>
       }
 
       insertedReservations.push(data);
+    }
+
+    if (
+      referralContext?.referrer?.id &&
+      resolvedUserId &&
+      insertedReservations.length > 0
+    ) {
+      try {
+        await createPendingReferralForReservation({
+          referrerUserId: referralContext.referrer.id,
+          referredUserId: resolvedUserId,
+          referredEmail: normalizedCustomerEmail,
+          referredPhone: customer?.telephone || null,
+          referralCode: referralContext.referralCode,
+          reservationId: insertedReservations[0].id,
+        });
+
+        await supabase
+          .from("users")
+          .update({
+            referred_by_code: referralContext.referralCode,
+            updated_at: new Date().toISOString(),
+          })
+          .eq("id", resolvedUserId);
+      } catch (refErr) {
+        console.error("Erreur création referral pending :", refErr);
+      }
+    }
+
+    if (referralFreeSessionReward && insertedReservations.length > 0) {
+      try {
+        await consumeFreeSessionReward({
+          rewardId: referralFreeSessionReward.id,
+          reservationId: insertedReservations[0].id,
+        });
+      } catch (rewardErr) {
+        console.error("Erreur consommation reward referral :", rewardErr);
+      }
     }
 
     const gamificationEvents = [];
@@ -1698,6 +1893,21 @@ const rows = pricing.normalizedItems.map((it) =>
             totalAfter: totalCashDue,
           }
         : null,
+      referral: referralContext?.referrer?.id
+        ? {
+            code: referralContext.referralCode,
+            referrerUserId: referralContext.referrer.id,
+            freeSessionUsed: !!referralFreeSessionReward,
+            requiredValidCount: REFERRAL_REQUIRED_VALID_COUNT,
+            includedPersons: REFERRAL_FREE_SESSION_INCLUDED_PERSONS,
+          }
+        : {
+            code: null,
+            referrerUserId: null,
+            freeSessionUsed: !!referralFreeSessionReward,
+            requiredValidCount: REFERRAL_REQUIRED_VALID_COUNT,
+            includedPersons: REFERRAL_FREE_SESSION_INCLUDED_PERSONS,
+          },
       gamification,
       gamificationEvents,
       resolvedUserId: resolvedUserId || null,
@@ -1852,6 +2062,15 @@ router.post("/api/reservations/cancel/:id", async (req, res) => {
       });
     }
 
+    try {
+      await markReferralCancelledByReservationId(
+        id,
+        "reservation_cancelled_or_refunded"
+      );
+    } catch (refErr) {
+      console.error("Erreur annulation referral :", refErr);
+    }
+
     return res.json({
       success: true,
       reservation: data,
@@ -1861,6 +2080,81 @@ router.post("/api/reservations/cancel/:id", async (req, res) => {
     return res.status(500).json({
       error: "Erreur serveur",
     });
+  }
+});
+
+/* =========================================================
+   REFERRAL ROUTES
+========================================================= */
+
+router.get("/api/referral/me", authMiddleware, async (req, res) => {
+  try {
+    await ensureUserReferralCode(req.userId);
+
+    const summary = await getUserReferralSummary(req.userId);
+    return res.json({
+      success: true,
+      referral: {
+        code: summary.referralCode,
+        link: summary.referralLink,
+        validatedCount: summary.validatedCount,
+        progressCurrent: summary.progressCurrent,
+        progressTarget: summary.progressTarget ?? REFERRAL_REQUIRED_VALID_COUNT,
+        rewardAvailable: summary.hasRewardAvailable,
+        reward: summary.freeSessionReward,
+      },
+    });
+  } catch (e) {
+    console.error("Erreur /api/referral/me :", e);
+    return res.status(500).json({ error: "Erreur serveur referral" });
+  }
+});
+
+router.post("/api/admin/referral/validate-reservation", async (req, res) => {
+  try {
+    const { reservationId } = req.body || {};
+
+    if (!reservationId) {
+      return res.status(400).json({ error: "reservationId manquant" });
+    }
+
+    const result = await validateReferralByReservationId(reservationId);
+
+    return res.json({
+      success: true,
+      result,
+    });
+  } catch (e) {
+    console.error("Erreur /api/admin/referral/validate-reservation :", e);
+    return res.status(500).json({ error: "Erreur validation referral" });
+  }
+});
+
+router.post("/api/admin/reservations/:id/complete", async (req, res) => {
+  try {
+    const reservationId = req.params.id;
+
+    const updatedReservation = await updateReservationById(reservationId, {
+      status: "completed",
+      completed_at: new Date().toISOString(),
+    });
+
+    let referralResult = null;
+
+    try {
+      referralResult = await validateReferralByReservationId(reservationId);
+    } catch (refErr) {
+      console.error("Erreur validation referral post-complete :", refErr);
+    }
+
+    return res.json({
+      success: true,
+      reservation: updatedReservation,
+      referral: referralResult,
+    });
+  } catch (e) {
+    console.error("Erreur /api/admin/reservations/:id/complete :", e);
+    return res.status(500).json({ error: "Erreur completion réservation" });
   }
 });
 

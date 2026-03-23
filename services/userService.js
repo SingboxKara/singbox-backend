@@ -4,6 +4,7 @@ import {
   safeCountry,
   safeBirthdate,
 } from "../utils/validators.js";
+import { ensureUserReferralCode } from "./referralService.js";
 
 export async function updateUserProfileInUsersTable(userId, payload) {
   if (!supabase) return;
@@ -35,14 +36,21 @@ export function getUserEmailOrThrow(user) {
 
 export async function getUserById(userId) {
   if (!supabase) throw new Error("Supabase non configuré");
+
   const { data, error } = await supabase
     .from("users")
     .select(
-      "id,email,points,stripe_customer_id,default_payment_method_id,card_brand,card_last4,card_exp_month,card_exp_year"
+      "id,email,points,stripe_customer_id,default_payment_method_id,card_brand,card_last4,card_exp_month,card_exp_year,telephone,referral_code,referred_by_code"
     )
     .eq("id", userId)
     .single();
+
   if (error) throw error;
+
+  if (data?.id) {
+    data.referral_code = await ensureUserReferralCode(data.id);
+  }
+
   return data;
 }
 
@@ -51,13 +59,15 @@ export async function getAuthenticatedUserById(userId) {
 
   const { data, error } = await supabase
     .from("users")
-    .select("id,email,points")
+    .select("id,email,points,telephone,referral_code,referred_by_code")
     .eq("id", userId)
     .single();
 
   if (error || !data) {
     throw new Error("Utilisateur introuvable");
   }
+
+  data.referral_code = await ensureUserReferralCode(data.id);
 
   return data;
 }

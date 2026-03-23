@@ -3,7 +3,7 @@
 import { supabase } from "../config/supabase.js";
 
 const DEFAULT_LIMIT = 5;
-const MAX_LIMIT = 10;
+const MAX_LIMIT = 25;
 
 function clampLimit(value) {
   const parsed = Number.parseInt(value, 10);

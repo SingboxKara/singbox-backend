@@ -74,3 +74,9 @@ export const CANCELLED_OR_REFUNDED_STATUSES = [
   "remboursée",
   "remboursee",
 ];
+
+export const RESERVATION_COMPLETED_STATUS = "completed";
+
+export const FREE_SESSION_SOURCE_TYPES = {
+  REFERRAL: "referral",
+};

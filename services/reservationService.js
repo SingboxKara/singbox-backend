@@ -351,3 +351,33 @@ export async function applyReservationModification(modReq) {
 
   return getReservationById(modReq.reservation_id);
 }
+
+export async function getReservationsByIds(reservationIds = []) {
+  assertSupabaseConfigured();
+
+  const ids = Array.isArray(reservationIds)
+    ? reservationIds.filter(Boolean)
+    : [];
+
+  if (ids.length === 0) return [];
+
+  const { data, error } = await supabase
+    .from("reservations")
+    .select("*")
+    .in("id", ids);
+
+  if (error) throw error;
+  return data || [];
+}
+
+export async function markReservationCompleted(reservationId) {
+  const reservation = await getReservationById(reservationId);
+  if (!reservation) {
+    throw new Error("Réservation introuvable");
+  }
+
+  return await updateReservationById(reservationId, {
+    status: "completed",
+    completed_at: new Date().toISOString(),
+  });
+}
