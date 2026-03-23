@@ -4,6 +4,7 @@ import express from "express";
 
 import { supabase } from "../config/supabase.js";
 import { VACANCES_ZONE_C } from "../constants/holidays.js";
+import { getHomeLeaderboards } from "../services/leaderboardService.js";
 import { isDateInRange, addDaysToDateString, parseDateOrNull } from "../utils/dates.js";
 import {
   isReservationStatusConfirmed,
@@ -138,6 +139,24 @@ router.get("/api/check", async (req, res) => {
     console.error("Erreur /api/check :", e);
     res.status(500);
     return res.json({ valid: false, error: e.message });
+  }
+});
+
+router.get("/api/leaderboards/home", async (req, res) => {
+  try {
+    const limit = req.query.limit;
+    const leaderboards = await getHomeLeaderboards(limit);
+
+    return res.json({
+      ok: true,
+      ...leaderboards,
+    });
+  } catch (e) {
+    console.error("Erreur /api/leaderboards/home :", e);
+    return res.status(500).json({
+      ok: false,
+      error: "Impossible de charger les leaderboards.",
+    });
   }
 });
 
