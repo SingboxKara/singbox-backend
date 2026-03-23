@@ -2,7 +2,6 @@
 
 import express from "express";
 import cors from "cors";
-import bodyParser from "body-parser";
 import helmet from "helmet";
 import rateLimit from "express-rate-limit";
 
@@ -19,15 +18,20 @@ import chestRoutes from "./routes/chestRoutes.js";
 
 const app = express();
 
+app.disable("x-powered-by");
+
 /**
  * ORIGINES AUTORISÉES
  */
 const allowedOrigins = [
+  "https://www.singbox.fr",
+  "https://singbox.fr",
   "https://site-reservation-qr.vercel.app",
   "https://site-reservation-qr-git-main.vercel.app",
   "http://localhost:3000",
-  "http://127.0.0.1:5500",
+  "http://127.0.0.1:3000",
   "http://localhost:5500",
+  "http://127.0.0.1:5500",
 ];
 
 function isAllowedOrigin(origin) {
@@ -38,6 +42,10 @@ function isAllowedOrigin(origin) {
   try {
     const url = new URL(origin);
     const hostname = url.hostname.toLowerCase();
+
+    if (hostname === "www.singbox.fr" || hostname === "singbox.fr") {
+      return true;
+    }
 
     if (
       hostname.endsWith(".vercel.app") &&
@@ -67,7 +75,7 @@ const corsOptions = {
 /**
  * Important derrière proxy / Render
  */
-app.set("trust proxy", true);
+app.set("trust proxy", 1);
 
 /**
  * HEADERS DE SÉCURITÉ
@@ -114,6 +122,7 @@ function buildLimiter({
   max,
   message,
   skipSuccessfulRequests = false,
+  skip: customSkip,
 }) {
   return rateLimit({
     windowMs,
@@ -121,11 +130,14 @@ function buildLimiter({
     standardHeaders: true,
     legacyHeaders: false,
     skipSuccessfulRequests,
-    skip: (req) => req.method === "OPTIONS",
+    skip: (req) => {
+      if (req.method === "OPTIONS") return true;
+      if (typeof customSkip === "function" && customSkip(req)) return true;
+      return false;
+    },
     keyGenerator: (req) => {
       const ip = getClientIp(req);
-      const ua = String(req.headers["user-agent"] || "").slice(0, 120);
-      return `${name}:${ip}:${ua}`;
+      return `${name}:${ip}`;
     },
     handler: (req, res) => {
       const payload = {
@@ -142,18 +154,31 @@ function buildLimiter({
 
 /**
  * RATE LIMITS
+ *
+ * Le problème avant :
+ * - globalLimiter trop agressif
+ * - paymentLimiter appliqué aussi au coffre
+ * - trop facile de prendre des 429 sur paiement.html
  */
 const globalLimiter = buildLimiter({
   name: "global",
   windowMs: 15 * 60 * 1000,
-  max: 300,
+  max: 1200,
   message: "Trop de requêtes. Réessaie plus tard.",
+  skip: (req) => {
+    const path = req.originalUrl || req.url || "";
+    return (
+      path.startsWith("/health") ||
+      path.startsWith("/api/health") ||
+      path.startsWith("/webhook")
+    );
+  },
 });
 
 const authLimiter = buildLimiter({
   name: "auth",
   windowMs: 15 * 60 * 1000,
-  max: 50,
+  max: 30,
   message: "Trop de tentatives de connexion. Réessaie plus tard.",
   skipSuccessfulRequests: true,
 });
@@ -161,35 +186,43 @@ const authLimiter = buildLimiter({
 const paymentLimiter = buildLimiter({
   name: "payment",
   windowMs: 15 * 60 * 1000,
-  max: 40,
+  max: 120,
   message: "Trop de tentatives de paiement/réservation. Réessaie plus tard.",
+});
+
+const chestLimiter = buildLimiter({
+  name: "chest",
+  windowMs: 15 * 60 * 1000,
+  max: 180,
+  message: "Trop de requêtes coffre. Réessaie plus tard.",
 });
 
 const guestLimiter = buildLimiter({
   name: "guest",
   windowMs: 15 * 60 * 1000,
-  max: 40,
+  max: 80,
   message: "Trop de tentatives sur les liens invités. Réessaie plus tard.",
 });
 
 const adminLimiter = buildLimiter({
   name: "admin",
   windowMs: 15 * 60 * 1000,
-  max: 80,
+  max: 120,
   message: "Trop de requêtes admin. Réessaie plus tard.",
 });
 
 app.use(globalLimiter);
 
 /**
- * Important : webhook avant bodyParser.json()
+ * Important : webhook avant parser JSON
  */
 app.use(webhookRoutes);
 
 /**
  * JSON PARSER
  */
-app.use(bodyParser.json({ limit: "1mb" }));
+app.use(express.json({ limit: "1mb" }));
+app.use(express.urlencoded({ extended: true, limit: "1mb" }));
 
 console.log("🌍 Sécurité HTTP + CORS + JSON configurés");
 
@@ -206,9 +239,19 @@ app.use(authLimiter, authRoutes);
 app.use(userRoutes);
 app.use(paymentLimiter, paymentRoutes);
 app.use(paymentLimiter, reservationRoutes);
-app.use(paymentLimiter, chestRoutes);
+app.use(chestLimiter, chestRoutes);
 app.use(guestLimiter, reviewRoutes);
 app.use(adminLimiter, adminRoutes);
+
+/**
+ * 404
+ */
+app.use((req, res) => {
+  return res.status(404).json({
+    error: "Route introuvable",
+    path: req.originalUrl || req.url || null,
+  });
+});
 
 /**
  * HANDLER ERREURS CORS
@@ -225,7 +268,16 @@ app.use((err, req, res, next) => {
  */
 app.use((err, req, res, next) => {
   console.error("❌ Erreur serveur non gérée :", err);
-  return res.status(500).json({ error: "Erreur serveur interne" });
+
+  if (res.headersSent) {
+    return next(err);
+  }
+
+  return res.status(err?.status || 500).json({
+    error: err?.status && err.status < 500
+      ? err.message || "Erreur requête"
+      : "Erreur serveur interne",
+  });
 });
 
 export default app;

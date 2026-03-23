@@ -1,153 +1,148 @@
 import express from "express";
-
-import { supabase } from "../config/supabase.js";
 import { authMiddleware } from "../middlewares/auth.js";
-import { updateUserProfileInUsersTable } from "../services/userService.js";
-import {
-  getUserGamificationSnapshot,
-} from "../services/gamificationService.js";
-import {
-  getAvailableSingcoins,
-  spendSingcoins,
-} from "../services/singcoinService.js";
-import { SINGCOINS_REWARD_COST } from "../constants/booking.js";
+import { getUserById, updateUserById } from "../services/userService.js";
 
 const router = express.Router();
 
+function safeText(value, maxLen = 160) {
+  return String(value || "").trim().slice(0, maxLen);
+}
+
+function safeEmail(value) {
+  return safeText(value, 160).toLowerCase();
+}
+
+function safeCountry(value) {
+  const raw = safeText(value, 20).toUpperCase();
+  if (!raw) return "FR";
+  return raw;
+}
+
+function safeBirthdate(value) {
+  const raw = safeText(value, 20);
+  if (!raw) return null;
+  return /^\d{4}-\d{2}-\d{2}$/.test(raw) ? raw : null;
+}
+
+function normalizeUserResponse(user) {
+  if (!user || typeof user !== "object") {
+    return {
+      id: null,
+      email: null,
+      profile: {},
+      payment: {
+        default_payment_method_id: null,
+        card: null,
+      },
+    };
+  }
+
+  return {
+    id: user.id ?? null,
+    email: user.email ?? null,
+
+    profile: {
+      prenom: user.prenom ?? "",
+      nom: user.nom ?? "",
+      telephone: user.telephone ?? "",
+      pays: user.pays ?? "FR",
+      adresse: user.adresse ?? "",
+      complement: user.complement ?? "",
+      cp: user.cp ?? "",
+      ville: user.ville ?? "",
+      naissance: user.naissance ?? null,
+    },
+
+    payment: {
+      default_payment_method_id:
+        user.default_payment_method_id ??
+        user.stripe_default_payment_method_id ??
+        null,
+
+      card: user.card_last4
+        ? {
+            id:
+              user.default_payment_method_id ??
+              user.stripe_default_payment_method_id ??
+              null,
+            brand: user.card_brand ?? null,
+            last4: user.card_last4 ?? null,
+            exp_month: user.card_exp_month ?? null,
+            exp_year: user.card_exp_year ?? null,
+          }
+        : null,
+    },
+  };
+}
+
+/* =========================================================
+   GET /api/me
+========================================================= */
+
 router.get("/api/me", authMiddleware, async (req, res) => {
   try {
-    if (!supabase) {
-      return res.status(500).json({ error: "Supabase non configuré" });
+    const userId = req.userId;
+
+    if (!userId) {
+      return res.status(401).json({ error: "Utilisateur non authentifié" });
     }
 
-    const [{ data: user, error: userErr }, gamification] = await Promise.all([
-      supabase
-        .from("users")
-        .select(
-          "id,email,prenom,nom,telephone,pays,adresse,complement,cp,ville,naissance,stripe_customer_id,default_payment_method_id,card_brand,card_last4,card_exp_month,card_exp_year,created_at"
-        )
-        .eq("id", req.userId)
-        .single(),
-      getUserGamificationSnapshot(req.userId).catch(() => null),
-    ]);
+    const user = await getUserById(userId);
 
-    if (userErr || !user) {
-      return res.status(400).json({ error: "Utilisateur introuvable" });
+    if (!user) {
+      return res.status(404).json({ error: "Utilisateur introuvable" });
     }
 
-    const singcoinsBalance = Number(gamification?.singcoins?.balance || 0);
-
-    return res.json({
-      id: user.id,
-      email: user.email,
-      created_at: user.created_at || null,
-      singcoins_balance: singcoinsBalance,
-
-      // Alias compat temporaire si un front legacy lit encore "points"
-      points: singcoinsBalance,
-
-      payment: {
-        stripe_customer_id: user.stripe_customer_id ?? null,
-        default_payment_method_id: user.default_payment_method_id ?? null,
-        card: user.card_last4
-          ? {
-              brand: user.card_brand,
-              last4: user.card_last4,
-              exp_month: user.card_exp_month,
-              exp_year: user.card_exp_year,
-            }
-          : null,
-      },
-      profile: {
-        prenom: user.prenom,
-        nom: user.nom,
-        telephone: user.telephone,
-        pays: user.pays,
-        adresse: user.adresse,
-        complement: user.complement,
-        cp: user.cp,
-        ville: user.ville,
-        naissance: user.naissance,
-      },
-    });
-  } catch (err) {
-    console.error("Erreur me :", err);
+    return res.json(normalizeUserResponse(user));
+  } catch (error) {
+    console.error("Erreur GET /api/me :", error);
     return res.status(500).json({ error: "Erreur serveur" });
   }
 });
+
+/* =========================================================
+   POST /api/me
+========================================================= */
 
 router.post("/api/me", authMiddleware, async (req, res) => {
   try {
-    if (!supabase) {
-      return res.status(500).json({ error: "Supabase non configuré" });
+    const userId = req.userId;
+
+    if (!userId) {
+      return res.status(401).json({ error: "Utilisateur non authentifié" });
     }
 
-    await updateUserProfileInUsersTable(req.userId, req.body || {});
-    return res.json({ ok: true });
-  } catch (e) {
-    console.error("Erreur POST /api/me :", e);
-    return res.status(500).json({ error: "Erreur serveur" });
-  }
-});
+    const body = req.body || {};
 
-router.post("/api/add-points", authMiddleware, async (_req, res) => {
-  return res.status(410).json({
-    error: "Route obsolète. Utilisez désormais le système Singcoins.",
-  });
-});
+    const payload = {
+      prenom: safeText(body.prenom, 80),
+      nom: safeText(body.nom, 80),
+      telephone: safeText(body.telephone, 40),
+      pays: safeCountry(body.pays),
+      adresse: safeText(body.adresse, 160),
+      complement: safeText(body.complement, 160),
+      cp: safeText(body.cp, 20),
+      ville: safeText(body.ville, 80),
+      naissance: safeBirthdate(body.naissance),
+    };
 
-router.post("/api/use-loyalty", authMiddleware, async (_req, res) => {
-  return res.status(410).json({
-    error: "Route obsolète. Utilisez désormais le système Singcoins.",
-  });
-});
-
-router.post("/api/use-singcoins", authMiddleware, async (req, res) => {
-  try {
-    const amount = Number(req.body?.amount || SINGCOINS_REWARD_COST);
-
-    if (!Number.isFinite(amount) || amount <= 0) {
-      return res.status(400).json({ error: "Montant Singcoins invalide" });
+    if (typeof body.email === "string" && body.email.trim()) {
+      payload.email = safeEmail(body.email);
     }
 
-    const currentBalance = await getAvailableSingcoins(req.userId);
-    if (currentBalance < amount) {
-      return res.status(400).json({
-        error: "Pas assez de Singcoins",
-        currentSingcoins: currentBalance,
-        requiredSingcoins: amount,
-      });
-    }
+    const updatedUser = await updateUserById(userId, payload);
 
-    const result = await spendSingcoins(req.userId, amount);
-
-    if (!result.success) {
-      return res.status(400).json({
-        error: result.reason || "Impossible d'utiliser les Singcoins",
-        currentSingcoins: result.current ?? currentBalance,
-        requiredSingcoins: result.required ?? amount,
-      });
+    if (!updatedUser) {
+      return res.status(404).json({ error: "Utilisateur introuvable" });
     }
 
     return res.json({
       success: true,
-      message: `${amount} Singcoins utilisés`,
-      deducted: result.deducted,
-      remaining: result.remaining,
+      user: normalizeUserResponse(updatedUser),
     });
-  } catch (e) {
-    console.error("Erreur /api/use-singcoins :", e);
+  } catch (error) {
+    console.error("Erreur POST /api/me :", error);
     return res.status(500).json({ error: "Erreur serveur" });
-  }
-});
-
-router.get("/api/account/gamification", authMiddleware, async (req, res) => {
-  try {
-    const data = await getUserGamificationSnapshot(req.userId);
-    return res.json(data);
-  } catch (err) {
-    console.error("gamification error", err);
-    return res.status(500).json({ error: "Erreur serveur interne" });
   }
 });
 
