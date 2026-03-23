@@ -40,7 +40,7 @@ export async function getUserById(userId) {
   const { data, error } = await supabase
     .from("users")
     .select(
-      "id,email,points,stripe_customer_id,default_payment_method_id,card_brand,card_last4,card_exp_month,card_exp_year,telephone,referral_code,referred_by_code"
+      "id,email,singcoins,stripe_customer_id,default_payment_method_id,card_brand,card_last4,card_exp_month,card_exp_year,telephone,referral_code,referred_by_code"
     )
     .eq("id", userId)
     .single();
@@ -59,7 +59,7 @@ export async function getAuthenticatedUserById(userId) {
 
   const { data, error } = await supabase
     .from("users")
-    .select("id,email,points,telephone,referral_code,referred_by_code")
+    .select("id,email,singcoins,telephone,referral_code,referred_by_code")
     .eq("id", userId)
     .single();
 

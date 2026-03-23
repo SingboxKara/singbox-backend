@@ -1,11 +1,8 @@
-// backend/routes/paymentRoutes.js
-
 import express from "express";
 
 import { stripe } from "../config/stripe.js";
 import { supabase } from "../config/supabase.js";
 import { authMiddleware, optionalAuthMiddleware } from "../middlewares/auth.js";
-import { authMiddleware as requireAuth } from "../middlewares/auth.js";
 import { requireSupabaseAdmin } from "../middlewares/admin.js";
 import {
   ensureStripeCustomer,
@@ -19,7 +16,10 @@ import {
 } from "../services/promoService.js";
 import { updateReservationById } from "../services/reservationService.js";
 import { getAvailableSingcoins } from "../services/singcoinService.js";
-import { DEPOSIT_AMOUNT_EUR, SINGCOINS_REWARD_COST } from "../constants/booking.js";
+import {
+  DEPOSIT_AMOUNT_EUR,
+  SINGCOINS_REWARD_COST,
+} from "../constants/booking.js";
 
 const router = express.Router();
 
@@ -34,10 +34,14 @@ function buildPromoValidationContext({ customerEmail, panier }) {
   };
 }
 
-router.post("/api/create-setup-intent", requireAuth, async (req, res) => {
+router.post("/api/create-setup-intent", authMiddleware, async (req, res) => {
   try {
-    if (!stripe) return res.status(500).json({ error: "Stripe non configuré" });
-    if (!supabase) return res.status(500).json({ error: "Supabase non configuré" });
+    if (!stripe) {
+      return res.status(500).json({ error: "Stripe non configuré" });
+    }
+    if (!supabase) {
+      return res.status(500).json({ error: "Supabase non configuré" });
+    }
 
     const { customerId } = await ensureStripeCustomer(req.userId);
 
@@ -57,8 +61,12 @@ router.post("/api/create-setup-intent", requireAuth, async (req, res) => {
 
 router.get("/api/payment-methods", authMiddleware, async (req, res) => {
   try {
-    if (!stripe) return res.status(500).json({ error: "Stripe non configuré" });
-    if (!supabase) return res.status(500).json({ error: "Supabase non configuré" });
+    if (!stripe) {
+      return res.status(500).json({ error: "Stripe non configuré" });
+    }
+    if (!supabase) {
+      return res.status(500).json({ error: "Supabase non configuré" });
+    }
 
     const { customerId } = await ensureStripeCustomer(req.userId);
 
@@ -82,14 +90,20 @@ router.get("/api/payment-methods", authMiddleware, async (req, res) => {
     });
   } catch (e) {
     console.error("Erreur /api/payment-methods :", e);
-    return res.status(500).json({ error: "Erreur serveur (list payment methods)" });
+    return res
+      .status(500)
+      .json({ error: "Erreur serveur (list payment methods)" });
   }
 });
 
 router.post("/api/set-default-payment-method", authMiddleware, async (req, res) => {
   try {
-    if (!stripe) return res.status(500).json({ error: "Stripe non configuré" });
-    if (!supabase) return res.status(500).json({ error: "Supabase non configuré" });
+    if (!stripe) {
+      return res.status(500).json({ error: "Stripe non configuré" });
+    }
+    if (!supabase) {
+      return res.status(500).json({ error: "Supabase non configuré" });
+    }
 
     const { paymentMethodId } = req.body || {};
     if (!paymentMethodId) {
@@ -99,10 +113,15 @@ router.post("/api/set-default-payment-method", authMiddleware, async (req, res) 
     const { customerId } = await ensureStripeCustomer(req.userId);
 
     try {
-      await stripe.paymentMethods.attach(paymentMethodId, { customer: customerId });
+      await stripe.paymentMethods.attach(paymentMethodId, {
+        customer: customerId,
+      });
     } catch (e) {
       const msg = String(e?.message || "");
-      if (!msg.toLowerCase().includes("already") && !msg.toLowerCase().includes("attached")) {
+      if (
+        !msg.toLowerCase().includes("already") &&
+        !msg.toLowerCase().includes("attached")
+      ) {
         throw e;
       }
     }
@@ -142,7 +161,7 @@ router.post("/api/validate-promo", async (req, res) => {
     let totalAmountEur = 0;
 
     if (Array.isArray(panier) && panier.length > 0) {
-      const pricing = computeCartPricing(panier, { loyaltyUsed: false });
+      const pricing = computeCartPricing(panier, { singcoinsUsed: false });
       totalAmountEur = pricing.totalCashDue;
     }
 
@@ -224,9 +243,12 @@ router.post("/api/create-payment-intent", optionalAuthMiddleware, async (req, re
       }
     }
 
-    const pricing = computeCartPricing(panier, { loyaltyUsed: !!singcoinsUsed });
+    const pricing = computeCartPricing(panier, {
+      singcoinsUsed: !!singcoinsUsed,
+    });
+
     const totalBeforeDiscount = pricing.totalBeforeDiscount;
-    const singcoinsDiscount = pricing.loyaltyDiscount;
+    const singcoinsDiscount = pricing.singcoinsDiscount;
     let totalAmountEur = pricing.totalCashDue;
     let promoDiscountAmount = 0;
     let promo = null;
@@ -258,7 +280,12 @@ router.post("/api/create-payment-intent", optionalAuthMiddleware, async (req, re
         promoDiscountAmount,
         totalAfterDiscount: 0,
         promo: promo
-          ? { id: promo.id, code: promo.code, type: promo.type, value: promo.value }
+          ? {
+              id: promo.id,
+              code: promo.code,
+              type: promo.type,
+              value: promo.value,
+            }
           : null,
       });
     }
@@ -267,7 +294,9 @@ router.post("/api/create-payment-intent", optionalAuthMiddleware, async (req, re
 
     if (useSavedPaymentMethod) {
       if (!req.userId) {
-        return res.status(401).json({ error: "Connexion requise pour payer avec carte enregistrée" });
+        return res.status(401).json({
+          error: "Connexion requise pour payer avec carte enregistrée",
+        });
       }
       if (!supabase) {
         return res.status(500).json({ error: "Supabase non configuré" });
@@ -276,22 +305,32 @@ router.post("/api/create-payment-intent", optionalAuthMiddleware, async (req, re
       const user = await getUserById(req.userId);
       const { customerId } = await ensureStripeCustomer(req.userId);
 
-      const paymentMethodToUse = paymentMethodId || user.default_payment_method_id;
+      const paymentMethodToUse =
+        paymentMethodId || user.default_payment_method_id;
       if (!paymentMethodToUse) {
-        return res.status(400).json({ error: "Aucune carte enregistrée disponible" });
+        return res.status(400).json({
+          error: "Aucune carte enregistrée disponible",
+        });
       }
 
       try {
-        await stripe.paymentMethods.attach(paymentMethodToUse, { customer: customerId });
+        await stripe.paymentMethods.attach(paymentMethodToUse, {
+          customer: customerId,
+        });
       } catch (e) {
         const msg = String(e?.message || "");
-        if (!msg.toLowerCase().includes("already") && !msg.toLowerCase().includes("attached")) {
+        if (
+          !msg.toLowerCase().includes("already") &&
+          !msg.toLowerCase().includes("attached")
+        ) {
           throw e;
         }
       }
 
       const fullName =
-        (customer?.prenom || "") + (customer?.prenom ? " " : "") + (customer?.nom || "");
+        (customer?.prenom || "") +
+        (customer?.prenom ? " " : "") +
+        (customer?.nom || "");
 
       try {
         const paymentIntent = await stripe.paymentIntents.create({
@@ -324,7 +363,14 @@ router.post("/api/create-payment-intent", optionalAuthMiddleware, async (req, re
           singcoinsDiscount,
           promoDiscountAmount,
           totalAfterDiscount: totalAmountEur,
-          promo: promo ? { id: promo.id, code: promo.code, type: promo.type, value: promo.value } : null,
+          promo: promo
+            ? {
+                id: promo.id,
+                code: promo.code,
+                type: promo.type,
+                value: promo.value,
+              }
+            : null,
         });
       } catch (e) {
         const stripeMsg =
@@ -365,7 +411,12 @@ router.post("/api/create-payment-intent", optionalAuthMiddleware, async (req, re
       promoDiscountAmount,
       totalAfterDiscount: totalAmountEur,
       promo: promo
-        ? { id: promo.id, code: promo.code, type: promo.type, value: promo.value }
+        ? {
+            id: promo.id,
+            code: promo.code,
+            type: promo.type,
+            value: promo.value,
+          }
         : null,
     });
   } catch (err) {
@@ -377,9 +428,12 @@ router.post("/api/create-payment-intent", optionalAuthMiddleware, async (req, re
 
 router.post("/api/create-deposit-intent", optionalAuthMiddleware, async (req, res) => {
   try {
-    if (!stripe) return res.status(500).json({ error: "Stripe non configuré" });
+    if (!stripe) {
+      return res.status(500).json({ error: "Stripe non configuré" });
+    }
 
-    const { reservationId, customer, useSavedPaymentMethod, paymentMethodId } = req.body || {};
+    const { reservationId, customer, useSavedPaymentMethod, paymentMethodId } =
+      req.body || {};
     const amountInCents = Math.round(DEPOSIT_AMOUNT_EUR * 100);
 
     const customerEmail = normalizeEmail(customer?.email);
@@ -388,11 +442,15 @@ router.post("/api/create-deposit-intent", optionalAuthMiddleware, async (req, re
     }
 
     const fullName =
-      (customer?.prenom || "") + (customer?.prenom ? " " : "") + (customer?.nom || "");
+      (customer?.prenom || "") +
+      (customer?.prenom ? " " : "") +
+      (customer?.nom || "");
 
     if (useSavedPaymentMethod) {
       if (!req.userId) {
-        return res.status(401).json({ error: "Connexion requise pour la caution avec carte enregistrée" });
+        return res.status(401).json({
+          error: "Connexion requise pour la caution avec carte enregistrée",
+        });
       }
       if (!supabase) {
         return res.status(500).json({ error: "Supabase non configuré" });
@@ -401,16 +459,24 @@ router.post("/api/create-deposit-intent", optionalAuthMiddleware, async (req, re
       const user = await getUserById(req.userId);
       const { customerId } = await ensureStripeCustomer(req.userId);
 
-      const paymentMethodToUse = paymentMethodId || user.default_payment_method_id;
+      const paymentMethodToUse =
+        paymentMethodId || user.default_payment_method_id;
       if (!paymentMethodToUse) {
-        return res.status(400).json({ error: "Aucune carte enregistrée disponible pour la caution" });
+        return res.status(400).json({
+          error: "Aucune carte enregistrée disponible pour la caution",
+        });
       }
 
       try {
-        await stripe.paymentMethods.attach(paymentMethodToUse, { customer: customerId });
+        await stripe.paymentMethods.attach(paymentMethodToUse, {
+          customer: customerId,
+        });
       } catch (e) {
         const msg = String(e?.message || "");
-        if (!msg.toLowerCase().includes("already") && !msg.toLowerCase().includes("attached")) {
+        if (
+          !msg.toLowerCase().includes("already") &&
+          !msg.toLowerCase().includes("attached")
+        ) {
           throw e;
         }
       }
@@ -476,7 +542,8 @@ router.post("/api/create-deposit-intent", optionalAuthMiddleware, async (req, re
     });
   } catch (err) {
     console.error("Erreur create-deposit-intent :", err);
-    const msg = err?.raw?.message || err?.message || "Erreur serveur Stripe (caution)";
+    const msg =
+      err?.raw?.message || err?.message || "Erreur serveur Stripe (caution)";
     return res.status(500).json({ error: msg });
   }
 });
@@ -490,7 +557,9 @@ router.post("/api/capture-deposit", requireSupabaseAdmin, async (req, res) => {
     const { paymentIntentId, amountToCaptureEur, reservationId } = req.body || {};
 
     if (!paymentIntentId) {
-      return res.status(400).json({ error: "paymentIntentId manquant pour la caution" });
+      return res.status(400).json({
+        error: "paymentIntentId manquant pour la caution",
+      });
     }
 
     const params = {};
@@ -498,7 +567,10 @@ router.post("/api/capture-deposit", requireSupabaseAdmin, async (req, res) => {
       params.amount_to_capture = Math.round(Number(amountToCaptureEur) * 100);
     }
 
-    const paymentIntent = await stripe.paymentIntents.capture(paymentIntentId, params);
+    const paymentIntent = await stripe.paymentIntents.capture(
+      paymentIntentId,
+      params
+    );
 
     if (supabase && reservationId) {
       await updateReservationById(reservationId, {
@@ -510,7 +582,9 @@ router.post("/api/capture-deposit", requireSupabaseAdmin, async (req, res) => {
     return res.json({ status: "captured", paymentIntent });
   } catch (err) {
     console.error("Erreur capture-deposit :", err);
-    return res.status(500).json({ error: "Erreur serveur lors de la capture de la caution" });
+    return res.status(500).json({
+      error: "Erreur serveur lors de la capture de la caution",
+    });
   }
 });
 
@@ -523,7 +597,9 @@ router.post("/api/cancel-deposit", requireSupabaseAdmin, async (req, res) => {
     const { paymentIntentId, reservationId } = req.body || {};
 
     if (!paymentIntentId) {
-      return res.status(400).json({ error: "paymentIntentId manquant pour la caution" });
+      return res.status(400).json({
+        error: "paymentIntentId manquant pour la caution",
+      });
     }
 
     const canceled = await stripe.paymentIntents.cancel(paymentIntentId);
@@ -538,7 +614,9 @@ router.post("/api/cancel-deposit", requireSupabaseAdmin, async (req, res) => {
     return res.json({ status: "canceled", paymentIntent: canceled });
   } catch (err) {
     console.error("Erreur cancel-deposit :", err);
-    return res.status(500).json({ error: "Erreur serveur lors de l'annulation de la caution" });
+    return res.status(500).json({
+      error: "Erreur serveur lors de l'annulation de la caution",
+    });
   }
 });
 

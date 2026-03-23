@@ -105,7 +105,6 @@ async function resolveReservationUserId({ explicitUserId = null, email = null })
 async function ensureReservationHasUserId(reservation) {
   try {
     if (!supabase || !reservation?.id) return reservation;
-
     if (reservation.user_id) return reservation;
 
     const resolvedUserId = await resolveReservationUserId({
@@ -174,7 +173,9 @@ router.post("/api/admin/create-free-reservation", requireSupabaseAdmin, async (r
     }
 
     if (!/^\d{4}-\d{2}-\d{2}$/.test(safeDate)) {
-      return res.status(400).json({ error: "date invalide (YYYY-MM-DD attendu)" });
+      return res.status(400).json({
+        error: "date invalide (YYYY-MM-DD attendu)",
+      });
     }
 
     if (
@@ -228,13 +229,8 @@ router.post("/api/admin/create-free-reservation", requireSupabaseAdmin, async (r
       billable_persons: getBillablePersons(safePersons),
       montant: 0,
       free_session: true,
-
-      // Compatibilité legacy
-      loyalty_used: false,
-      points_spent: 0,
       singcoins_used: false,
       singcoins_spent: 0,
-
       promo_code: null,
       refunded_amount: 0,
       last_auto_charge_amount: 0,
@@ -400,10 +396,9 @@ router.post("/api/admin/mark-reservation-completed", requireSupabaseAdmin, async
       success: true,
       reservation: finalReservation,
       gamification,
-      warning:
-        !finalReservation.user_id
-          ? "Réservation complétée sans user_id : gamification potentiellement limitée."
-          : null,
+      warning: !finalReservation.user_id
+        ? "Réservation complétée sans user_id : gamification potentiellement limitée."
+        : null,
     });
   } catch (e) {
     console.error("Erreur /api/admin/mark-reservation-completed :", e);
@@ -429,9 +424,13 @@ router.post("/api/admin/send-review-request", requireSupabaseAdmin, async (req, 
       return res.status(404).json({ error: "Réservation introuvable" });
     }
 
-    if (!isReservationStatusConfirmed(reservation.status) && reservation.status !== "completed") {
+    if (
+      !isReservationStatusConfirmed(reservation.status) &&
+      reservation.status !== "completed"
+    ) {
       return res.status(400).json({
-        error: "La réservation doit être confirmée ou complétée pour envoyer une demande d’avis",
+        error:
+          "La réservation doit être confirmée ou complétée pour envoyer une demande d’avis",
       });
     }
 
@@ -460,7 +459,9 @@ router.post("/api/admin/send-review-request", requireSupabaseAdmin, async (req, 
     });
   } catch (e) {
     console.error("Erreur /api/admin/send-review-request :", e);
-    return res.status(500).json({ error: "Erreur serveur lors de l’envoi de la demande d’avis" });
+    return res.status(500).json({
+      error: "Erreur serveur lors de l’envoi de la demande d’avis",
+    });
   }
 });
 
@@ -471,9 +472,7 @@ router.all("/api/admin/send-completed-review-requests", requireAdminOrCron, asyn
     }
 
     const incomingLimit =
-      req.method === "GET"
-        ? req.query?.limit
-        : req.body?.limit;
+      req.method === "GET" ? req.query?.limit : req.body?.limit;
 
     const limit = Math.min(Math.max(Number(incomingLimit || 20), 1), 100);
     const nowIso = new Date().toISOString();
@@ -530,7 +529,11 @@ router.all("/api/admin/send-completed-review-requests", requireAdminOrCron, asyn
           reason: sendResult.reason || null,
         });
       } catch (itemErr) {
-        console.error("Erreur envoi review request reservation", reservation.id, itemErr);
+        console.error(
+          "Erreur envoi review request reservation",
+          reservation.id,
+          itemErr
+        );
         results.push({
           reservationId: reservation.id,
           email: reservation.email,
@@ -560,7 +563,9 @@ router.all("/api/admin/send-completed-review-requests", requireAdminOrCron, asyn
     });
   } catch (e) {
     console.error("Erreur /api/admin/send-completed-review-requests :", e);
-    return res.status(500).json({ error: "Erreur serveur lors de l’envoi en lot des demandes d’avis" });
+    return res.status(500).json({
+      error: "Erreur serveur lors de l’envoi en lot des demandes d’avis",
+    });
   }
 });
 

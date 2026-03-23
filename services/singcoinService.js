@@ -8,10 +8,16 @@ import {
 } from "./gamificationService.js";
 
 export function isReservationPaidWithSingcoins(reservation) {
-  if (reservation?.loyalty_used === true) return true;
+  const singcoinsUsed = reservation?.singcoins_used === true;
+  if (singcoinsUsed) return true;
 
-  const pointsSpent = Number(reservation?.points_spent || 0);
-  if (Number.isFinite(pointsSpent) && pointsSpent >= SINGCOINS_REWARD_COST) return true;
+  const singcoinsSpent = Number(reservation?.singcoins_spent || 0);
+  if (
+    Number.isFinite(singcoinsSpent) &&
+    singcoinsSpent >= SINGCOINS_REWARD_COST
+  ) {
+    return true;
+  }
 
   const freeSession = reservation?.free_session === true;
   const montant = Number(reservation?.montant || 0);
@@ -26,7 +32,7 @@ export function isReservationPaidWithSingcoins(reservation) {
 }
 
 export function getReservationSingcoinsUsed(reservation) {
-  const n = Number(reservation?.points_spent);
+  const n = Number(reservation?.singcoins_spent);
   if (Number.isFinite(n) && n > 0) return n;
 
   return isReservationPaidWithSingcoins(reservation)

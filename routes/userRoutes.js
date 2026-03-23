@@ -1,6 +1,9 @@
 import express from "express";
 import { authMiddleware } from "../middlewares/auth.js";
-import { getUserById, updateUserById } from "../services/userService.js";
+import {
+  getUserById,
+  updateUserProfileInUsersTable,
+} from "../services/userService.js";
 
 const router = express.Router();
 
@@ -130,7 +133,9 @@ router.post("/api/me", authMiddleware, async (req, res) => {
       payload.email = safeEmail(body.email);
     }
 
-    const updatedUser = await updateUserById(userId, payload);
+    await updateUserProfileInUsersTable(userId, payload);
+
+    const updatedUser = await getUserById(userId);
 
     if (!updatedUser) {
       return res.status(404).json({ error: "Utilisateur introuvable" });

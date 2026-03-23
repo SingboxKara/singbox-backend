@@ -20,7 +20,7 @@ const REWARDS_POOL = [
   },
   {
     id: "coins_20",
-    type: "points",
+    type: "singcoins",
     label: "+20 Singcoins",
     description: "Tu gagnes 20 Singcoins.",
     weight: 25,
@@ -28,7 +28,7 @@ const REWARDS_POOL = [
   },
   {
     id: "coins_30",
-    type: "points",
+    type: "singcoins",
     label: "+30 Singcoins",
     description: "Tu gagnes 30 Singcoins.",
     weight: 15,
@@ -54,7 +54,8 @@ const REWARDS_POOL = [
     id: "free_session",
     type: "free_session",
     label: "2 personnes offertes sur ta première séance",
-    description: "Les 2 premières personnes facturées de la première séance sont offertes. Le surplus reste payant.",
+    description:
+      "Les 2 premières personnes facturées de la première séance sont offertes. Le surplus reste payant.",
     weight: 1,
     value: 1,
   },
@@ -125,7 +126,11 @@ async function getCompletedSessionsCount(userId) {
     .eq("user_id", userId)
     .maybeSingle();
 
-  if (!statsError && stats && Number.isFinite(Number(stats.sessions_completed))) {
+  if (
+    !statsError &&
+    stats &&
+    Number.isFinite(Number(stats.sessions_completed))
+  ) {
     return Math.max(0, Number(stats.sessions_completed));
   }
 
@@ -231,7 +236,11 @@ async function getOpenedMilestones(userId) {
 
 function buildMilestones(completedSessions) {
   const milestones = [];
-  for (let milestone = SESSIONS_PER_CHEST; milestone <= completedSessions; milestone += SESSIONS_PER_CHEST) {
+  for (
+    let milestone = SESSIONS_PER_CHEST;
+    milestone <= completedSessions;
+    milestone += SESSIONS_PER_CHEST
+  ) {
     milestones.push(milestone);
   }
   return milestones;
@@ -257,22 +266,20 @@ async function createPromoCodeForReward(rewardType, rewardValue, userId) {
       ? `${CHEST_FREE_2P_MARKER} | 2 personnes offertes sur la première séance | user=${userId}`
       : `Chest reward for user ${userId}`;
 
-  const { error } = await supabase
-    .from("promo_codes")
-    .insert({
-      code,
-      type,
-      value,
-      is_active: true,
-      valid_from: validFrom,
-      valid_to: validTo,
-      max_uses: 1,
-      used_count: 0,
-      max_uses_per_user: 1,
-      first_session_only: false,
-      email_domain: null,
-      note,
-    });
+  const { error } = await supabase.from("promo_codes").insert({
+    code,
+    type,
+    value,
+    is_active: true,
+    valid_from: validFrom,
+    valid_to: validTo,
+    max_uses: 1,
+    used_count: 0,
+    max_uses_per_user: 1,
+    first_session_only: false,
+    email_domain: null,
+    note,
+  });
 
   if (error) throw error;
 
@@ -305,8 +312,7 @@ export async function getChestStateForUser(userId) {
   );
 
   const welcomeAvailable = !welcomeAlreadyOpened;
-  const availableCount =
-    (welcomeAvailable ? 1 : 0) + milestoneChests.length;
+  const availableCount = (welcomeAvailable ? 1 : 0) + milestoneChests.length;
 
   const nextMilestone =
     Math.ceil(Math.max(1, completedSessions) / SESSIONS_PER_CHEST) *
@@ -341,7 +347,7 @@ async function persistReward({
   let status = "opened_empty";
   let promoCode = null;
 
-  if (pickedReward.type === "points") {
+  if (pickedReward.type === "singcoins") {
     await creditSingcoins({
       userId,
       amount: Number(pickedReward.value || 0),
@@ -352,7 +358,10 @@ async function persistReward({
     });
 
     status = "credited";
-  } else if (pickedReward.type === "discount_percent" || pickedReward.type === "free_session") {
+  } else if (
+    pickedReward.type === "discount_percent" ||
+    pickedReward.type === "free_session"
+  ) {
     promoCode = await createPromoCodeForReward(
       pickedReward.type,
       pickedReward.value,
