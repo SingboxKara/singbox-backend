@@ -14,8 +14,12 @@ import { parseDateOrNull } from "../utils/dates.js";
 import { isReservationStatusConfirmed } from "./reservationService.js";
 
 const FALLBACK_FRONTEND_BASE_URL = "https://site-reservation-qr.vercel.app";
-const POST_SESSION_PROMO_PERCENT = 10;
+const POST_SESSION_PROMO_CODE_PREFIX = "SINGBACK";
+const POST_SESSION_PROMO_INITIAL_PERCENT = 30;
 const POST_SESSION_PROMO_VALIDITY_DAYS = 15;
+const POST_SESSION_PROMO_STAGE_1_DAYS = 2;
+const POST_SESSION_PROMO_STAGE_2_DAYS = 7;
+const POST_SESSION_PROMO_STAGE_3_DAYS = 15;
 
 export function generateReviewToken() {
   return crypto.randomBytes(32).toString("hex");
@@ -94,7 +98,7 @@ function buildPromoNoteForReservation(reservationId) {
 
 function generatePromoCodeCandidate() {
   const random = crypto.randomBytes(3).toString("hex").toUpperCase();
-  return `SING10-${random}`;
+  return `${POST_SESSION_PROMO_CODE_PREFIX}-${random}`;
 }
 
 async function getPromoCodeByCode(code) {
@@ -155,7 +159,7 @@ async function createUniquePostSessionPromoForReservation(reservation) {
       is_active: true,
       used_count: 0,
       max_uses: 1,
-      value: POST_SESSION_PROMO_PERCENT,
+      value: POST_SESSION_PROMO_INITIAL_PERCENT,
       valid_from: validFrom,
       valid_to: validTo,
       first_session_only: false,
@@ -581,7 +585,7 @@ export async function sendReviewRequestEmail(reservation) {
           </div>
 
           <div style="margin-top:10px;font-size:13px;color:#E5E7EB;line-height:1.7;">
-            Pour vous remercier de votre venue, voici votre <strong>code promo personnel de -${POST_SESSION_PROMO_PERCENT}%</strong> sur une prochaine réservation :
+            Pour vous remercier de votre venue, voici votre <strong>code promo personnel</strong> :
           </div>
 
           <div style="margin-top:14px;text-align:center;">
@@ -590,11 +594,23 @@ export async function sendReviewRequestEmail(reservation) {
             </div>
           </div>
 
-          <ul style="margin:14px 0 0 18px;padding:0;color:#E5E7EB;font-size:12.5px;line-height:1.7;">
-            <li><strong>Réduction :</strong> -${POST_SESSION_PROMO_PERCENT}% sur votre prochaine réservation.</li>
+          <div style="margin-top:14px;font-size:13px;color:#E5E7EB;line-height:1.7;">
+            <strong>Offre dégressive automatique avec le même code :</strong>
+          </div>
+
+          <ul style="margin:12px 0 0 18px;padding:0;color:#E5E7EB;font-size:12.5px;line-height:1.8;">
+            <li><strong>-30%</strong> pendant les <strong>${POST_SESSION_PROMO_STAGE_1_DAYS} premiers jours</strong>.</li>
+            <li><strong>-20%</strong> du <strong>3e au ${POST_SESSION_PROMO_STAGE_2_DAYS}e jour</strong>.</li>
+            <li><strong>-10%</strong> du <strong>8e au ${POST_SESSION_PROMO_STAGE_3_DAYS}e jour</strong>.</li>
             <li><strong>Validité :</strong> jusqu’au <strong>${promoExpiryLabel}</strong>.</li>
             <li><strong>Utilisation :</strong> 1 seule fois.</li>
           </ul>
+
+          <div style="margin-top:14px;font-size:12.5px;color:#E5E7EB;line-height:1.7;">
+            La valeur du code s’ajuste <strong>automatiquement selon la date</strong>.
+            Ce n’est <strong>pas 3 codes différents</strong> et vous n’avez rien à choisir :
+            le bon pourcentage s’applique tout seul au moment du paiement.
+          </div>
 
           <div style="margin-top:14px;text-align:center;">
             <a
