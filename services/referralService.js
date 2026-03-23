@@ -126,7 +126,7 @@ export async function getUserReferralSummary(userId) {
 
   return {
     referralCode,
-    referralLink: `https://singbox.fr/reservation?ref=${referralCode}`,
+    referralLink: `https://site-reservation-qr.vercel.app/reservation.html?ref=${referralCode}`,
     validatedCount: safeValidatedCount,
     progressCurrent,
     progressTarget: REFERRAL_REQUIRED_VALID_COUNT,
