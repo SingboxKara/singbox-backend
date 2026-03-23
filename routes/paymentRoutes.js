@@ -27,6 +27,13 @@ function normalizeEmail(email) {
   return String(email || "").trim().toLowerCase();
 }
 
+function buildPromoValidationContext({ customerEmail, panier }) {
+  return {
+    email: customerEmail || null,
+    panier: Array.isArray(panier) ? panier : [],
+  };
+}
+
 router.post("/api/create-setup-intent", requireAuth, async (req, res) => {
   try {
     if (!stripe) return res.status(500).json({ error: "Stripe non configuré" });
@@ -116,7 +123,7 @@ router.post("/api/set-default-payment-method", authMiddleware, async (req, res) 
 
 router.post("/api/validate-promo", async (req, res) => {
   try {
-    const { code, panier, singcoinsUsed } = req.body || {};
+    const { code, panier, singcoinsUsed, customer } = req.body || {};
 
     if (!code || !String(code).trim()) {
       return res.status(400).json({
@@ -139,7 +146,16 @@ router.post("/api/validate-promo", async (req, res) => {
       totalAmountEur = pricing.totalCashDue;
     }
 
-    const result = await validatePromoCode(code, totalAmountEur);
+    const customerEmail = normalizeEmail(customer?.email);
+
+    const result = await validatePromoCode(
+      code,
+      totalAmountEur,
+      buildPromoValidationContext({
+        customerEmail,
+        panier,
+      })
+    );
 
     if (!result.ok) {
       return res.status(404).json({
@@ -174,10 +190,12 @@ router.post("/api/create-payment-intent", optionalAuthMiddleware, async (req, re
       panier,
       customer,
       promoCode,
-      finalAmountCents,
       singcoinsUsed,
       useSavedPaymentMethod,
       paymentMethodId,
+      chestReward,
+      rewardType,
+      rewardValue,
     } = req.body || {};
 
     if (!panier || !Array.isArray(panier) || panier.length === 0) {
@@ -214,27 +232,21 @@ router.post("/api/create-payment-intent", optionalAuthMiddleware, async (req, re
     let promo = null;
 
     if (promoCode) {
-      const result = await validatePromoCode(promoCode, totalAmountEur);
+      const result = await validatePromoCode(
+        promoCode,
+        totalAmountEur,
+        buildPromoValidationContext({
+          customerEmail,
+          panier,
+        })
+      );
+
       if (result.ok) {
         totalAmountEur = result.newTotal;
         promoDiscountAmount = result.discountAmount;
         promo = result.promo;
       } else {
         console.warn("Code promo non appliqué :", result.reason);
-      }
-    }
-
-    if (
-      typeof finalAmountCents === "number" &&
-      finalAmountCents >= 0 &&
-      Number.isFinite(finalAmountCents)
-    ) {
-      const frontTotal = finalAmountCents / 100;
-
-      if (Math.abs(frontTotal - totalAmountEur) > 0.01) {
-        return res.status(400).json({
-          error: "Montant invalide (désynchronisation front/back)",
-        });
       }
     }
 
@@ -298,6 +310,9 @@ router.post("/api/create-payment-intent", optionalAuthMiddleware, async (req, re
             promo_discount_amount: String(promoDiscountAmount),
             singcoins_used: singcoinsUsed ? "true" : "false",
             saved_card: "true",
+            chest_reward: chestReward || "",
+            reward_type: rewardType || "",
+            reward_value: rewardValue != null ? String(rewardValue) : "",
           },
         });
 
@@ -335,6 +350,9 @@ router.post("/api/create-payment-intent", optionalAuthMiddleware, async (req, re
         singcoins_discount_amount: String(singcoinsDiscount),
         promo_discount_amount: String(promoDiscountAmount),
         singcoins_used: singcoinsUsed ? "true" : "false",
+        chest_reward: chestReward || "",
+        reward_type: rewardType || "",
+        reward_value: rewardValue != null ? String(rewardValue) : "",
       },
     });
 

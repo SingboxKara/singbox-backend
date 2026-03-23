@@ -21,10 +21,6 @@ const app = express();
 
 /**
  * ORIGINES AUTORISÉES
- * Mets ici :
- * - ton domaine Vercel réel
- * - ton domaine custom si tu en as un
- * - localhost pour le dev
  */
 const allowedOrigins = [
   "https://site-reservation-qr.vercel.app",
@@ -34,11 +30,6 @@ const allowedOrigins = [
   "http://localhost:5500",
 ];
 
-/**
- * Si tu as des previews Vercel dynamiques,
- * on autorise aussi les sous-domaines vercel.app
- * du projet Singbox uniquement.
- */
 function isAllowedOrigin(origin) {
   if (!origin) return true;
 

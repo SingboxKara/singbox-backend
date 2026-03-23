@@ -263,7 +263,6 @@ function buildReservationRow({
   fullName,
   normalizedCustomerEmail,
   resolvedUserId,
-  totalCashDue,
   singcoinsUsed,
   paymentIntentId,
 }) {
@@ -272,6 +271,10 @@ function buildReservationRow({
   const hour = start.getHours();
   const day = start.getDay();
   const nowIso = new Date().toISOString();
+
+  const lineAmount = Number(item.cashAmountDue || 0);
+  const lineTheoreticalFullAmount = Number(item.theoreticalFullAmount || lineAmount);
+  const lineSingcoinsDiscountAmount = Number(item.singcoinsDiscountAmount || 0);
 
   return {
     name: fullName,
@@ -289,15 +292,15 @@ function buildReservationRow({
 
     persons: item.persons,
     billable_persons: getBillablePersons(item.persons),
-    montant: totalCashDue,
 
-    free_session: totalCashDue <= 0,
+    montant: lineAmount,
+    free_session: lineAmount <= 0,
 
     singcoins_used: !!singcoinsUsed,
-    singcoins_spent: singcoinsUsed ? SINGCOINS_REWARD_COST : 0,
+    singcoins_spent: !!singcoinsUsed ? SINGCOINS_REWARD_COST : 0,
 
     loyalty_used: !!singcoinsUsed,
-    points_spent: singcoinsUsed ? SINGCOINS_REWARD_COST : 0,
+    points_spent: !!singcoinsUsed ? SINGCOINS_REWARD_COST : 0,
 
     payment_intent_id: paymentIntentId || null,
     original_payment_intent_id: paymentIntentId || null,
@@ -316,6 +319,14 @@ function buildReservationRow({
     is_group_session: item.persons >= 3,
     session_minutes: Math.floor((end - start) / 60000),
     updated_at: nowIso,
+
+    // champs utiles si tu veux tracer proprement la ligne
+    last_auto_charge_amount: 0,
+    refunded_amount: 0,
+
+    // valeurs calculées par ligne
+    theoretical_full_amount: lineTheoreticalFullAmount,
+    singcoins_discount_amount: lineSingcoinsDiscountAmount,
   };
 }
 
@@ -1392,10 +1403,11 @@ router.post("/api/confirm-reservation", async (req, res) => {
         ? await isFirstReservationForEmail(normalizedCustomerEmail)
         : null;
 
-      const result = await validatePromoCode(promoCode, totalCashDue, {
+     const result = await validatePromoCode(promoCode, totalCashDue, {
         email: normalizedCustomerEmail || null,
         isFirstSession,
         enforceAdvancedRules: true,
+        panier,
       });
 
       if (!result.ok) {
@@ -1511,17 +1523,16 @@ router.post("/api/confirm-reservation", async (req, res) => {
       );
     }
 
-    const rows = pricing.normalizedItems.map((it) =>
-      buildReservationRow({
-        item: it,
-        fullName,
-        normalizedCustomerEmail,
-        resolvedUserId,
-        totalCashDue,
-        singcoinsUsed,
-        paymentIntentId,
-      })
-    );
+const rows = pricing.normalizedItems.map((it) =>
+  buildReservationRow({
+    item: it,
+    fullName,
+    normalizedCustomerEmail,
+    resolvedUserId,
+    singcoinsUsed,
+    paymentIntentId,
+  })
+);
 
     for (const row of rows) {
       const hasConflict = await hasReservationConflict({

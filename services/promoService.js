@@ -1,446 +1,416 @@
-import crypto from "crypto";
-
 import { supabase } from "../config/supabase.js";
-import { creditSingcoins } from "./gamificationService.js";
 
-const COMPLETED_STATUSES = ["completed"];
-const SESSIONS_PER_CHEST = 5;
-const ACTIVE_REWARD_TTL_HOURS = 3;
+const MIN_BILLABLE_PERSONS = 2;
 const CHEST_FREE_2P_MARKER = "CHEST_FREE_2P";
 
-const REWARDS_POOL = [
-  {
-    id: "empty",
-    type: "none",
-    label: "Pas de gain cette fois",
-    description:
-      "Le coffre était vide... mais le prochain sera peut-être le bon.",
-    weight: 45,
-    value: 0,
-  },
-  {
-    id: "coins_20",
-    type: "points",
-    label: "+20 Singcoins",
-    description: "Tu gagnes 20 Singcoins.",
-    weight: 25,
-    value: 20,
-  },
-  {
-    id: "coins_30",
-    type: "points",
-    label: "+30 Singcoins",
-    description: "Tu gagnes 30 Singcoins.",
-    weight: 15,
-    value: 30,
-  },
-  {
-    id: "discount_10_percent",
-    type: "discount_percent",
-    label: "-10% sur ta réservation",
-    description: "Réduction de 10% sur une réservation.",
-    weight: 10,
-    value: 10,
-  },
-  {
-    id: "discount_20_percent",
-    type: "discount_percent",
-    label: "-20% sur ta réservation",
-    description: "Réduction de 20% sur une réservation.",
-    weight: 4,
-    value: 20,
-  },
-  {
-    id: "free_session",
-    type: "free_session",
-    label: "2 personnes offertes sur ta première séance",
-    description: "Les 2 premières personnes facturées de la première séance sont offertes. Le surplus reste payant.",
-    weight: 1,
-    value: 1,
-  },
-];
+const WEEKDAY_MORNING_RATE = 4.99;
+const WEEKDAY_MIDDAY_RATE = 8.99;
+const WEEKDAY_EVENING_RATE = 10.99;
+const WEEKEND_BEFORE_15_RATE = 11.99;
+const WEEKEND_AFTER_15_RATE = 13.99;
 
-function assertSupabaseConfigured() {
-  if (!supabase) {
-    throw new Error("Supabase non configuré");
-  }
+const WEEKDAY_MORNING_START_HOUR = 8;
+const WEEKDAY_MIDDAY_START_HOUR = 12;
+const WEEKDAY_EVENING_START_HOUR = 15;
+const WEEKDAY_END_NIGHT_HOUR = 2;
+const WEEKEND_AFTERNOON_SWITCH_HOUR = 15;
+
+function getTodayIsoDate() {
+  return new Date().toISOString().slice(0, 10);
 }
 
-function normalizeStatus(value) {
-  return String(value || "").trim().toLowerCase();
+function normalizePromoCode(code) {
+  return String(code || "").trim().toUpperCase();
 }
 
-function qualifiesForCompleted(value) {
-  return COMPLETED_STATUSES.includes(normalizeStatus(value));
+function normalizeEmail(email) {
+  return String(email || "").trim().toLowerCase();
 }
 
-function addHours(date, hours) {
-  return new Date(date.getTime() + hours * 60 * 60 * 1000);
+function normalizeAmount(amount) {
+  const safeAmount = Number(amount);
+  if (!Number.isFinite(safeAmount)) return 0;
+  return Math.max(0, safeAmount);
 }
 
-function toIsoDate(date) {
-  return date.toISOString().slice(0, 10);
+function isLikelyPromoCode(code) {
+  const safeCode = normalizePromoCode(code);
+  if (!safeCode) return false;
+  if (safeCode.length > 64) return false;
+  return /^[A-Z0-9_-]+$/.test(safeCode);
 }
 
-function weightedRandom(pool) {
-  const total = pool.reduce((sum, item) => sum + Number(item.weight || 0), 0);
-  let threshold = Math.random() * total;
-
-  for (const item of pool) {
-    threshold -= Number(item.weight || 0);
-    if (threshold <= 0) {
-      return item;
-    }
-  }
-
-  return pool[pool.length - 1];
+function getEmailDomain(email) {
+  const safeEmail = normalizeEmail(email);
+  const atIndex = safeEmail.lastIndexOf("@");
+  if (atIndex <= 0 || atIndex === safeEmail.length - 1) return null;
+  return safeEmail.slice(atIndex + 1);
 }
 
-function normalizeRewardRow(row) {
-  if (!row) return null;
+function sanitizePromoForClient(promo) {
+  if (!promo) return null;
 
   return {
-    id: row.id,
-    rewardId: row.id,
-    type: row.reward_type,
-    value: Number(row.reward_value || 0),
-    label: row.reward_label,
-    description: row.reward_description || "",
-    status: row.status,
-    promoCode: row.promo_code || null,
-    openedAt: row.opened_at || null,
-    expiresAt: row.expires_at || null,
-    sourceType: row.source_type,
-    sourceValue: Number(row.source_value || 0),
-    isEmpty: row.reward_type === "none",
+    id: promo.id ?? null,
+    code: promo.code ?? null,
+    type: promo.type ?? null,
+    value: Number(promo.value) || 0,
+    valid_from: promo.valid_from ?? null,
+    valid_to: promo.valid_to ?? null,
   };
 }
 
-async function getCompletedSessionsCount(userId) {
-  assertSupabaseConfigured();
+function normalizePersons(value) {
+  const num = Number(value);
+  if (!Number.isFinite(num)) return MIN_BILLABLE_PERSONS;
+  return Math.max(1, Math.floor(num));
+}
 
-  const { data: stats, error: statsError } = await supabase
-    .from("user_stats")
-    .select("sessions_completed")
-    .eq("user_id", userId)
-    .maybeSingle();
+function getBillablePersons(persons) {
+  return Math.max(normalizePersons(persons), MIN_BILLABLE_PERSONS);
+}
 
-  if (!statsError && stats && Number.isFinite(Number(stats.sessions_completed))) {
-    return Math.max(0, Number(stats.sessions_completed));
+function parseSlotDate(slot) {
+  if (!slot || typeof slot !== "object") return null;
+
+  const direct =
+    slot.start_time ||
+    slot.startTime ||
+    slot.datetime ||
+    null;
+
+  if (direct) {
+    const d = new Date(direct);
+    if (!Number.isNaN(d.getTime())) return d;
   }
 
-  const { data, error } = await supabase
-    .from("reservations")
-    .select("status")
-    .eq("user_id", userId);
-
-  if (error) throw error;
-
-  return (data || []).filter((row) => qualifiesForCompleted(row.status)).length;
-}
-
-async function expireStaleRewards(userId) {
-  assertSupabaseConfigured();
-
-  const nowIso = new Date().toISOString();
-
-  const { data: staleRows, error: readError } = await supabase
-    .from("chest_rewards")
-    .select("id, promo_code")
-    .eq("user_id", userId)
-    .eq("status", "active")
-    .lt("expires_at", nowIso);
-
-  if (readError) throw readError;
-
-  const stale = staleRows || [];
-  if (stale.length === 0) return;
-
-  const staleIds = stale.map((row) => row.id);
-  const promoCodes = stale.map((row) => row.promo_code).filter(Boolean);
-
-  const { error: updateRewardsError } = await supabase
-    .from("chest_rewards")
-    .update({
-      status: "expired",
-      updated_at: nowIso,
-    })
-    .in("id", staleIds);
-
-  if (updateRewardsError) throw updateRewardsError;
-
-  if (promoCodes.length > 0) {
-    const { error: promoError } = await supabase
-      .from("promo_codes")
-      .update({
-        is_active: false,
-      })
-      .in("code", promoCodes);
-
-    if (promoError) {
-      console.error("Erreur désactivation promo coffre expirée :", promoError);
-    }
-  }
-}
-
-async function getActiveReward(userId) {
-  assertSupabaseConfigured();
-  await expireStaleRewards(userId);
-
-  const { data, error } = await supabase
-    .from("chest_rewards")
-    .select("*")
-    .eq("user_id", userId)
-    .eq("status", "active")
-    .order("opened_at", { ascending: false })
-    .limit(1)
-    .maybeSingle();
-
-  if (error) throw error;
-  return data || null;
-}
-
-async function hasWelcomeAlreadyOpened(userId) {
-  const { data, error } = await supabase
-    .from("chest_rewards")
-    .select("id")
-    .eq("user_id", userId)
-    .eq("source_type", "welcome")
-    .limit(1)
-    .maybeSingle();
-
-  if (error) throw error;
-  return !!data;
-}
-
-async function getOpenedMilestones(userId) {
-  const { data, error } = await supabase
-    .from("chest_rewards")
-    .select("source_value")
-    .eq("user_id", userId)
-    .eq("source_type", "sessions");
-
-  if (error) throw error;
-
-  return new Set(
-    (data || [])
-      .map((row) => Number(row.source_value || 0))
-      .filter((value) => Number.isFinite(value) && value > 0)
-  );
-}
-
-function buildMilestones(completedSessions) {
-  const milestones = [];
-  for (let milestone = SESSIONS_PER_CHEST; milestone <= completedSessions; milestone += SESSIONS_PER_CHEST) {
-    milestones.push(milestone);
-  }
-  return milestones;
-}
-
-function buildOneShotPromoCode() {
-  const suffix = crypto.randomBytes(4).toString("hex").toUpperCase();
-  return `CHEST-${suffix}`;
-}
-
-async function createPromoCodeForReward(rewardType, rewardValue, userId) {
-  assertSupabaseConfigured();
-
-  const code = buildOneShotPromoCode();
-  const now = new Date();
-  const validFrom = toIsoDate(now);
-  const validTo = toIsoDate(addHours(now, ACTIVE_REWARD_TTL_HOURS));
-
-  const type = rewardType === "free_session" ? "free" : "percent";
-  const value = rewardType === "free_session" ? 1 : Number(rewardValue || 0);
-  const note =
-    rewardType === "free_session"
-      ? `${CHEST_FREE_2P_MARKER} | 2 personnes offertes sur la première séance | user=${userId}`
-      : `Chest reward for user ${userId}`;
-
-  const { error } = await supabase
-    .from("promo_codes")
-    .insert({
-      code,
-      type,
-      value,
-      is_active: true,
-      valid_from: validFrom,
-      valid_to: validTo,
-      max_uses: 1,
-      used_count: 0,
-      max_uses_per_user: 1,
-      first_session_only: false,
-      email_domain: null,
-      note,
-    });
-
-  if (error) throw error;
-
-  return code;
-}
-
-export async function getChestStateForUser(userId) {
-  assertSupabaseConfigured();
-
-  if (!userId) {
-    return {
-      availableCount: 0,
-      welcomeAvailable: false,
-      milestoneChests: [],
-      completedSessions: 0,
-      nextMilestone: SESSIONS_PER_CHEST,
-      activeReward: null,
-      mode: "logged_out",
-    };
-  }
-
-  const completedSessions = await getCompletedSessionsCount(userId);
-  const welcomeAlreadyOpened = await hasWelcomeAlreadyOpened(userId);
-  const openedMilestones = await getOpenedMilestones(userId);
-  const activeRewardRow = await getActiveReward(userId);
-
-  const allMilestones = buildMilestones(completedSessions);
-  const milestoneChests = allMilestones.filter(
-    (milestone) => !openedMilestones.has(milestone)
-  );
-
-  const welcomeAvailable = !welcomeAlreadyOpened;
-  const availableCount =
-    (welcomeAvailable ? 1 : 0) + milestoneChests.length;
-
-  const nextMilestone =
-    Math.ceil(Math.max(1, completedSessions) / SESSIONS_PER_CHEST) *
-    SESSIONS_PER_CHEST;
-
-  return {
-    availableCount,
-    welcomeAvailable,
-    milestoneChests,
-    completedSessions,
-    nextMilestone,
-    activeReward: normalizeRewardRow(activeRewardRow),
-    mode: activeRewardRow
-      ? "opened"
-      : availableCount > 0
-        ? "available"
-        : "locked",
-  };
-}
-
-async function persistReward({
-  userId,
-  sourceType,
-  sourceValue,
-  pickedReward,
-}) {
-  assertSupabaseConfigured();
-
-  const now = new Date();
-  const expiresAt = addHours(now, ACTIVE_REWARD_TTL_HOURS).toISOString();
-
-  let status = "opened_empty";
-  let promoCode = null;
-
-  if (pickedReward.type === "points") {
-    await creditSingcoins({
-      userId,
-      amount: Number(pickedReward.value || 0),
-      type: "chest_reward",
-      referenceType: "chest_reward",
-      referenceId: `${sourceType}:${sourceValue}:${Date.now()}`,
-      label: pickedReward.label,
-    });
-
-    status = "credited";
-  } else if (pickedReward.type === "discount_percent" || pickedReward.type === "free_session") {
-    promoCode = await createPromoCodeForReward(
-      pickedReward.type,
-      pickedReward.value,
-      userId
+  if (slot.date && typeof slot.hour === "number") {
+    const hour = Math.floor(slot.hour);
+    const minute = Math.round((slot.hour - hour) * 60);
+    const d = new Date(
+      `${slot.date}T${String(hour).padStart(2, "0")}:${String(minute).padStart(2, "0")}:00`
     );
-    status = "active";
+    if (!Number.isNaN(d.getTime())) return d;
   }
 
-  const payload = {
-    user_id: userId,
-    source_type: sourceType,
-    source_value: Number(sourceValue || 0),
-    reward_type: pickedReward.type,
-    reward_value: Number(pickedReward.value || 0),
-    reward_label: pickedReward.label,
-    reward_description: pickedReward.description,
-    promo_code: promoCode,
-    status,
-    opened_at: now.toISOString(),
-    expires_at: status === "active" ? expiresAt : null,
-    updated_at: now.toISOString(),
-  };
+  if (slot.date && typeof slot.heure === "string") {
+    const match = slot.heure.match(/(\d{1,2})[h:](\d{2})?/i);
+    if (match) {
+      const hour = Number(match[1]);
+      const minute = Number(match[2] || 0);
+      const d = new Date(
+        `${slot.date}T${String(hour).padStart(2, "0")}:${String(minute).padStart(2, "0")}:00`
+      );
+      if (!Number.isNaN(d.getTime())) return d;
+    }
+  }
 
-  const { data, error } = await supabase
-    .from("chest_rewards")
-    .insert(payload)
-    .select("*")
-    .single();
+  if (slot.date) {
+    const d = new Date(`${slot.date}T12:00:00`);
+    if (!Number.isNaN(d.getTime())) return d;
+  }
 
-  if (error) throw error;
-
-  return normalizeRewardRow(data);
+  return null;
 }
 
-export async function openChestForUser(userId) {
-  assertSupabaseConfigured();
+function isWeekend(dateObj) {
+  const day = dateObj.getDay();
+  return day === 0 || day === 6;
+}
 
-  if (!userId) {
-    throw new Error("Utilisateur manquant");
+function isFriday(dateObj) {
+  return dateObj.getDay() === 5;
+}
+
+function getPerPersonRate(dateObj) {
+  const hour = dateObj.getHours();
+  const friday = isFriday(dateObj);
+  const weekend = isWeekend(dateObj);
+
+  if (friday || weekend) {
+    if (hour >= WEEKEND_AFTERNOON_SWITCH_HOUR || hour < WEEKDAY_END_NIGHT_HOUR) {
+      return WEEKEND_AFTER_15_RATE;
+    }
+    return WEEKEND_BEFORE_15_RATE;
   }
 
-  const state = await getChestStateForUser(userId);
+  if (hour >= WEEKDAY_MORNING_START_HOUR && hour < WEEKDAY_MIDDAY_START_HOUR) {
+    return WEEKDAY_MORNING_RATE;
+  }
 
-  if (state.activeReward) {
+  if (hour >= WEEKDAY_MIDDAY_START_HOUR && hour < WEEKDAY_EVENING_START_HOUR) {
+    return WEEKDAY_MIDDAY_RATE;
+  }
+
+  if (hour >= WEEKDAY_EVENING_START_HOUR || hour < WEEKDAY_END_NIGHT_HOUR) {
+    return WEEKDAY_EVENING_RATE;
+  }
+
+  return WEEKDAY_MORNING_RATE;
+}
+
+function isChestFreeTwoPersonsPromo(promo) {
+  const note = String(promo?.note || "").toUpperCase();
+  return String(promo?.type || "").trim().toLowerCase() === "free" &&
+    note.includes(CHEST_FREE_2P_MARKER);
+}
+
+function computeChestFreeTwoPersonsDiscount(promo, totalAmountEur, panier = []) {
+  const safeTotal = normalizeAmount(totalAmountEur);
+  if (!promo || safeTotal <= 0) return 0;
+  if (!Array.isArray(panier) || panier.length === 0) return 0;
+
+  const firstItem = panier[0];
+  const slotDate = parseSlotDate(firstItem);
+  if (!slotDate) return 0;
+
+  const persons = normalizePersons(
+    firstItem?.persons ??
+    firstItem?.nb_personnes ??
+    firstItem?.participants ??
+    2
+  );
+
+  const billablePersons = getBillablePersons(persons);
+  const coveredPersons = Math.min(2, billablePersons);
+  const perPersonRate = getPerPersonRate(slotDate);
+
+  const firstItemFullAmount =
+    typeof firstItem?.price === "number" && Number.isFinite(firstItem.price)
+      ? Math.max(0, Number(firstItem.price))
+      : Number((billablePersons * perPersonRate).toFixed(2));
+
+  const discountAmount = Number((coveredPersons * perPersonRate).toFixed(2));
+
+  return Math.min(
+    safeTotal,
+    firstItemFullAmount,
+    Math.max(0, discountAmount)
+  );
+}
+
+export async function getPromoByCode(code) {
+  if (!supabase) {
+    return { ok: false, reason: "Supabase non configuré", promo: null };
+  }
+
+  if (!isLikelyPromoCode(code)) {
+    return { ok: false, reason: "Code invalide", promo: null };
+  }
+
+  const upperCode = normalizePromoCode(code);
+
+  const { data: promo, error } = await supabase
+    .from("promo_codes")
+    .select(
+      "id, code, type, value, is_active, valid_from, valid_to, max_uses, used_count, max_uses_per_user, first_session_only, email_domain, note"
+    )
+    .eq("code", upperCode)
+    .maybeSingle();
+
+  if (error) {
+    console.error("Erreur lecture promo_codes :", error);
+    return { ok: false, reason: "Erreur lecture promo", promo: null };
+  }
+
+  if (!promo) {
+    return { ok: false, reason: "Code introuvable", promo: null };
+  }
+
+  return { ok: true, promo };
+}
+
+export function isPromoValidNow(promo) {
+  if (!promo) {
+    return { ok: false, reason: "Code introuvable" };
+  }
+
+  if (promo.is_active === false) {
+    return { ok: false, reason: "Code inactif" };
+  }
+
+  const today = getTodayIsoDate();
+
+  if (promo.valid_from && today < promo.valid_from) {
+    return { ok: false, reason: "Code pas encore valable" };
+  }
+
+  if (promo.valid_to && today > promo.valid_to) {
+    return { ok: false, reason: "Code expiré" };
+  }
+
+  const maxUses =
+    promo.max_uses === null || promo.max_uses === undefined
+      ? null
+      : Number(promo.max_uses);
+
+  const usedCount = Number(promo.used_count) || 0;
+
+  if (maxUses !== null && Number.isFinite(maxUses) && usedCount >= maxUses) {
+    return { ok: false, reason: "Nombre d'utilisations atteint" };
+  }
+
+  return { ok: true };
+}
+
+export function computePromoDiscount(promo, totalAmountEur, context = {}) {
+  const safeTotal = normalizeAmount(totalAmountEur);
+  if (!promo || safeTotal <= 0) return 0;
+
+  const type = String(promo.type || "").trim().toLowerCase();
+  const value = Number(promo.value) || 0;
+
+  let discountAmount = 0;
+
+  if (isChestFreeTwoPersonsPromo(promo)) {
+    discountAmount = computeChestFreeTwoPersonsDiscount(
+      promo,
+      safeTotal,
+      context?.panier || []
+    );
+  } else if (type === "percent") {
+    discountAmount = safeTotal * (value / 100);
+  } else if (type === "fixed") {
+    discountAmount = Math.min(safeTotal, value);
+  } else if (type === "free") {
+    discountAmount = safeTotal;
+  }
+
+  const safeDiscount = Math.max(0, Number(discountAmount) || 0);
+  return Math.min(safeDiscount, safeTotal);
+}
+
+async function hasUserExceededPromoUsage(promo, email) {
+  if (!supabase) return false;
+  if (!promo?.id) return false;
+
+  const safeEmail = normalizeEmail(email);
+  if (!safeEmail) return false;
+
+  const maxUsesPerUser =
+    promo.max_uses_per_user === null || promo.max_uses_per_user === undefined
+      ? null
+      : Number(promo.max_uses_per_user);
+
+  if (maxUsesPerUser === null || !Number.isFinite(maxUsesPerUser)) {
+    return false;
+  }
+
+  const { count, error } = await supabase
+    .from("promo_usages")
+    .select("id", { count: "exact", head: true })
+    .eq("promo_id", promo.id)
+    .eq("email", safeEmail);
+
+  if (error) {
+    console.error("Erreur lecture promo_usages :", error);
+    return false;
+  }
+
+  return Number(count || 0) >= maxUsesPerUser;
+}
+
+function parsePromoValidationContext(context = {}) {
+  if (!context || typeof context !== "object" || Array.isArray(context)) {
+    return {};
+  }
+
+  return {
+    email: context.email ? normalizeEmail(context.email) : null,
+    isFirstSession:
+      typeof context.isFirstSession === "boolean" ? context.isFirstSession : null,
+    enforceAdvancedRules: context.enforceAdvancedRules === true,
+    panier: Array.isArray(context.panier) ? context.panier : [],
+  };
+}
+
+export async function validatePromoCode(code, totalAmountEur = 0, context = {}) {
+  const promoLookup = await getPromoByCode(code);
+
+  if (!promoLookup.ok || !promoLookup.promo) {
     return {
       ok: false,
-      reason: "Une récompense coffre est déjà active.",
-      state,
-      reward: state.activeReward,
+      reason: promoLookup.reason || "Code introuvable",
     };
   }
 
-  let sourceType = null;
-  let sourceValue = 0;
+  const promo = promoLookup.promo;
+  const validity = isPromoValidNow(promo);
 
-  if (state.welcomeAvailable) {
-    sourceType = "welcome";
-    sourceValue = 1;
-  } else if (state.milestoneChests.length > 0) {
-    sourceType = "sessions";
-    sourceValue = state.milestoneChests[0];
-  } else {
+  if (!validity.ok) {
     return {
       ok: false,
-      reason: "Aucun coffre disponible.",
-      state,
-      reward: null,
+      reason: validity.reason,
+      promo: sanitizePromoForClient(promo),
     };
   }
 
-  const pickedReward = weightedRandom(REWARDS_POOL);
-  const reward = await persistReward({
-    userId,
-    sourceType,
-    sourceValue,
-    pickedReward,
-  });
+  const ctx = parsePromoValidationContext(context);
 
-  const nextState = await getChestStateForUser(userId);
+  if (ctx.enforceAdvancedRules) {
+    if (promo.email_domain) {
+      const requiredDomain = String(promo.email_domain).trim().toLowerCase();
+      const currentDomain = getEmailDomain(ctx.email);
+
+      if (!currentDomain) {
+        return {
+          ok: false,
+          reason: "Email requis pour ce code promo",
+          promo: sanitizePromoForClient(promo),
+        };
+      }
+
+      if (currentDomain !== requiredDomain) {
+        return {
+          ok: false,
+          reason: "Ce code promo n'est pas valable pour cet email",
+          promo: sanitizePromoForClient(promo),
+        };
+      }
+    }
+
+    if (promo.first_session_only === true) {
+      if (ctx.isFirstSession === null) {
+        return {
+          ok: false,
+          reason: "Vérification de première réservation impossible",
+          promo: sanitizePromoForClient(promo),
+        };
+      }
+
+      if (ctx.isFirstSession !== true) {
+        return {
+          ok: false,
+          reason: "Ce code promo est réservé à la première réservation",
+          promo: sanitizePromoForClient(promo),
+        };
+      }
+    }
+  }
+
+  if (ctx.email) {
+    const exceeded = await hasUserExceededPromoUsage(promo, ctx.email);
+
+    if (exceeded) {
+      return {
+        ok: false,
+        reason: "Nombre d'utilisations atteint pour cet email",
+        promo: sanitizePromoForClient(promo),
+      };
+    }
+  }
+
+  const safeTotal = normalizeAmount(totalAmountEur);
+  const discountAmount = computePromoDiscount(promo, safeTotal, ctx);
+  const newTotal = Math.max(0, safeTotal - discountAmount);
 
   return {
     ok: true,
-    reward,
-    state: nextState,
+    newTotal,
+    discountAmount,
+    promo,
+    promoPublic: sanitizePromoForClient(promo),
   };
 }
 
-export async function getActiveChestRewardForUser(userId) {
-  const row = await getActiveReward(userId);
-  return normalizeRewardRow(row);
-}
+export { sanitizePromoForClient, normalizePromoCode, normalizeEmail };
