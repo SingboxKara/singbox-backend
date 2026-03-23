@@ -64,7 +64,10 @@ const corsOptions = {
   credentials: false,
 };
 
-app.set("trust proxy", 1);
+/**
+ * Important derrière proxy / Render
+ */
+app.set("trust proxy", true);
 
 /**
  * HEADERS DE SÉCURITÉ
@@ -84,46 +87,96 @@ app.options("*", cors(corsOptions));
 console.log("🌍 CORS configuré avec liste blanche");
 
 /**
+ * HELPERS RATE LIMIT
+ */
+function getClientIp(req) {
+  const xForwardedFor = req.headers["x-forwarded-for"];
+
+  if (typeof xForwardedFor === "string" && xForwardedFor.trim()) {
+    return xForwardedFor.split(",")[0].trim();
+  }
+
+  if (Array.isArray(xForwardedFor) && xForwardedFor.length > 0) {
+    return String(xForwardedFor[0] || "").split(",")[0].trim();
+  }
+
+  return (
+    req.ip ||
+    req.socket?.remoteAddress ||
+    req.connection?.remoteAddress ||
+    "unknown"
+  );
+}
+
+function buildLimiter({
+  name,
+  windowMs,
+  max,
+  message,
+  skipSuccessfulRequests = false,
+}) {
+  return rateLimit({
+    windowMs,
+    max,
+    standardHeaders: true,
+    legacyHeaders: false,
+    skipSuccessfulRequests,
+    skip: (req) => req.method === "OPTIONS",
+    keyGenerator: (req) => {
+      const ip = getClientIp(req);
+      const ua = String(req.headers["user-agent"] || "").slice(0, 120);
+      return `${name}:${ip}:${ua}`;
+    },
+    handler: (req, res) => {
+      const payload = {
+        error: message,
+        limiter: name,
+        path: req.originalUrl || req.url || null,
+      };
+
+      console.warn("⛔ Rate limit déclenché :", payload);
+      return res.status(429).json(payload);
+    },
+  });
+}
+
+/**
  * RATE LIMITS
  */
-const globalLimiter = rateLimit({
+const globalLimiter = buildLimiter({
+  name: "global",
   windowMs: 15 * 60 * 1000,
   max: 300,
-  standardHeaders: true,
-  legacyHeaders: false,
-  message: { error: "Trop de requêtes. Réessaie plus tard." },
+  message: "Trop de requêtes. Réessaie plus tard.",
 });
 
-const authLimiter = rateLimit({
+const authLimiter = buildLimiter({
+  name: "auth",
   windowMs: 15 * 60 * 1000,
-  max: 20,
-  standardHeaders: true,
-  legacyHeaders: false,
-  message: { error: "Trop de tentatives de connexion. Réessaie plus tard." },
+  max: 50,
+  message: "Trop de tentatives de connexion. Réessaie plus tard.",
+  skipSuccessfulRequests: true,
 });
 
-const paymentLimiter = rateLimit({
-  windowMs: 15 * 60 * 1000,
-  max: 30,
-  standardHeaders: true,
-  legacyHeaders: false,
-  message: { error: "Trop de tentatives de paiement/réservation. Réessaie plus tard." },
-});
-
-const guestLimiter = rateLimit({
+const paymentLimiter = buildLimiter({
+  name: "payment",
   windowMs: 15 * 60 * 1000,
   max: 40,
-  standardHeaders: true,
-  legacyHeaders: false,
-  message: { error: "Trop de tentatives sur les liens invités. Réessaie plus tard." },
+  message: "Trop de tentatives de paiement/réservation. Réessaie plus tard.",
 });
 
-const adminLimiter = rateLimit({
+const guestLimiter = buildLimiter({
+  name: "guest",
+  windowMs: 15 * 60 * 1000,
+  max: 40,
+  message: "Trop de tentatives sur les liens invités. Réessaie plus tard.",
+});
+
+const adminLimiter = buildLimiter({
+  name: "admin",
   windowMs: 15 * 60 * 1000,
   max: 80,
-  standardHeaders: true,
-  legacyHeaders: false,
-  message: { error: "Trop de requêtes admin. Réessaie plus tard." },
+  message: "Trop de requêtes admin. Réessaie plus tard.",
 });
 
 app.use(globalLimiter);
