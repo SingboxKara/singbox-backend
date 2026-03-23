@@ -1,3 +1,5 @@
+// backend/services/chestRewardService.js
+
 import crypto from "crypto";
 
 import { supabase } from "../config/supabase.js";
@@ -6,7 +8,6 @@ import { creditSingcoins } from "./gamificationService.js";
 const COMPLETED_STATUSES = ["completed"];
 const SESSIONS_PER_CHEST = 5;
 const ACTIVE_REWARD_TTL_HOURS = 3;
-const CHEST_FREE_2P_MARKER = "CHEST_FREE_2P";
 
 const REWARDS_POOL = [
   {
@@ -53,8 +54,8 @@ const REWARDS_POOL = [
   {
     id: "free_session",
     type: "free_session",
-    label: "2 personnes offertes sur ta première séance",
-    description: "Les 2 premières personnes facturées de la première séance sont offertes. Le surplus reste payant.",
+    label: "Session offerte",
+    description: "Tu as gagné une session offerte.",
     weight: 1,
     value: 1,
   },
@@ -251,11 +252,7 @@ async function createPromoCodeForReward(rewardType, rewardValue, userId) {
   const validTo = toIsoDate(addHours(now, ACTIVE_REWARD_TTL_HOURS));
 
   const type = rewardType === "free_session" ? "free" : "percent";
-  const value = rewardType === "free_session" ? 1 : Number(rewardValue || 0);
-  const note =
-    rewardType === "free_session"
-      ? `${CHEST_FREE_2P_MARKER} | 2 personnes offertes sur la première séance | user=${userId}`
-      : `Chest reward for user ${userId}`;
+  const value = rewardType === "free_session" ? 100 : Number(rewardValue || 0);
 
   const { error } = await supabase
     .from("promo_codes")
@@ -271,7 +268,7 @@ async function createPromoCodeForReward(rewardType, rewardValue, userId) {
       max_uses_per_user: 1,
       first_session_only: false,
       email_domain: null,
-      note,
+      note: `Chest reward for user ${userId}`,
     });
 
   if (error) throw error;

@@ -15,6 +15,7 @@ import paymentRoutes from "./routes/paymentRoutes.js";
 import reservationRoutes from "./routes/reservationRoutes.js";
 import reviewRoutes from "./routes/reviewRoutes.js";
 import adminRoutes from "./routes/adminRoutes.js";
+import chestRoutes from "./routes/chestRoutes.js";
 
 const app = express();
 
@@ -39,14 +40,14 @@ const allowedOrigins = [
  * du projet Singbox uniquement.
  */
 function isAllowedOrigin(origin) {
-  if (!origin) return true; // autorise Postman, cron, serveur à serveur
+  if (!origin) return true;
+
   if (allowedOrigins.includes(origin)) return true;
 
   try {
     const url = new URL(origin);
     const hostname = url.hostname.toLowerCase();
 
-    // autorise les previews Vercel du projet
     if (
       hostname.endsWith(".vercel.app") &&
       hostname.includes("site-reservation-qr")
@@ -95,7 +96,7 @@ console.log("🌍 CORS configuré avec liste blanche");
  * RATE LIMITS
  */
 const globalLimiter = rateLimit({
-  windowMs: 15 * 60 * 1000, // 15 min
+  windowMs: 15 * 60 * 1000,
   max: 300,
   standardHeaders: true,
   legacyHeaders: false,
@@ -161,6 +162,7 @@ app.use(authLimiter, authRoutes);
 app.use(userRoutes);
 app.use(paymentLimiter, paymentRoutes);
 app.use(paymentLimiter, reservationRoutes);
+app.use(paymentLimiter, chestRoutes);
 app.use(guestLimiter, reviewRoutes);
 app.use(adminLimiter, adminRoutes);
 
