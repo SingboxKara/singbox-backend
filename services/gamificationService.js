@@ -112,10 +112,18 @@ function mapBadgeIcon(icon) {
     mic: "🔁",
     clock3: "⏱️",
     calendar: "📅",
-    users: "🎉",
+    users: "👥",
     trophy: "🏆",
     flame: "🔥",
-    gift: "💰",
+    gift: "🎁",
+    star: "👑",
+    crown: "🐐",
+    bolt: "🔁",
+    moon: "🌙",
+    target: "🎯",
+    gem: "🎉",
+    rocket: "🚀",
+    fire: "🔥",
   };
 
   return iconMap[icon] || "★";
@@ -129,6 +137,108 @@ function formatHoursFromMinutes(totalMinutes) {
   if (!minutes) return "0h";
   if (!m) return `${h}h`;
   return `${h}h${String(m).padStart(2, "0")}`;
+}
+
+function getValidReservationDate(row) {
+  const raw = row?.completed_at || row?.start_time || null;
+  if (!raw) return null;
+  const d = new Date(raw);
+  if (Number.isNaN(d.getTime())) return null;
+  return d;
+}
+
+function countGroupSessions(reservations, minPersons) {
+  return (reservations || []).filter(
+    (row) =>
+      qualifiesForGamification(row.status) &&
+      Number(row.persons || 0) >= Number(minPersons || 0)
+  ).length;
+}
+
+function hasAtLeastNSessionsInRollingDays(reservations, minSessions, windowDays) {
+  const dates = (reservations || [])
+    .filter((row) => qualifiesForGamification(row.status))
+    .map(getValidReservationDate)
+    .filter(Boolean)
+    .sort((a, b) => a - b);
+
+  if (dates.length < minSessions) return false;
+
+  const windowMs = Number(windowDays || 0) * 86400000;
+
+  for (let i = 0; i < dates.length; i += 1) {
+    let count = 1;
+    for (let j = i + 1; j < dates.length; j += 1) {
+      if (dates[j].getTime() - dates[i].getTime() <= windowMs) {
+        count += 1;
+        if (count >= minSessions) return true;
+      } else {
+        break;
+      }
+    }
+  }
+
+  return false;
+}
+
+function hasAtLeastNSessionsInSameWeek(reservations, minSessions) {
+  const weekCounts = new Map();
+
+  for (const row of reservations || []) {
+    if (!qualifiesForGamification(row.status)) continue;
+    const d = getValidReservationDate(row);
+    if (!d) continue;
+
+    const weekKey = getMondayKey(d);
+    if (!weekKey) continue;
+
+    weekCounts.set(weekKey, (weekCounts.get(weekKey) || 0) + 1);
+  }
+
+  for (const count of weekCounts.values()) {
+    if (count >= minSessions) return true;
+  }
+
+  return false;
+}
+
+function hasConsecutiveWeeksWithMinSessions(
+  reservations,
+  consecutiveWeeks,
+  minSessionsPerWeek
+) {
+  const weekCounts = new Map();
+
+  for (const row of reservations || []) {
+    if (!qualifiesForGamification(row.status)) continue;
+    const d = getValidReservationDate(row);
+    if (!d) continue;
+
+    const weekKey = getMondayKey(d);
+    if (!weekKey) continue;
+
+    weekCounts.set(weekKey, (weekCounts.get(weekKey) || 0) + 1);
+  }
+
+  const qualifyingWeeks = [...weekCounts.entries()]
+    .filter(([, count]) => count >= minSessionsPerWeek)
+    .map(([weekKey]) => weekKey)
+    .sort();
+
+  if (qualifyingWeeks.length < consecutiveWeeks) return false;
+
+  let run = 1;
+  for (let i = 1; i < qualifyingWeeks.length; i += 1) {
+    const gap = diffDaysUtc(qualifyingWeeks[i], qualifyingWeeks[i - 1]);
+    if (gap === 7) {
+      run += 1;
+      if (run >= consecutiveWeeks) return true;
+    } else {
+      run = 1;
+    }
+  }
+
+  return false;
 }
 
 async function ensureUserRows(userId) {
@@ -165,6 +275,7 @@ async function ensureBadgeDefinitions() {
   if (!supabase) return;
 
   const rows = [
+    // COMMUNS — 5 singcoins
     {
       code: "first_session",
       title: "Première session",
@@ -172,86 +283,170 @@ async function ensureBadgeDefinitions() {
       rarity: "common",
       icon: "sparkles",
       reward_singcoins: 5,
-      reward_xp: 10,
+      reward_xp: 0,
       is_active: true,
       sort_order: 1,
     },
     {
-      code: "two_sessions",
-      title: "Ça repart",
-      description: "Faire 2 sessions réalisées",
+      code: "group_3_plus",
+      title: "Session en groupe",
+      description: "Faire une session à 3 personnes ou plus",
       rarity: "common",
-      icon: "mic",
+      icon: "users",
       reward_singcoins: 5,
-      reward_xp: 10,
+      reward_xp: 0,
       is_active: true,
       sort_order: 2,
     },
     {
-      code: "three_hours",
-      title: "3h de chant",
-      description: "Atteindre 3 heures cumulées",
+      code: "two_sessions",
+      title: "2 sessions réalisées",
+      description: "Faire 2 sessions réalisées",
       rarity: "common",
-      icon: "clock3",
-      reward_singcoins: 10,
-      reward_xp: 15,
+      icon: "mic",
+      reward_singcoins: 5,
+      reward_xp: 0,
       is_active: true,
       sort_order: 3,
     },
+
+    // RARES — 10 singcoins
     {
-      code: "weekday_regular",
-      title: "Habitué de semaine",
-      description: "Faire 3 sessions hors week-end",
+      code: "three_week_streak",
+      title: "3 semaines d’affilée",
+      description: "Atteindre un streak de 3 semaines",
       rarity: "rare",
-      icon: "calendar",
+      icon: "flame",
       reward_singcoins: 10,
-      reward_xp: 20,
+      reward_xp: 0,
       is_active: true,
       sort_order: 4,
     },
     {
-      code: "group_vibes",
-      title: "Chef de bande",
-      description: "Faire une session à 3 personnes ou plus",
+      code: "group_5_plus",
+      title: "Groupe de 5+",
+      description: "Faire une session à 5 personnes ou plus",
       rarity: "rare",
       icon: "users",
       reward_singcoins: 10,
-      reward_xp: 20,
+      reward_xp: 0,
       is_active: true,
       sort_order: 5,
     },
     {
-      code: "ten_sessions",
-      title: "Habitué confirmé",
-      description: "Faire 10 sessions réalisées",
-      rarity: "epic",
-      icon: "trophy",
-      reward_singcoins: 20,
-      reward_xp: 30,
+      code: "five_sessions",
+      title: "5 sessions réalisées",
+      description: "Faire 5 sessions réalisées",
+      rarity: "rare",
+      icon: "calendar",
+      reward_singcoins: 10,
+      reward_xp: 0,
       is_active: true,
       sort_order: 6,
     },
     {
-      code: "four_week_streak",
-      title: "Toujours là",
-      description: "Tenir 4 semaines d'affilée",
-      rarity: "epic",
-      icon: "flame",
-      reward_singcoins: 20,
-      reward_xp: 30,
+      code: "three_sessions_in_7_days",
+      title: "3 sessions en 7 jours",
+      description: "Faire 3 sessions réalisées sur 7 jours glissants",
+      rarity: "rare",
+      icon: "clock3",
+      reward_singcoins: 10,
+      reward_xp: 0,
       is_active: true,
       sort_order: 7,
     },
+
+    // ÉPIQUES — 15 singcoins
     {
-      code: "spent_singcoins_once",
-      title: "Premier échange",
-      description: "Utiliser des Singcoins une fois",
-      rarity: "rare",
-      icon: "gift",
-      reward_singcoins: 5,
-      reward_xp: 10,
+      code: "ten_sessions",
+      title: "10 sessions réalisées",
+      description: "Faire 10 sessions réalisées",
+      rarity: "epic",
+      icon: "rocket",
+      reward_singcoins: 15,
+      reward_xp: 0,
       is_active: true,
       sort_order: 8,
+    },
+    {
+      code: "five_week_streak",
+      title: "Streak de 5 semaines",
+      description: "Atteindre un streak de 5 semaines",
+      rarity: "epic",
+      icon: "fire",
+      reward_singcoins: 15,
+      reward_xp: 0,
+      is_active: true,
+      sort_order: 9,
+    },
+    {
+      code: "group_8_plus",
+      title: "Groupe de 8+",
+      description: "Faire une session à 8 personnes ou plus",
+      rarity: "epic",
+      icon: "target",
+      reward_singcoins: 15,
+      reward_xp: 0,
+      is_active: true,
+      sort_order: 10,
+    },
+    {
+      code: "three_sessions_one_week",
+      title: "3 sessions en 1 semaine",
+      description: "Faire 3 sessions réalisées dans une même semaine",
+      rarity: "epic",
+      icon: "bolt",
+      reward_singcoins: 15,
+      reward_xp: 0,
+      is_active: true,
+      sort_order: 11,
+    },
+
+    // LÉGENDAIRES — 20 singcoins
+    {
+      code: "twenty_five_sessions",
+      title: "25 sessions réalisées",
+      description: "Faire 25 sessions réalisées",
+      rarity: "legendary",
+      icon: "crown",
+      reward_singcoins: 20,
+      reward_xp: 0,
+      is_active: true,
+      sort_order: 12,
+    },
+    {
+      code: "ten_week_streak",
+      title: "Streak de 10 semaines",
+      description: "Atteindre un streak de 10 semaines",
+      rarity: "legendary",
+      icon: "star",
+      reward_singcoins: 20,
+      reward_xp: 0,
+      is_active: true,
+      sort_order: 13,
+    },
+    {
+      code: "ten_group_sessions_5_plus",
+      title: "10 sessions en groupe (5+)",
+      description: "Faire 10 sessions à 5 personnes ou plus",
+      rarity: "legendary",
+      icon: "gem",
+      reward_singcoins: 20,
+      reward_xp: 0,
+      is_active: true,
+      sort_order: 14,
+    },
+    {
+      code: "four_weeks_two_sessions_each",
+      title: "4 semaines à 2 sessions",
+      description:
+        "Faire 4 semaines consécutives avec au moins 2 sessions par semaine",
+      rarity: "legendary",
+      icon: "trophy",
+      reward_singcoins: 20,
+      reward_xp: 0,
+      is_active: true,
+      sort_order: 15,
     },
   ];
 
@@ -281,8 +476,8 @@ async function ensureMissionDefinitions() {
       title: "Venir en groupe",
       description: "Faire une session avec 3 personnes ou plus cette semaine",
       target_value: 1,
-      reward_singcoins: 8,
-      reward_xp: 12,
+      reward_singcoins: 5,
+      reward_xp: 10,
       is_active: true,
       sort_order: 2,
     },
@@ -291,7 +486,7 @@ async function ensureMissionDefinitions() {
       title: "Créneau semaine",
       description: "Faire une session hors week-end cette semaine",
       target_value: 1,
-      reward_singcoins: 6,
+      reward_singcoins: 10,
       reward_xp: 10,
       is_active: true,
       sort_order: 3,
@@ -890,6 +1085,73 @@ async function syncWeeklyMissions(userId) {
   }
 }
 
+function isBadgeUnlocked(def, stats, gamification, reservations) {
+  const completedSessions = Number(stats?.sessions_completed || 0);
+  const bestStreak = Number(gamification?.streak_best || 0);
+
+  if (def.code === "first_session") {
+    return completedSessions >= 1;
+  }
+
+  if (def.code === "group_3_plus") {
+    return Number(stats?.largest_group_size || 0) >= 3;
+  }
+
+  if (def.code === "two_sessions") {
+    return completedSessions >= 2;
+  }
+
+  if (def.code === "three_week_streak") {
+    return bestStreak >= 3;
+  }
+
+  if (def.code === "group_5_plus") {
+    return Number(stats?.largest_group_size || 0) >= 5;
+  }
+
+  if (def.code === "five_sessions") {
+    return completedSessions >= 5;
+  }
+
+  if (def.code === "three_sessions_in_7_days") {
+    return hasAtLeastNSessionsInRollingDays(reservations, 3, 7);
+  }
+
+  if (def.code === "ten_sessions") {
+    return completedSessions >= 10;
+  }
+
+  if (def.code === "five_week_streak") {
+    return bestStreak >= 5;
+  }
+
+  if (def.code === "group_8_plus") {
+    return Number(stats?.largest_group_size || 0) >= 8;
+  }
+
+  if (def.code === "three_sessions_one_week") {
+    return hasAtLeastNSessionsInSameWeek(reservations, 3);
+  }
+
+  if (def.code === "twenty_five_sessions") {
+    return completedSessions >= 25;
+  }
+
+  if (def.code === "ten_week_streak") {
+    return bestStreak >= 10;
+  }
+
+  if (def.code === "ten_group_sessions_5_plus") {
+    return countGroupSessions(reservations, 5) >= 10;
+  }
+
+  if (def.code === "four_weeks_two_sessions_each") {
+    return hasConsecutiveWeeksWithMinSessions(reservations, 4, 2);
+  }
+
+  return false;
+}
+
 async function evaluateBadges(userId) {
   await ensureBadgeDefinitions();
 
@@ -898,6 +1160,7 @@ async function evaluateBadges(userId) {
     { data: unlocked, error: unlockedError },
     { data: stats, error: statsError },
     { data: gamification, error: gamificationError },
+    { data: reservations, error: reservationsError },
   ] = await Promise.all([
     supabase
       .from("badge_definitions")
@@ -918,38 +1181,24 @@ async function evaluateBadges(userId) {
       .select("*")
       .eq("user_id", userId)
       .maybeSingle(),
+    supabase
+      .from("reservations")
+      .select("id,status,start_time,completed_at,persons")
+      .eq("user_id", userId),
   ]);
 
   if (defsError) throw defsError;
   if (unlockedError) throw unlockedError;
   if (statsError) throw statsError;
   if (gamificationError) throw gamificationError;
+  if (reservationsError) throw reservationsError;
 
   const unlockedCodes = new Set((unlocked || []).map((row) => row.badge_code));
 
   for (const def of defs || []) {
     if (unlockedCodes.has(def.code)) continue;
 
-    let unlockedNow = false;
-
-    if (def.code === "first_session") {
-      unlockedNow = Number(stats?.sessions_completed || 0) >= 1;
-    } else if (def.code === "two_sessions") {
-      unlockedNow = Number(stats?.sessions_completed || 0) >= 2;
-    } else if (def.code === "three_hours") {
-      unlockedNow = Number(stats?.minutes_sung_total || 0) >= 180;
-    } else if (def.code === "weekday_regular") {
-      unlockedNow = Number(stats?.sessions_weekday_total || 0) >= 3;
-    } else if (def.code === "group_vibes") {
-      unlockedNow = Number(stats?.largest_group_size || 0) >= 3;
-    } else if (def.code === "ten_sessions") {
-      unlockedNow = Number(stats?.sessions_completed || 0) >= 10;
-    } else if (def.code === "four_week_streak") {
-      unlockedNow = Number(gamification?.streak_best || 0) >= 4;
-    } else if (def.code === "spent_singcoins_once") {
-      unlockedNow = Number(stats?.singcoins_spent_total || 0) > 0;
-    }
-
+    const unlockedNow = isBadgeUnlocked(def, stats, gamification, reservations || []);
     if (!unlockedNow) continue;
 
     const { error: insertError } = await supabase
@@ -977,16 +1226,33 @@ async function evaluateBadges(userId) {
         label: def.title,
       });
 
-      await creditXp({
-        userId,
-        amount: Number(def.reward_xp || 0),
-        type: "badge_reward",
-        referenceType: "badge",
-        referenceId: def.code,
-        label: def.title,
-      });
+      if (Number(def.reward_xp || 0) > 0) {
+        await creditXp({
+          userId,
+          amount: Number(def.reward_xp || 0),
+          type: "badge_reward",
+          referenceType: "badge",
+          referenceId: def.code,
+          label: def.title,
+        });
+      }
     }
   }
+}
+
+async function syncGamificationForUser(userId) {
+  if (!supabase || !userId) return;
+
+  await ensureUserRows(userId);
+  await ensureMissionDefinitions();
+  await ensureBadgeDefinitions();
+  await syncUserStats(userId);
+  await syncStreak(userId);
+  await syncWeeklyMissions(userId);
+  await refreshGamificationSummary(userId);
+  await evaluateBadges(userId);
+  await syncUserStats(userId);
+  await refreshGamificationSummary(userId);
 }
 
 export async function processReservationGamification(reservationId) {
@@ -1027,35 +1293,27 @@ export async function processReservationGamification(reservationId) {
     processed: true,
   });
 
-  if (eventResult.duplicate) {
-    return getUserGamificationSnapshot(userId);
+  if (!eventResult.duplicate) {
+    await creditSingcoins({
+      userId,
+      amount: BASE_RESERVATION_SINGCOINS,
+      type: "reservation_reward",
+      referenceType: "reservation",
+      referenceId: String(reservation.id),
+      label: "Session réalisée",
+    });
+
+    await creditXp({
+      userId,
+      amount: BASE_RESERVATION_XP,
+      type: "reservation_reward",
+      referenceType: "reservation",
+      referenceId: String(reservation.id),
+      label: "Session réalisée",
+    });
   }
 
-  await creditSingcoins({
-    userId,
-    amount: BASE_RESERVATION_SINGCOINS,
-    type: "reservation_reward",
-    referenceType: "reservation",
-    referenceId: String(reservation.id),
-    label: "Session réalisée",
-  });
-
-  await creditXp({
-    userId,
-    amount: BASE_RESERVATION_XP,
-    type: "reservation_reward",
-    referenceType: "reservation",
-    referenceId: String(reservation.id),
-    label: "Session réalisée",
-  });
-
-  await syncUserStats(userId);
-  await syncStreak(userId);
-  await syncWeeklyMissions(userId);
-  await refreshGamificationSummary(userId);
-  await evaluateBadges(userId);
-  await syncUserStats(userId);
-  await refreshGamificationSummary(userId);
+  await syncGamificationForUser(userId);
 
   return getUserGamificationSnapshot(userId);
 }
@@ -1096,9 +1354,7 @@ export async function getUserGamificationSnapshot(userId) {
     };
   }
 
-  await ensureUserRows(userId);
-  await ensureMissionDefinitions();
-  await ensureBadgeDefinitions();
+  await syncGamificationForUser(userId);
 
   const [
     { data: gamification, error: gamificationError },
@@ -1147,33 +1403,34 @@ export async function getUserGamificationSnapshot(userId) {
 
   const xp = Number(gamification?.xp_total || 0);
   const level = computeLevel(xp);
-
-  const badgeMap = new Map((badgeDefs || []).map((row) => [row.code, row]));
-
-  const badges = (userBadges || [])
-    .map((row) => {
-      const def = badgeMap.get(row.badge_code) || null;
-
-      return {
-        code: row.badge_code,
-        unlockedAt: row.unlocked_at,
-        rewardSingcoins: Number(row.reward_singcoins || 0),
-        rewardXp: Number(row.reward_xp || 0),
-        title: def?.title || row.badge_code,
-        description: def?.description || "",
-        desc: def?.description || "",
-        rarity: def?.rarity || "common",
-        icon: mapBadgeIcon(def?.icon),
-        sortOrder: Number(def?.sort_order || 999),
-      };
-    })
-    .sort((a, b) => Number(a.sortOrder || 0) - Number(b.sortOrder || 0));
-
   const currentWeek = getMondayKey(new Date());
 
+  const userBadgeMap = new Map((userBadges || []).map((row) => [row.badge_code, row]));
   const missionByKey = new Map(
     (missionProgress || []).map((row) => [`${row.mission_code}:${row.week_start}`, row])
   );
+
+  const badges = (badgeDefs || [])
+    .map((def) => {
+      const unlocked = userBadgeMap.get(def.code) || null;
+
+      return {
+        code: def.code,
+        title: def.title,
+        description: def.description,
+        desc: def.description,
+        rarity: def.rarity || "common",
+        icon: mapBadgeIcon(def.icon),
+        sortOrder: Number(def.sort_order || 999),
+        rewardSingcoins: Number(
+          unlocked?.reward_singcoins ?? def.reward_singcoins ?? 0
+        ),
+        rewardXp: Number(unlocked?.reward_xp ?? def.reward_xp ?? 0),
+        isUnlocked: !!unlocked,
+        unlockedAt: unlocked?.unlocked_at || null,
+      };
+    })
+    .sort((a, b) => Number(a.sortOrder || 0) - Number(b.sortOrder || 0));
 
   const missions = (missionDefs || []).map((def) => {
     const progress = missionByKey.get(`${def.code}:${currentWeek}`) || null;
