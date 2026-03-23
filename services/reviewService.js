@@ -746,8 +746,10 @@ export async function processCompletedReviewRequests(options = {}) {
     throw error;
   }
 
-  const confirmedFinishedReservations = (reservations || []).filter(
-    (row) => isReservationStatusConfirmed(row.status) && isReservationFinished(row)
+const confirmedFinishedReservations = (reservations || []).filter(
+  (row) =>
+    (isReservationStatusConfirmed(row.status) || row.status === "completed") &&
+    isReservationFinished(row)
   );
 
   const results = [];
