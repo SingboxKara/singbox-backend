@@ -585,7 +585,7 @@ export async function sendReviewRequestEmail(reservation) {
           </div>
 
           <div style="margin-top:10px;font-size:13px;color:#E5E7EB;line-height:1.7;">
-            Pour vous remercier de votre venue, voici votre <strong>code promo personnel</strong> :
+            Pour vous remercier de votre venue, voici votre <strong>code promo personnel</strong> valable sur une prochaine réservation :
           </div>
 
           <div style="margin-top:14px;text-align:center;">
@@ -594,22 +594,19 @@ export async function sendReviewRequestEmail(reservation) {
             </div>
           </div>
 
-          <div style="margin-top:14px;font-size:13px;color:#E5E7EB;line-height:1.7;">
-            <strong>Offre dégressive automatique avec le même code :</strong>
+          <div style="margin-top:14px;font-size:13px;color:#E5E7EB;line-height:1.75;">
+            <strong>Plus vous réservez tôt, plus votre réduction est avantageuse :</strong>
           </div>
 
           <ul style="margin:12px 0 0 18px;padding:0;color:#E5E7EB;font-size:12.5px;line-height:1.8;">
-            <li><strong>-30%</strong> pendant les <strong>${POST_SESSION_PROMO_STAGE_1_DAYS} premiers jours</strong>.</li>
-            <li><strong>-20%</strong> du <strong>3e au ${POST_SESSION_PROMO_STAGE_2_DAYS}e jour</strong>.</li>
-            <li><strong>-10%</strong> du <strong>8e au ${POST_SESSION_PROMO_STAGE_3_DAYS}e jour</strong>.</li>
-            <li><strong>Validité :</strong> jusqu’au <strong>${promoExpiryLabel}</strong>.</li>
-            <li><strong>Utilisation :</strong> 1 seule fois.</li>
+            <li><strong>-30%</strong> pendant les <strong>2 premiers jours</strong></li>
+            <li><strong>-20%</strong> jusqu’au <strong>7e jour</strong></li>
+            <li><strong>-10%</strong> jusqu’au <strong>${promoExpiryLabel}</strong></li>
+            <li><strong>Utilisable une seule fois</strong></li>
           </ul>
 
-          <div style="margin-top:14px;font-size:12.5px;color:#E5E7EB;line-height:1.7;">
-            La valeur du code s’ajuste <strong>automatiquement selon la date</strong>.
-            Ce n’est <strong>pas 3 codes différents</strong> et vous n’avez rien à choisir :
-            le bon pourcentage s’applique tout seul au moment du paiement.
+          <div style="margin-top:12px;font-size:12px;color:#CBD5E1;line-height:1.7;">
+            Le même code reste actif pendant toute la période, mais sa réduction diminue automatiquement avec le temps.
           </div>
 
           <div style="margin-top:14px;text-align:center;">
