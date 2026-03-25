@@ -5,6 +5,7 @@ import { supabase } from "../config/supabase.js";
 import { stripe } from "../config/stripe.js";
 import { JWT_SECRET } from "../config/env.js";
 import { authMiddleware } from "../middlewares/auth.js";
+import { requireAdminOrCron } from "../middlewares/admin.js";
 
 import {
   buildTimesFromSlot,
@@ -1655,12 +1656,16 @@ router.post("/api/guest-refund-reservation", async (req, res) => {
    COMPLETE RESERVATION
 ========================================================= */
 
-router.post("/api/complete-reservation", async (req, res) => {
+router.post("/api/complete-reservation", requireAdminOrCron, async (req, res) => {
   try {
-    const reservationId = req.body?.reservationId;
+    const reservationId = safeText(req.body?.reservationId, 120);
 
     if (!reservationId) {
       return res.status(400).json({ error: "reservationId manquant" });
+    }
+
+    if (!supabase) {
+      return res.status(500).json({ error: "Supabase non configuré" });
     }
 
     const { data: reservation, error } = await supabase
@@ -1670,8 +1675,49 @@ router.post("/api/complete-reservation", async (req, res) => {
       .maybeSingle();
 
     if (error) throw error;
+
     if (!reservation) {
       return res.status(404).json({ error: "Réservation introuvable" });
+    }
+
+    const currentStatus = normalizeReservationStatus(reservation.status);
+
+    if (currentStatus === "completed") {
+      let gamification = null;
+
+      if (reservation.user_id) {
+        try {
+          gamification = await getUserGamificationSnapshot(reservation.user_id);
+        } catch (gErr) {
+          console.error(
+            "Erreur snapshot gamification sur réservation déjà complétée :",
+            gErr
+          );
+        }
+      }
+
+      return res.json({
+        success: true,
+        alreadyCompleted: true,
+        reservation,
+        gamification,
+        completedBy: req.isCron ? "cron" : "admin",
+      });
+    }
+
+    if (
+      [
+        "cancelled",
+        "annulee",
+        "annulée",
+        "refunded",
+        "remboursee",
+        "remboursée",
+      ].includes(currentStatus)
+    ) {
+      return res.status(409).json({
+        error: "Impossible de terminer une réservation annulée ou remboursée.",
+      });
     }
 
     const updated = await updateReservationById(reservation.id, {
@@ -1690,15 +1736,23 @@ router.post("/api/complete-reservation", async (req, res) => {
           success: true,
           reservation: updated,
           gamification: snapshot,
+          completedBy: req.isCron ? "cron" : "admin",
         });
       } catch (gErr) {
         console.error("Erreur gamification après completion :", gErr);
+
+        return res.json({
+          success: true,
+          reservation: updated,
+          completedBy: req.isCron ? "cron" : "admin",
+        });
       }
     }
 
     return res.json({
       success: true,
       reservation: updated,
+      completedBy: req.isCron ? "cron" : "admin",
     });
   } catch (error) {
     console.error("Erreur /api/complete-reservation :", error);
