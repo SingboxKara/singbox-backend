@@ -16,11 +16,155 @@ import {
   WEEKEND_AFTERNOON_SWITCH_HOUR,
 } from "../constants/booking.js";
 
-import {
-  addDaysToDateString,
-} from "../utils/dates.js";
 import { clampPersons, getNumericBoxId } from "../utils/validators.js";
 import { isReservationPaidWithSingcoins } from "./singcoinService.js";
+
+const PARIS_TIME_ZONE = "Europe/Paris";
+
+function toSafeInt(value, fallback = 0) {
+  const n = Number.parseInt(value, 10);
+  return Number.isFinite(n) ? n : fallback;
+}
+
+function parseDateOnly(dateStr) {
+  const match = String(dateStr || "").match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  if (!match) {
+    throw new Error("Date invalide (format attendu YYYY-MM-DD)");
+  }
+
+  return {
+    year: toSafeInt(match[1]),
+    month: toSafeInt(match[2]),
+    day: toSafeInt(match[3]),
+  };
+}
+
+function getParisFormatter(options = {}) {
+  return new Intl.DateTimeFormat("en-CA", {
+    timeZone: PARIS_TIME_ZONE,
+    hourCycle: "h23",
+    ...options,
+  });
+}
+
+function getParisDateParts(date) {
+  const formatter = getParisFormatter({
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+  });
+
+  const parts = formatter.formatToParts(date);
+  const map = Object.fromEntries(parts.map((part) => [part.type, part.value]));
+
+  return {
+    year: toSafeInt(map.year),
+    month: toSafeInt(map.month),
+    day: toSafeInt(map.day),
+    hour: toSafeInt(map.hour),
+    minute: toSafeInt(map.minute),
+    second: toSafeInt(map.second),
+  };
+}
+
+function getParisWeekday(date) {
+  const formatter = getParisFormatter({ weekday: "short" });
+  const weekday = formatter.format(date).toLowerCase();
+
+  if (weekday.startsWith("mon")) return 1;
+  if (weekday.startsWith("tue")) return 2;
+  if (weekday.startsWith("wed")) return 3;
+  if (weekday.startsWith("thu")) return 4;
+  if (weekday.startsWith("fri")) return 5;
+  if (weekday.startsWith("sat")) return 6;
+  return 0;
+}
+
+function getOffsetMinutesForParis(date) {
+  const formatter = getParisFormatter({
+    timeZoneName: "shortOffset",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+  });
+
+  const parts = formatter.formatToParts(date);
+  const tzName = parts.find((part) => part.type === "timeZoneName")?.value || "";
+  const normalized = tzName.replace(/\u2212/g, "-");
+  const match = normalized.match(/GMT([+-])(\d{1,2})(?::?(\d{2}))?/i);
+
+  if (!match) {
+    return 60;
+  }
+
+  const sign = match[1] === "-" ? -1 : 1;
+  const hours = toSafeInt(match[2], 0);
+  const minutes = toSafeInt(match[3], 0);
+
+  return sign * (hours * 60 + minutes);
+}
+
+function formatOffset(minutes) {
+  const sign = minutes < 0 ? "-" : "+";
+  const abs = Math.abs(minutes);
+  const hh = String(Math.floor(abs / 60)).padStart(2, "0");
+  const mm = String(abs % 60).padStart(2, "0");
+  return `${sign}${hh}:${mm}`;
+}
+
+function formatIsoInParis(date) {
+  const parts = getParisDateParts(date);
+  const offset = formatOffset(getOffsetMinutesForParis(date));
+
+  return `${String(parts.year).padStart(4, "0")}-${String(parts.month).padStart(2, "0")}-${String(parts.day).padStart(2, "0")}T${String(parts.hour).padStart(2, "0")}:${String(parts.minute).padStart(2, "0")}:${String(parts.second).padStart(2, "0")}${offset}`;
+}
+
+function formatDateOnlyInParis(date) {
+  const parts = getParisDateParts(date);
+  return `${String(parts.year).padStart(4, "0")}-${String(parts.month).padStart(2, "0")}-${String(parts.day).padStart(2, "0")}`;
+}
+
+function buildUtcDateFromParisLocal(dateStr, hour, minute = 0) {
+  const { year, month, day } = parseDateOnly(dateStr);
+
+  const roughUtc = new Date(Date.UTC(year, month - 1, day, hour, minute, 0));
+  const offsetMinutes = getOffsetMinutesForParis(roughUtc);
+
+  return new Date(Date.UTC(year, month - 1, day, hour, minute, 0) - offsetMinutes * 60 * 1000);
+}
+
+function parseHourValue(rawHour) {
+  let hourNum = 0;
+  let minuteNum = 0;
+
+  if (typeof rawHour === "number") {
+    hourNum = Math.floor(rawHour);
+    minuteNum = Math.round((rawHour - hourNum) * 60);
+  } else {
+    const m = String(rawHour || "").match(/(\d{1,2})[h:]?(\d{2})?/);
+    if (!m) {
+      throw new Error("Heure de créneau invalide");
+    }
+
+    hourNum = toSafeInt(m[1], 0);
+    minuteNum = m[2] ? toSafeInt(m[2], 0) : 0;
+  }
+
+  if (minuteNum === 60) {
+    hourNum += 1;
+    minuteNum = 0;
+  }
+
+  return {
+    hourNum,
+    minuteNum,
+  };
+}
 
 export function getBillablePersons(persons) {
   const n = Number(persons);
@@ -29,16 +173,16 @@ export function getBillablePersons(persons) {
 }
 
 export function isWeekend(dateObj) {
-  const day = dateObj.getDay();
+  const day = getParisWeekday(dateObj);
   return day === 0 || day === 6;
 }
 
 export function isFriday(dateObj) {
-  return dateObj.getDay() === 5;
+  return getParisWeekday(dateObj) === 5;
 }
 
 export function getPerPersonRateForDate(dateObj) {
-  const hour = dateObj.getHours();
+  const hour = getParisDateParts(dateObj).hour;
   const isFridayDate = isFriday(dateObj);
   const isWeekendDate = isWeekend(dateObj);
 
@@ -77,88 +221,52 @@ export function generateStandardSlotStarts() {
 export const STANDARD_SLOT_STARTS = generateStandardSlotStarts();
 
 export function buildTimesFromSlot(slot) {
-  if (slot.start_time && slot.end_time) {
-    const dateFromStart = slot.date || String(slot.start_time).slice(0, 10);
+  if (slot?.start_time && slot?.end_time) {
+    const startDate = new Date(slot.start_time);
+    const endDate = new Date(slot.end_time);
+
+    if (Number.isNaN(startDate.getTime()) || Number.isNaN(endDate.getTime())) {
+      throw new Error("Slot invalide : start_time / end_time invalides");
+    }
+
     return {
-      start_time: slot.start_time,
-      end_time: slot.end_time,
-      date: dateFromStart,
-      datetime: slot.start_time,
+      start_time: formatIsoInParis(startDate),
+      end_time: formatIsoInParis(endDate),
+      date: slot.date || formatDateOnlyInParis(startDate),
+      datetime: formatIsoInParis(startDate),
     };
   }
 
-  const date = slot.date;
-  const rawHour = slot.hour;
+  const date = slot?.date;
+  const rawHour = slot?.hour;
 
   if (!date || rawHour === undefined || rawHour === null) {
     throw new Error("Slot incomplet : date / hour ou start_time / end_time manquants");
   }
 
-  let hourNum = 0;
-  let minuteNum = 0;
+  const { hourNum, minuteNum } = parseHourValue(rawHour);
 
-  if (typeof rawHour === "number") {
-    hourNum = Math.floor(rawHour);
-    minuteNum = Math.round((rawHour - hourNum) * 60);
-  } else {
-    const m = String(rawHour).match(/(\d{1,2})[h:]?(\d{2})?/);
-    if (m) {
-      hourNum = parseInt(m[1], 10);
-      minuteNum = m[2] ? parseInt(m[2], 10) : 0;
-    }
-  }
-
-  const OFFSET = "+01:00";
-
-  const startHourStr = String(hourNum).padStart(2, "0");
-  const startMinStr = String(minuteNum).padStart(2, "0");
-  const startIso = `${date}T${startHourStr}:${startMinStr}:00${OFFSET}`;
-
-  const totalStartMinutes = hourNum * 60 + minuteNum + SLOT_DURATION_MINUTES;
-  const minutesPerDay = 24 * 60;
-
-  const endDayOffset = Math.floor(totalStartMinutes / minutesPerDay);
-  const minutesOfDay = totalStartMinutes % minutesPerDay;
-
-  const endHour = Math.floor(minutesOfDay / 60);
-  const endMinute = minutesOfDay % 60;
-
-  const endDateStr =
-    endDayOffset === 0 ? date : addDaysToDateString(date, endDayOffset);
-
-  const endHourStr = String(endHour).padStart(2, "0");
-  const endMinStr = String(endMinute).padStart(2, "0");
-  const endIso = `${endDateStr}T${endHourStr}:${endMinStr}:00${OFFSET}`;
+  const startDate = buildUtcDateFromParisLocal(date, hourNum, minuteNum);
+  const endDate = new Date(startDate.getTime() + SLOT_DURATION_MINUTES * 60 * 1000);
 
   return {
-    start_time: startIso,
-    end_time: endIso,
-    date,
-    datetime: startIso,
+    start_time: formatIsoInParis(startDate),
+    end_time: formatIsoInParis(endDate),
+    date: formatDateOnlyInParis(startDate),
+    datetime: formatIsoInParis(startDate),
   };
 }
 
 export function buildSlotIsoRange(dateStr, slotHourFloat) {
-  const hourNum = Math.floor(slotHourFloat);
-  const minuteNum = Math.round((slotHourFloat - hourNum) * 60);
+  const { hourNum, minuteNum } = parseHourValue(slotHourFloat);
 
-  const OFFSET = "+01:00";
-  const hh = String(hourNum).padStart(2, "0");
-  const mm = String(minuteNum).padStart(2, "0");
-
-  const startIso = `${dateStr}T${hh}:${mm}:00${OFFSET}`;
-  const startDate = new Date(startIso);
+  const startDate = buildUtcDateFromParisLocal(dateStr, hourNum, minuteNum);
   const endDate = new Date(startDate.getTime() + SLOT_DURATION_MINUTES * 60 * 1000);
 
-  const endY = endDate.getFullYear();
-  const endM = String(endDate.getMonth() + 1).padStart(2, "0");
-  const endD = String(endDate.getDate()).padStart(2, "0");
-  const endH = String(endDate.getHours()).padStart(2, "0");
-  const endMin = String(endDate.getMinutes()).padStart(2, "0");
-
-  const endIso = `${endY}-${endM}-${endD}T${endH}:${endMin}:00${OFFSET}`;
-
-  return { startIso, endIso };
+  return {
+    startIso: formatIsoInParis(startDate),
+    endIso: formatIsoInParis(endDate),
+  };
 }
 
 export function computeSessionCashAmount(startDate, persons, options = {}) {
@@ -180,8 +288,9 @@ export function computeSessionCashAmount(startDate, persons, options = {}) {
 
 export function computeCartPricing(panier, options = {}) {
   const singcoinsUsed = !!options.singcoinsUsed;
+  const safePanier = Array.isArray(panier) ? panier : [];
 
-  const normalizedItems = panier.map((slot) => {
+  const normalizedItems = safePanier.map((slot) => {
     const times = buildTimesFromSlot(slot);
     const startDate = new Date(times.start_time);
     const rawBox = slot.boxId ?? slot.box_id ?? slot.box ?? slot.boxName ?? 1;
