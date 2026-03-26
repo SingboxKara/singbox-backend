@@ -57,6 +57,7 @@ import {
   creditSingcoins,
   getUserGamificationSnapshot,
   createGamificationEvent,
+  processReservationGamification,
 } from "../services/gamificationService.js";
 
 import {
@@ -1928,7 +1929,9 @@ router.post("/api/complete-reservation", requireAdminOrCron, async (req, res) =>
       try {
         await maybeValidateReferralAfterCompletion(updated);
 
-        const snapshot = await getUserGamificationSnapshot(updated.user_id);
+        const snapshot =
+          (await processReservationGamification(updated.id)) ||
+          (await getUserGamificationSnapshot(updated.user_id));
 
         return res.json({
           success: true,
