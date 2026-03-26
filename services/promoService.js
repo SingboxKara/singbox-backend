@@ -15,8 +15,12 @@ const WEEKDAY_EVENING_START_HOUR = 15;
 const WEEKDAY_END_NIGHT_HOUR = 2;
 const WEEKEND_AFTERNOON_SWITCH_HOUR = 15;
 
-function getTodayIsoDate() {
-  return new Date().toISOString().slice(0, 10);
+const PARIS_TIME_ZONE = "Europe/Paris";
+
+function ensureSupabase() {
+  if (!supabase) {
+    throw new Error("Supabase non configuré");
+  }
 }
 
 function normalizePromoCode(code) {
@@ -33,11 +37,85 @@ function normalizeAmount(amount) {
   return Math.max(0, safeAmount);
 }
 
+function round2(value) {
+  return Number(normalizeAmount(value).toFixed(2));
+}
+
 function isLikelyPromoCode(code) {
   const safeCode = normalizePromoCode(code);
   if (!safeCode) return false;
   if (safeCode.length > 64) return false;
   return /^[A-Z0-9_-]+$/.test(safeCode);
+}
+
+function getParisFormatter(options = {}) {
+  return new Intl.DateTimeFormat("en-CA", {
+    timeZone: PARIS_TIME_ZONE,
+    hourCycle: "h23",
+    ...options,
+  });
+}
+
+function getTodayIsoDate() {
+  const formatter = getParisFormatter({
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  });
+
+  const parts = formatter.formatToParts(new Date());
+  const map = Object.fromEntries(parts.map((part) => [part.type, part.value]));
+
+  return `${map.year}-${map.month}-${map.day}`;
+}
+
+function getParisDateParts(date) {
+  const formatter = getParisFormatter({
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+    weekday: "short",
+  });
+
+  const parts = formatter.formatToParts(date);
+  const map = Object.fromEntries(parts.map((part) => [part.type, part.value]));
+
+  return {
+    year: Number(map.year),
+    month: Number(map.month),
+    day: Number(map.day),
+    hour: Number(map.hour),
+    minute: Number(map.minute),
+    second: Number(map.second),
+    weekday: String(map.weekday || "").toLowerCase(),
+  };
+}
+
+function parseDateOnlyToParisStart(dateStr) {
+  const safe = String(dateStr || "").trim();
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(safe)) return null;
+
+  const date = new Date(`${safe}T00:00:00Z`);
+  if (Number.isNaN(date.getTime())) return null;
+  return date;
+}
+
+function diffDaysFromParisDateOnly(dateStr) {
+  const safe = String(dateStr || "").trim();
+  if (!safe) return null;
+
+  const today = getTodayIsoDate();
+  const start = new Date(`${safe}T00:00:00Z`);
+  const current = new Date(`${today}T00:00:00Z`);
+
+  if (Number.isNaN(start.getTime()) || Number.isNaN(current.getTime())) {
+    return null;
+  }
+
+  return (current.getTime() - start.getTime()) / (1000 * 60 * 60 * 24);
 }
 
 function getEmailDomain(email) {
@@ -56,12 +134,8 @@ function getPostSessionReviewPromoPercent(promo) {
   const validFrom = String(promo?.valid_from || "").trim();
   if (!validFrom) return 0;
 
-  const start = new Date(`${validFrom}T00:00:00`);
-  if (Number.isNaN(start.getTime())) return 0;
-
-  const now = new Date();
-  const diffMs = now.getTime() - start.getTime();
-  const diffDays = diffMs / (1000 * 60 * 60 * 24);
+  const diffDays = diffDaysFromParisDateOnly(validFrom);
+  if (diffDays === null) return 0;
 
   if (diffDays < 0) return 0;
   if (diffDays < 2) return 30;
@@ -121,7 +195,7 @@ function parseSlotDate(slot) {
   }
 
   if (slot.date && typeof slot.heure === "string") {
-    const match = slot.heure.match(/(\d{1,2})[h:](\d{2})?/i);
+    const match = String(slot.heure).match(/(\d{1,2})[h:](\d{2})?/i);
     if (match) {
       const hour = Number(match[1]);
       const minute = Number(match[2] || 0);
@@ -141,16 +215,17 @@ function parseSlotDate(slot) {
 }
 
 function isWeekend(dateObj) {
-  const day = dateObj.getDay();
-  return day === 0 || day === 6;
+  const weekday = getParisDateParts(dateObj).weekday;
+  return weekday.startsWith("sun") || weekday.startsWith("sat");
 }
 
 function isFriday(dateObj) {
-  return dateObj.getDay() === 5;
+  const weekday = getParisDateParts(dateObj).weekday;
+  return weekday.startsWith("fri");
 }
 
 function getPerPersonRate(dateObj) {
-  const hour = dateObj.getHours();
+  const hour = getParisDateParts(dateObj).hour;
   const friday = isFriday(dateObj);
   const weekend = isWeekend(dateObj);
 
@@ -178,8 +253,10 @@ function getPerPersonRate(dateObj) {
 
 function isChestFreeTwoPersonsPromo(promo) {
   const note = String(promo?.note || "").toUpperCase();
-  return String(promo?.type || "").trim().toLowerCase() === "free" &&
-    note.includes(CHEST_FREE_2P_MARKER);
+  return (
+    String(promo?.type || "").trim().toLowerCase() === "free" &&
+    note.includes(CHEST_FREE_2P_MARKER)
+  );
 }
 
 function computeChestFreeTwoPersonsDiscount(promo, totalAmountEur, panier = []) {
@@ -193,9 +270,9 @@ function computeChestFreeTwoPersonsDiscount(promo, totalAmountEur, panier = []) 
 
   const persons = normalizePersons(
     firstItem?.persons ??
-    firstItem?.nb_personnes ??
-    firstItem?.participants ??
-    2
+      firstItem?.nb_personnes ??
+      firstItem?.participants ??
+      2
   );
 
   const billablePersons = getBillablePersons(persons);
@@ -217,34 +294,37 @@ function computeChestFreeTwoPersonsDiscount(promo, totalAmountEur, panier = []) 
 }
 
 export async function getPromoByCode(code) {
-  if (!supabase) {
-    return { ok: false, reason: "Supabase non configuré", promo: null };
+  try {
+    ensureSupabase();
+
+    if (!isLikelyPromoCode(code)) {
+      return { ok: false, reason: "Code invalide", promo: null };
+    }
+
+    const upperCode = normalizePromoCode(code);
+
+    const { data: promo, error } = await supabase
+      .from("promo_codes")
+      .select(
+        "id, code, type, value, is_active, valid_from, valid_to, max_uses, used_count, max_uses_per_user, first_session_only, email_domain, note"
+      )
+      .eq("code", upperCode)
+      .maybeSingle();
+
+    if (error) {
+      console.error("Erreur lecture promo_codes :", error);
+      return { ok: false, reason: "Erreur lecture promo", promo: null };
+    }
+
+    if (!promo) {
+      return { ok: false, reason: "Code introuvable", promo: null };
+    }
+
+    return { ok: true, promo };
+  } catch (error) {
+    console.error("Erreur getPromoByCode :", error);
+    return { ok: false, reason: error?.message || "Erreur promo", promo: null };
   }
-
-  if (!isLikelyPromoCode(code)) {
-    return { ok: false, reason: "Code invalide", promo: null };
-  }
-
-  const upperCode = normalizePromoCode(code);
-
-  const { data: promo, error } = await supabase
-    .from("promo_codes")
-    .select(
-      "id, code, type, value, is_active, valid_from, valid_to, max_uses, used_count, max_uses_per_user, first_session_only, email_domain, note"
-    )
-    .eq("code", upperCode)
-    .maybeSingle();
-
-  if (error) {
-    console.error("Erreur lecture promo_codes :", error);
-    return { ok: false, reason: "Erreur lecture promo", promo: null };
-  }
-
-  if (!promo) {
-    return { ok: false, reason: "Code introuvable", promo: null };
-  }
-
-  return { ok: true, promo };
 }
 
 export function isPromoValidNow(promo) {
@@ -275,6 +355,13 @@ export function isPromoValidNow(promo) {
 
   if (maxUses !== null && Number.isFinite(maxUses) && usedCount >= maxUses) {
     return { ok: false, reason: "Nombre d'utilisations atteint" };
+  }
+
+  if (isPostSessionReviewPromo(promo)) {
+    const dynamicPercent = getPostSessionReviewPromoPercent(promo);
+    if (dynamicPercent <= 0) {
+      return { ok: false, reason: "Code expiré" };
+    }
   }
 
   return { ok: true };
@@ -313,37 +400,43 @@ export function computePromoDiscount(promo, totalAmountEur, context = {}) {
   }
 
   const safeDiscount = Math.max(0, Number(discountAmount) || 0);
-  return Math.min(safeDiscount, safeTotal);
+  return round2(Math.min(safeDiscount, safeTotal));
 }
 
 async function hasUserExceededPromoUsage(promo, email) {
-  if (!supabase) return false;
   if (!promo?.id) return false;
 
-  const safeEmail = normalizeEmail(email);
-  if (!safeEmail) return false;
+  try {
+    ensureSupabase();
 
-  const maxUsesPerUser =
-    promo.max_uses_per_user === null || promo.max_uses_per_user === undefined
-      ? null
-      : Number(promo.max_uses_per_user);
+    const safeEmail = normalizeEmail(email);
+    if (!safeEmail) return false;
 
-  if (maxUsesPerUser === null || !Number.isFinite(maxUsesPerUser)) {
+    const maxUsesPerUser =
+      promo.max_uses_per_user === null || promo.max_uses_per_user === undefined
+        ? null
+        : Number(promo.max_uses_per_user);
+
+    if (maxUsesPerUser === null || !Number.isFinite(maxUsesPerUser)) {
+      return false;
+    }
+
+    const { count, error } = await supabase
+      .from("promo_usages")
+      .select("id", { count: "exact", head: true })
+      .eq("promo_id", promo.id)
+      .eq("email", safeEmail);
+
+    if (error) {
+      console.error("Erreur lecture promo_usages :", error);
+      return false;
+    }
+
+    return Number(count || 0) >= maxUsesPerUser;
+  } catch (error) {
+    console.error("Erreur hasUserExceededPromoUsage :", error);
     return false;
   }
-
-  const { count, error } = await supabase
-    .from("promo_usages")
-    .select("id", { count: "exact", head: true })
-    .eq("promo_id", promo.id)
-    .eq("email", safeEmail);
-
-  if (error) {
-    console.error("Erreur lecture promo_usages :", error);
-    return false;
-  }
-
-  return Number(count || 0) >= maxUsesPerUser;
 }
 
 function parsePromoValidationContext(context = {}) {
@@ -438,12 +531,12 @@ export async function validatePromoCode(code, totalAmountEur = 0, context = {}) 
 
   const safeTotal = normalizeAmount(totalAmountEur);
   const discountAmount = computePromoDiscount(promo, safeTotal, ctx);
-  const newTotal = Math.max(0, safeTotal - discountAmount);
+  const newTotal = round2(Math.max(0, safeTotal - discountAmount));
 
   return {
     ok: true,
     newTotal,
-    discountAmount,
+    discountAmount: round2(discountAmount),
     promo,
     promoPublic: sanitizePromoForClient(promo),
   };
