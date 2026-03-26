@@ -275,7 +275,6 @@ async function ensureBadgeDefinitions() {
   if (!supabase) return;
 
   const rows = [
-    // COMMUNS — 5 singcoins
     {
       code: "first_session",
       title: "Première session",
@@ -309,8 +308,6 @@ async function ensureBadgeDefinitions() {
       is_active: true,
       sort_order: 3,
     },
-
-    // RARES — 10 singcoins
     {
       code: "three_week_streak",
       title: "3 semaines d’affilée",
@@ -355,8 +352,6 @@ async function ensureBadgeDefinitions() {
       is_active: true,
       sort_order: 7,
     },
-
-    // ÉPIQUES — 15 singcoins
     {
       code: "ten_sessions",
       title: "10 sessions réalisées",
@@ -401,8 +396,6 @@ async function ensureBadgeDefinitions() {
       is_active: true,
       sort_order: 11,
     },
-
-    // LÉGENDAIRES — 20 singcoins
     {
       code: "twenty_five_sessions",
       title: "25 sessions réalisées",
@@ -566,12 +559,34 @@ async function creditLedger({
     return { skipped: true };
   }
 
+  const safeReferenceId = referenceId ? String(referenceId) : null;
+
+  if (referenceType && safeReferenceId) {
+    const { data: existing, error: existingError } = await supabase
+      .from(table)
+      .select("id, amount")
+      .eq("user_id", userId)
+      .eq("type", type)
+      .eq("reference_type", referenceType)
+      .eq("reference_id", safeReferenceId)
+      .maybeSingle();
+
+    if (existingError) throw existingError;
+
+    if (existing?.id) {
+      return {
+        duplicate: true,
+        existing,
+      };
+    }
+  }
+
   const payload = {
     user_id: userId,
     amount,
     type,
     reference_type: referenceType,
-    reference_id: referenceId ? String(referenceId) : null,
+    reference_id: safeReferenceId,
     label,
   };
 
@@ -585,6 +600,75 @@ async function creditLedger({
   }
 
   return { inserted: true };
+}
+
+async function backfillCompletedReservationRewards(userId) {
+  if (!supabase || !userId) return;
+
+  const { data: reservations, error } = await supabase
+    .from("reservations")
+    .select(`
+      id,
+      user_id,
+      status,
+      start_time,
+      end_time,
+      completed_at,
+      persons,
+      is_weekend,
+      is_daytime,
+      is_group_session,
+      session_minutes
+    `)
+    .eq("user_id", userId);
+
+  if (error) throw error;
+
+  for (const reservation of reservations || []) {
+    if (!qualifiesForGamification(reservation.status)) continue;
+
+    const referenceId = String(reservation.id);
+
+    await insertGamificationEvent({
+      userId,
+      eventType: "reservation_completed",
+      referenceType: "reservation",
+      referenceId,
+      payload: {
+        reservation_id: reservation.id,
+        status: reservation.status,
+        start_time: reservation.start_time,
+        end_time: reservation.end_time,
+        completed_at: reservation.completed_at,
+        persons: reservation.persons,
+        is_weekend: reservation.is_weekend,
+        is_daytime: reservation.is_daytime,
+        is_group_session: reservation.is_group_session,
+        session_minutes: reservation.session_minutes,
+      },
+      processed: true,
+    });
+
+    await creditLedger({
+      table: "singcoin_ledger",
+      userId,
+      amount: BASE_RESERVATION_SINGCOINS,
+      type: "reservation_reward",
+      referenceType: "reservation",
+      referenceId,
+      label: "Session réalisée",
+    });
+
+    await creditLedger({
+      table: "xp_ledger",
+      userId,
+      amount: BASE_RESERVATION_XP,
+      type: "reservation_reward",
+      referenceType: "reservation",
+      referenceId,
+      label: "Session réalisée",
+    });
+  }
 }
 
 async function insertGamificationEvent({
@@ -1089,62 +1173,26 @@ function isBadgeUnlocked(def, stats, gamification, reservations) {
   const completedSessions = Number(stats?.sessions_completed || 0);
   const bestStreak = Number(gamification?.streak_best || 0);
 
-  if (def.code === "first_session") {
-    return completedSessions >= 1;
-  }
-
-  if (def.code === "group_3_plus") {
-    return Number(stats?.largest_group_size || 0) >= 3;
-  }
-
-  if (def.code === "two_sessions") {
-    return completedSessions >= 2;
-  }
-
-  if (def.code === "three_week_streak") {
-    return bestStreak >= 3;
-  }
-
-  if (def.code === "group_5_plus") {
-    return Number(stats?.largest_group_size || 0) >= 5;
-  }
-
-  if (def.code === "five_sessions") {
-    return completedSessions >= 5;
-  }
-
+  if (def.code === "first_session") return completedSessions >= 1;
+  if (def.code === "group_3_plus") return Number(stats?.largest_group_size || 0) >= 3;
+  if (def.code === "two_sessions") return completedSessions >= 2;
+  if (def.code === "three_week_streak") return bestStreak >= 3;
+  if (def.code === "group_5_plus") return Number(stats?.largest_group_size || 0) >= 5;
+  if (def.code === "five_sessions") return completedSessions >= 5;
   if (def.code === "three_sessions_in_7_days") {
     return hasAtLeastNSessionsInRollingDays(reservations, 3, 7);
   }
-
-  if (def.code === "ten_sessions") {
-    return completedSessions >= 10;
-  }
-
-  if (def.code === "five_week_streak") {
-    return bestStreak >= 5;
-  }
-
-  if (def.code === "group_8_plus") {
-    return Number(stats?.largest_group_size || 0) >= 8;
-  }
-
+  if (def.code === "ten_sessions") return completedSessions >= 10;
+  if (def.code === "five_week_streak") return bestStreak >= 5;
+  if (def.code === "group_8_plus") return Number(stats?.largest_group_size || 0) >= 8;
   if (def.code === "three_sessions_one_week") {
     return hasAtLeastNSessionsInSameWeek(reservations, 3);
   }
-
-  if (def.code === "twenty_five_sessions") {
-    return completedSessions >= 25;
-  }
-
-  if (def.code === "ten_week_streak") {
-    return bestStreak >= 10;
-  }
-
+  if (def.code === "twenty_five_sessions") return completedSessions >= 25;
+  if (def.code === "ten_week_streak") return bestStreak >= 10;
   if (def.code === "ten_group_sessions_5_plus") {
     return countGroupSessions(reservations, 5) >= 10;
   }
-
   if (def.code === "four_weeks_two_sessions_each") {
     return hasConsecutiveWeeksWithMinSessions(reservations, 4, 2);
   }
@@ -1244,6 +1292,9 @@ async function syncGamificationForUser(userId) {
   if (!supabase || !userId) return;
 
   await ensureUserRows(userId);
+
+  await backfillCompletedReservationRewards(userId);
+
   await ensureMissionDefinitions();
   await ensureBadgeDefinitions();
   await syncUserStats(userId);
