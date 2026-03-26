@@ -20,10 +20,11 @@ const app = express();
 
 app.disable("x-powered-by");
 
-/**
- * ORIGINES AUTORISÉES
- */
-const allowedOrigins = [
+/* =========================================================
+   ORIGINES AUTORISÉES
+========================================================= */
+
+const STATIC_ALLOWED_ORIGINS = [
   "https://www.singbox.fr",
   "https://singbox.fr",
   "https://site-reservation-qr.vercel.app",
@@ -34,14 +35,38 @@ const allowedOrigins = [
   "http://127.0.0.1:5500",
 ];
 
-function isAllowedOrigin(origin) {
-  if (!origin) return true;
+function normalizeOrigin(origin) {
+  return String(origin || "").trim();
+}
 
-  if (allowedOrigins.includes(origin)) return true;
+function isLocalDevOrigin(url) {
+  const hostname = String(url.hostname || "").toLowerCase();
+
+  if (hostname === "localhost" || hostname === "127.0.0.1") {
+    return true;
+  }
+
+  return false;
+}
+
+function isAllowedOrigin(origin) {
+  const safeOrigin = normalizeOrigin(origin);
+
+  // Requêtes serveur-à-serveur / curl / Stripe / cron etc.
+  if (!safeOrigin) return true;
+
+  if (STATIC_ALLOWED_ORIGINS.includes(safeOrigin)) {
+    return true;
+  }
 
   try {
-    const url = new URL(origin);
-    const hostname = url.hostname.toLowerCase();
+    const url = new URL(safeOrigin);
+    const hostname = String(url.hostname || "").toLowerCase();
+    const protocol = String(url.protocol || "").toLowerCase();
+
+    if (protocol !== "https:" && protocol !== "http:") {
+      return false;
+    }
 
     if (hostname === "www.singbox.fr" || hostname === "singbox.fr") {
       return true;
@@ -51,6 +76,11 @@ function isAllowedOrigin(origin) {
       hostname.endsWith(".vercel.app") &&
       hostname.includes("site-reservation-qr")
     ) {
+      return true;
+    }
+
+    // autorise localhost / 127.0.0.1 sur n'importe quel port en dev
+    if (protocol === "http:" && isLocalDevOrigin(url)) {
       return true;
     }
 
@@ -65,54 +95,73 @@ const corsOptions = {
     if (isAllowedOrigin(origin)) {
       return callback(null, true);
     }
+
     return callback(new Error("Origine non autorisée par CORS"));
   },
   methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
   allowedHeaders: ["Content-Type", "Authorization", "x-cron-secret"],
   credentials: false,
+  optionsSuccessStatus: 204,
 };
 
-/**
- * Important derrière proxy / Render
- */
+/* =========================================================
+   PROXY / IP
+========================================================= */
+
+// Important derrière Render / reverse proxy
 app.set("trust proxy", 1);
 
-/**
- * HEADERS DE SÉCURITÉ
- */
+/* =========================================================
+   HEADERS DE SÉCURITÉ
+========================================================= */
+
 app.use(
   helmet({
     crossOriginResourcePolicy: false,
   })
 );
 
-/**
- * CORS
- */
+/* =========================================================
+   CORS
+========================================================= */
+
 app.use(cors(corsOptions));
 app.options("*", cors(corsOptions));
 
 console.log("🌍 CORS configuré avec liste blanche");
 
-/**
- * HELPERS RATE LIMIT
- */
+/* =========================================================
+   HELPERS RATE LIMIT
+========================================================= */
+
+function normalizeIp(ip) {
+  const value = String(ip || "").trim();
+
+  if (!value) return "unknown";
+
+  // IPv6 localhost / IPv4-mapped IPv6
+  if (value === "::1") return "127.0.0.1";
+  if (value.startsWith("::ffff:")) return value.replace("::ffff:", "");
+
+  return value;
+}
+
 function getClientIp(req) {
   const xForwardedFor = req.headers["x-forwarded-for"];
 
   if (typeof xForwardedFor === "string" && xForwardedFor.trim()) {
-    return xForwardedFor.split(",")[0].trim();
+    return normalizeIp(xForwardedFor.split(",")[0].trim());
   }
 
   if (Array.isArray(xForwardedFor) && xForwardedFor.length > 0) {
-    return String(xForwardedFor[0] || "").split(",")[0].trim();
+    return normalizeIp(String(xForwardedFor[0] || "").split(",")[0].trim());
   }
 
-  return (
+  return normalizeIp(
     req.ip ||
-    req.socket?.remoteAddress ||
-    req.connection?.remoteAddress ||
-    "unknown"
+      req.socket?.remoteAddress ||
+      req.connection?.remoteAddress ||
+      "unknown"
   );
 }
 
@@ -152,14 +201,10 @@ function buildLimiter({
   });
 }
 
-/**
- * RATE LIMITS
- *
- * Le problème avant :
- * - globalLimiter trop agressif
- * - paymentLimiter appliqué aussi au coffre
- * - trop facile de prendre des 429 sur paiement.html
- */
+/* =========================================================
+   RATE LIMITS
+========================================================= */
+
 const globalLimiter = buildLimiter({
   name: "global",
   windowMs: 15 * 60 * 1000,
@@ -170,7 +215,8 @@ const globalLimiter = buildLimiter({
     return (
       path.startsWith("/health") ||
       path.startsWith("/api/health") ||
-      path.startsWith("/webhook")
+      path.startsWith("/webhook") ||
+      path.startsWith("/api/webhook")
     );
   },
 });
@@ -213,28 +259,43 @@ const adminLimiter = buildLimiter({
 
 app.use(globalLimiter);
 
-/**
- * Important : webhook avant parser JSON
- */
+/* =========================================================
+   WEBHOOK AVANT PARSER JSON
+========================================================= */
+
 app.use(webhookRoutes);
 
-/**
- * JSON PARSER
- */
-app.use(express.json({ limit: "1mb" }));
-app.use(express.urlencoded({ extended: true, limit: "1mb" }));
+/* =========================================================
+   PARSERS BODY
+========================================================= */
+
+app.use(
+  express.json({
+    limit: "1mb",
+    strict: true,
+  })
+);
+
+app.use(
+  express.urlencoded({
+    extended: true,
+    limit: "1mb",
+  })
+);
 
 console.log("🌍 Sécurité HTTP + CORS + JSON configurés");
 
-/**
- * ROUTES PUBLIQUES / SANTÉ
- */
+/* =========================================================
+   ROUTES PUBLIQUES / SANTÉ
+========================================================= */
+
 app.use(healthRoutes);
 app.use(publicRoutes);
 
-/**
- * ROUTES SENSIBLES PAR FAMILLE
- */
+/* =========================================================
+   ROUTES SENSIBLES PAR FAMILLE
+========================================================= */
+
 app.use(authLimiter, authRoutes);
 app.use(userRoutes);
 app.use(paymentLimiter, paymentRoutes);
@@ -243,9 +304,10 @@ app.use(chestLimiter, chestRoutes);
 app.use(guestLimiter, reviewRoutes);
 app.use(adminLimiter, adminRoutes);
 
-/**
- * 404
- */
+/* =========================================================
+   404
+========================================================= */
+
 app.use((req, res) => {
   return res.status(404).json({
     error: "Route introuvable",
@@ -253,30 +315,38 @@ app.use((req, res) => {
   });
 });
 
-/**
- * HANDLER ERREURS CORS
- */
-app.use((err, req, res, next) => {
-  if (err && String(err.message || "").includes("CORS")) {
-    return res.status(403).json({ error: "Origine non autorisée" });
-  }
-  return next(err);
-});
+/* =========================================================
+   HANDLER ERREURS CORS / JSON / GLOBAL
+========================================================= */
 
-/**
- * HANDLER ERREURS GÉNÉRAL
- */
 app.use((err, req, res, next) => {
-  console.error("❌ Erreur serveur non gérée :", err);
-
   if (res.headersSent) {
     return next(err);
   }
 
+  const message = String(err?.message || "");
+
+  if (message.includes("CORS")) {
+    return res.status(403).json({ error: "Origine non autorisée" });
+  }
+
+  // JSON invalide envoyé au backend
+  if (err?.type === "entity.parse.failed") {
+    return res.status(400).json({ error: "JSON invalide" });
+  }
+
+  // payload trop gros
+  if (err?.type === "entity.too.large") {
+    return res.status(413).json({ error: "Requête trop volumineuse" });
+  }
+
+  console.error("❌ Erreur serveur non gérée :", err);
+
   return res.status(err?.status || 500).json({
-    error: err?.status && err.status < 500
-      ? err.message || "Erreur requête"
-      : "Erreur serveur interne",
+    error:
+      err?.status && err.status < 500
+        ? err.message || "Erreur requête"
+        : "Erreur serveur interne",
   });
 });
 
