@@ -5,19 +5,43 @@ import express from "express";
 import { supabase } from "../config/supabase.js";
 import { VACANCES_ZONE_C } from "../constants/holidays.js";
 import { getHomeLeaderboards } from "../services/leaderboardService.js";
-import { isDateInRange, addDaysToDateString, parseDateOrNull } from "../utils/dates.js";
+import {
+  isDateInRange,
+  addDaysToDateString,
+  parseDateOrNull,
+} from "../utils/dates.js";
 import {
   isReservationStatusConfirmed,
   isReservationStatusCancelledOrRefunded,
 } from "../services/reservationService.js";
-import { STANDARD_SLOT_STARTS } from "../services/pricingService.js";
+import {
+  STANDARD_SLOT_STARTS,
+  buildSlotIsoRange,
+} from "../services/pricingService.js";
 
 const router = express.Router();
 
+function safeText(value, maxLen = 120) {
+  return String(value || "").trim().slice(0, maxLen);
+}
+
+function isValidDateOnly(dateStr) {
+  return /^\d{4}-\d{2}-\d{2}$/.test(String(dateStr || "").trim());
+}
+
 router.get("/api/is-vacances", (req, res) => {
-  const date = req.query.date;
+  const date = safeText(req.query.date, 20);
+
   if (!date) {
-    return res.status(400).json({ error: "Paramètre 'date' manquant (YYYY-MM-DD)" });
+    return res
+      .status(400)
+      .json({ error: "Paramètre 'date' manquant (YYYY-MM-DD)" });
+  }
+
+  if (!isValidDateOnly(date)) {
+    return res
+      .status(400)
+      .json({ error: "Paramètre 'date' invalide (YYYY-MM-DD attendu)" });
   }
 
   const matchingPeriods = VACANCES_ZONE_C.filter((p) =>
@@ -39,35 +63,62 @@ router.get("/api/slots", async (req, res) => {
     return res.status(500).json({ error: "Supabase non configuré" });
   }
 
-  const date = req.query.date;
+  const date = safeText(req.query.date, 20);
+
   if (!date) {
-    return res.status(400).json({ error: "Paramètre 'date' manquant (YYYY-MM-DD)" });
+    return res
+      .status(400)
+      .json({ error: "Paramètre 'date' manquant (YYYY-MM-DD)" });
+  }
+
+  if (!isValidDateOnly(date)) {
+    return res
+      .status(400)
+      .json({ error: "Paramètre 'date' invalide (YYYY-MM-DD attendu)" });
   }
 
   try {
     const previousDate = addDaysToDateString(date, -1);
+    const nextDate = addDaysToDateString(date, 1);
 
     const { data, error } = await supabase
       .from("reservations")
       .select("id, box_id, start_time, end_time, status, date")
-      .in("date", [date, previousDate]);
+      .in("date", [previousDate, date, nextDate]);
 
     if (error) {
       console.error("Erreur /api/slots Supabase :", error);
       return res.status(500).json({ error: "Erreur serveur Supabase" });
     }
 
-    const dayStart = new Date(`${date}T00:00:00+01:00`);
-    const dayEnd = new Date(`${date}T23:59:59+01:00`);
+    const { startIso: dayStartIso } = buildSlotIsoRange(date, 0);
+    const nextDayStartDate = parseDateOrNull(
+      buildSlotIsoRange(nextDate, 0).startIso
+    );
+
+    const dayStart = parseDateOrNull(dayStartIso);
+    const dayEnd = nextDayStartDate
+      ? new Date(nextDayStartDate.getTime() - 1)
+      : null;
+
+    if (!dayStart || !dayEnd) {
+      return res.status(500).json({
+        error: "Impossible de construire la fenêtre journalière",
+      });
+    }
 
     const reservations = (data || []).filter((row) => {
       if (!isReservationStatusConfirmed(row.status)) return false;
 
       const start = parseDateOrNull(row.start_time);
       const end = parseDateOrNull(row.end_time);
+
       if (!start || !end) return false;
 
-      return start.getTime() <= dayEnd.getTime() && end.getTime() > dayStart.getTime();
+      return (
+        start.getTime() <= dayEnd.getTime() &&
+        end.getTime() > dayStart.getTime()
+      );
     });
 
     return res.json({
@@ -82,15 +133,16 @@ router.get("/api/slots", async (req, res) => {
 
 router.get("/api/check", async (req, res) => {
   if (!supabase) {
-    return res.status(500).json({ valid: false, error: "Supabase non configuré" });
+    return res
+      .status(500)
+      .json({ valid: false, error: "Supabase non configuré" });
   }
 
   try {
-    const id = req.query.id;
+    const id = safeText(req.query.id, 120);
 
     if (!id) {
-      res.status(400);
-      return res.json({ valid: false, error: "Missing id" });
+      return res.status(400).json({ valid: false, error: "Missing id" });
     }
 
     const { data, error } = await supabase
@@ -100,19 +152,31 @@ router.get("/api/check", async (req, res) => {
       .single();
 
     if (error || !data) {
-      res.status(404);
-      return res.json({ valid: false, reason: "Réservation introuvable." });
+      return res
+        .status(404)
+        .json({ valid: false, reason: "Réservation introuvable." });
     }
 
     const now = new Date();
-    const start = new Date(data.start_time);
-    const end = new Date(data.end_time);
+    const start = parseDateOrNull(data.start_time);
+    const end = parseDateOrNull(data.end_time);
+
+    if (!start || !end) {
+      return res.status(500).json({
+        valid: false,
+        error: "Horaires de réservation invalides",
+      });
+    }
 
     const marginBeforeMinutes = 5;
     const marginBeforeEndMinutes = 5;
 
-    const startWithMargin = new Date(start.getTime() - marginBeforeMinutes * 60000);
-    const lastEntryTime = new Date(end.getTime() - marginBeforeEndMinutes * 60000);
+    const startWithMargin = new Date(
+      start.getTime() - marginBeforeMinutes * 60000
+    );
+    const lastEntryTime = new Date(
+      end.getTime() - marginBeforeEndMinutes * 60000
+    );
 
     let access = false;
     let reason = "OK";
@@ -137,8 +201,7 @@ router.get("/api/check", async (req, res) => {
     return res.json({ valid: true, access, reason, reservation: data });
   } catch (e) {
     console.error("Erreur /api/check :", e);
-    res.status(500);
-    return res.json({ valid: false, error: e.message });
+    return res.status(500).json({ valid: false, error: e.message });
   }
 });
 
