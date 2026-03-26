@@ -43,6 +43,10 @@ function toSafeNumber(value, fallback = 0) {
   return Number.isFinite(n) ? n : fallback;
 }
 
+function round2(value) {
+  return Number(toSafeNumber(value, 0).toFixed(2));
+}
+
 function buildPromoValidationContext({ customerEmail, panier }) {
   return {
     email: customerEmail || null,
@@ -53,10 +57,10 @@ function buildPromoValidationContext({ customerEmail, panier }) {
 function buildPromoPayload(promo) {
   return promo
     ? {
-        id: promo.id,
-        code: promo.code,
-        type: promo.type,
-        value: promo.value,
+        id: promo.id ?? null,
+        code: promo.code ?? null,
+        type: promo.type ?? null,
+        value: promo.value ?? null,
       }
     : null;
 }
@@ -83,6 +87,11 @@ function ensureSupabaseConfigured(res) {
   return true;
 }
 
+function ensurePositiveAmountInCents(amountEur) {
+  const cents = Math.round(toSafeNumber(amountEur, 0) * 100);
+  return Math.max(0, cents);
+}
+
 async function tryAttachPaymentMethod(paymentMethodId, customerId) {
   try {
     await stripe.paymentMethods.attach(paymentMethodId, {
@@ -94,6 +103,18 @@ async function tryAttachPaymentMethod(paymentMethodId, customerId) {
       throw e;
     }
   }
+}
+
+async function retrieveOwnedPaymentMethodOrNull(paymentMethodId, customerId) {
+  if (!paymentMethodId || !customerId) return null;
+
+  const paymentMethod = await stripe.paymentMethods.retrieve(paymentMethodId);
+
+  if (!paymentMethod || paymentMethod.customer !== customerId) {
+    return null;
+  }
+
+  return paymentMethod;
 }
 
 function buildSharedPaymentIntentMetadata({
@@ -124,6 +145,10 @@ function buildSharedPaymentIntentMetadata({
   };
 }
 
+/* =========================================================
+   SETUP INTENT
+========================================================= */
+
 router.post("/api/create-setup-intent", authMiddleware, async (req, res) => {
   try {
     if (!ensureStripeConfigured(res)) return;
@@ -138,12 +163,19 @@ router.post("/api/create-setup-intent", authMiddleware, async (req, res) => {
       metadata: { supabase_user_id: String(req.userId) },
     });
 
-    return res.json({ clientSecret: setupIntent.client_secret });
+    return res.json({
+      clientSecret: setupIntent.client_secret,
+      setupIntentId: setupIntent.id,
+    });
   } catch (e) {
     console.error("Erreur /api/create-setup-intent :", e);
     return res.status(500).json({ error: "Erreur serveur (setup intent)" });
   }
 });
+
+/* =========================================================
+   LIST PAYMENT METHODS
+========================================================= */
 
 router.get("/api/payment-methods", authMiddleware, async (req, res) => {
   try {
@@ -178,6 +210,10 @@ router.get("/api/payment-methods", authMiddleware, async (req, res) => {
   }
 });
 
+/* =========================================================
+   SET DEFAULT PAYMENT METHOD
+========================================================= */
+
 router.post("/api/set-default-payment-method", authMiddleware, async (req, res) => {
   try {
     if (!ensureStripeConfigured(res)) return;
@@ -193,9 +229,12 @@ router.post("/api/set-default-payment-method", authMiddleware, async (req, res) 
 
     await tryAttachPaymentMethod(paymentMethodId, customerId);
 
-    const paymentMethod = await stripe.paymentMethods.retrieve(paymentMethodId);
+    const paymentMethod = await retrieveOwnedPaymentMethodOrNull(
+      paymentMethodId,
+      customerId
+    );
 
-    if (!paymentMethod || paymentMethod.customer !== customerId) {
+    if (!paymentMethod) {
       return res.status(403).json({
         error: "Cette carte n'appartient pas à ce client",
       });
@@ -213,6 +252,10 @@ router.post("/api/set-default-payment-method", authMiddleware, async (req, res) 
     return res.status(500).json({ error: "Erreur serveur (set default PM)" });
   }
 });
+
+/* =========================================================
+   VALIDATE PROMO
+========================================================= */
 
 router.post("/api/validate-promo", async (req, res) => {
   try {
@@ -264,8 +307,8 @@ router.post("/api/validate-promo", async (req, res) => {
     return res.json({
       valid: true,
       promo: result.promoPublic || sanitizePromoForClient(result.promo),
-      discountAmount: result.discountAmount,
-      newTotal: result.newTotal,
+      discountAmount: round2(result.discountAmount),
+      newTotal: round2(result.newTotal),
     });
   } catch (e) {
     console.error("Erreur /api/validate-promo :", e);
@@ -275,6 +318,10 @@ router.post("/api/validate-promo", async (req, res) => {
     });
   }
 });
+
+/* =========================================================
+   CREATE PAYMENT INTENT
+========================================================= */
 
 router.post("/api/create-payment-intent", optionalAuthMiddleware, async (req, res) => {
   try {
@@ -320,9 +367,9 @@ router.post("/api/create-payment-intent", optionalAuthMiddleware, async (req, re
       singcoinsUsed: !!singcoinsUsed,
     });
 
-    const totalBeforeDiscount = toSafeNumber(pricing.totalBeforeDiscount, 0);
-    const singcoinsDiscount = toSafeNumber(pricing.singcoinsDiscount, 0);
-    let totalAmountEur = toSafeNumber(pricing.totalCashDue, 0);
+    const totalBeforeDiscount = round2(pricing.totalBeforeDiscount || 0);
+    const singcoinsDiscount = round2(pricing.singcoinsDiscount || 0);
+    let totalAmountEur = round2(pricing.totalCashDue || 0);
     let promoDiscountAmount = 0;
     let promo = null;
 
@@ -337,8 +384,8 @@ router.post("/api/create-payment-intent", optionalAuthMiddleware, async (req, re
       );
 
       if (result.ok) {
-        totalAmountEur = toSafeNumber(result.newTotal, totalAmountEur);
-        promoDiscountAmount = toSafeNumber(result.discountAmount, 0);
+        totalAmountEur = round2(result.newTotal);
+        promoDiscountAmount = round2(result.discountAmount);
         promo = result.promo;
       } else {
         console.warn("Code promo non appliqué :", result.reason);
@@ -356,7 +403,13 @@ router.post("/api/create-payment-intent", optionalAuthMiddleware, async (req, re
       });
     }
 
-    const amountInCents = Math.round(totalAmountEur * 100);
+    const amountInCents = ensurePositiveAmountInCents(totalAmountEur);
+
+    if (amountInCents <= 0) {
+      return res.status(400).json({
+        error: "Montant de paiement invalide",
+      });
+    }
 
     if (useSavedPaymentMethod) {
       if (!req.userId) {
@@ -381,9 +434,12 @@ router.post("/api/create-payment-intent", optionalAuthMiddleware, async (req, re
 
       await tryAttachPaymentMethod(paymentMethodToUse, customerId);
 
-      const paymentMethod = await stripe.paymentMethods.retrieve(paymentMethodToUse);
+      const paymentMethod = await retrieveOwnedPaymentMethodOrNull(
+        paymentMethodToUse,
+        customerId
+      );
 
-      if (!paymentMethod || paymentMethod.customer !== customerId) {
+      if (!paymentMethod) {
         return res.status(403).json({
           error: "Cette carte n'appartient pas à ce client",
         });
@@ -467,6 +523,10 @@ router.post("/api/create-payment-intent", optionalAuthMiddleware, async (req, re
   }
 });
 
+/* =========================================================
+   CREATE DEPOSIT INTENT
+========================================================= */
+
 router.post("/api/create-deposit-intent", optionalAuthMiddleware, async (req, res) => {
   try {
     if (!ensureStripeConfigured(res)) return;
@@ -475,7 +535,7 @@ router.post("/api/create-deposit-intent", optionalAuthMiddleware, async (req, re
     const customer = req.body?.customer || {};
     const useSavedPaymentMethod = toSafeBoolean(req.body?.useSavedPaymentMethod);
     const paymentMethodId = safeText(req.body?.paymentMethodId, 200) || null;
-    const amountInCents = Math.round(DEPOSIT_AMOUNT_EUR * 100);
+    const amountInCents = ensurePositiveAmountInCents(DEPOSIT_AMOUNT_EUR);
 
     const customerEmail = normalizeEmail(customer?.email);
     if (!customerEmail) {
@@ -507,9 +567,12 @@ router.post("/api/create-deposit-intent", optionalAuthMiddleware, async (req, re
 
       await tryAttachPaymentMethod(paymentMethodToUse, customerId);
 
-      const paymentMethod = await stripe.paymentMethods.retrieve(paymentMethodToUse);
+      const paymentMethod = await retrieveOwnedPaymentMethodOrNull(
+        paymentMethodToUse,
+        customerId
+      );
 
-      if (!paymentMethod || paymentMethod.customer !== customerId) {
+      if (!paymentMethod) {
         return res.status(403).json({
           error: "Cette carte n'appartient pas à ce client",
         });
@@ -582,6 +645,10 @@ router.post("/api/create-deposit-intent", optionalAuthMiddleware, async (req, re
   }
 });
 
+/* =========================================================
+   CAPTURE DEPOSIT
+========================================================= */
+
 router.post("/api/capture-deposit", requireSupabaseAdmin, async (req, res) => {
   try {
     if (!ensureStripeConfigured(res)) return;
@@ -597,13 +664,16 @@ router.post("/api/capture-deposit", requireSupabaseAdmin, async (req, res) => {
     }
 
     const params = {};
+
     if (amountToCaptureEur != null) {
       const amount = Number(amountToCaptureEur);
+
       if (!Number.isFinite(amount) || amount < 0) {
         return res.status(400).json({
           error: "amountToCaptureEur invalide",
         });
       }
+
       params.amount_to_capture = Math.round(amount * 100);
     }
 
@@ -627,6 +697,10 @@ router.post("/api/capture-deposit", requireSupabaseAdmin, async (req, res) => {
     });
   }
 });
+
+/* =========================================================
+   CANCEL DEPOSIT
+========================================================= */
 
 router.post("/api/cancel-deposit", requireSupabaseAdmin, async (req, res) => {
   try {
