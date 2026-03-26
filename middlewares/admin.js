@@ -8,16 +8,29 @@ import { supabase } from "../config/supabase.js";
 function extractBearerToken(req) {
   const authHeader = req.headers.authorization || "";
   if (!authHeader.startsWith("Bearer ")) return null;
-  return authHeader.replace("Bearer ", "").trim();
+  return authHeader.replace("Bearer ", "").trim() || null;
+}
+
+function normalizeEmail(email) {
+  return String(email || "").trim().toLowerCase();
+}
+
+function safeTrim(value) {
+  return String(value || "").trim();
+}
+
+function hasSupabase() {
+  return !!supabase;
 }
 
 export function isCronAuthorized(req) {
-  if (!CRON_SECRET) return false;
+  const configuredSecret = safeTrim(CRON_SECRET);
+  if (!configuredSecret) return false;
 
   const bearerToken = extractBearerToken(req);
-  const headerSecret = String(req.headers["x-cron-secret"] || "").trim();
+  const headerSecret = safeTrim(req.headers["x-cron-secret"]);
 
-  return bearerToken === CRON_SECRET || headerSecret === CRON_SECRET;
+  return bearerToken === configuredSecret || headerSecret === configuredSecret;
 }
 
 async function resolveAppJwtUser(token) {
@@ -25,11 +38,22 @@ async function resolveAppJwtUser(token) {
     throw new Error("JWT_SECRET non configuré");
   }
 
-  const decoded = jwt.verify(token, JWT_SECRET);
+  if (!token) {
+    return null;
+  }
+
+  const decoded = jwt.verify(token, JWT_SECRET, {
+    algorithms: ["HS256"],
+  });
+
   const userId = decoded?.userId || decoded?.id || null;
 
   if (!userId) {
     return null;
+  }
+
+  if (!hasSupabase()) {
+    throw new Error("Supabase non configuré");
   }
 
   const { data: user, error } = await supabase
@@ -48,12 +72,16 @@ async function resolveAppJwtUser(token) {
 
   return {
     id: user.id,
-    email: user.email || null,
+    email: normalizeEmail(user.email),
     source: "app_jwt",
   };
 }
 
 async function resolveSupabaseAuthUser(token) {
+  if (!token || !hasSupabase()) {
+    return null;
+  }
+
   const { data: userData, error: userError } = await supabase.auth.getUser(token);
 
   if (userError || !userData?.user) {
@@ -62,21 +90,21 @@ async function resolveSupabaseAuthUser(token) {
 
   return {
     id: userData.user.id,
-    email: userData.user.email || null,
+    email: normalizeEmail(userData.user.email),
     source: "supabase_auth",
   };
 }
 
 async function resolveUserFromToken(token) {
-  // 1. priorité au JWT de ton backend (/api/login)
+  if (!token) return null;
+
   try {
     const appUser = await resolveAppJwtUser(token);
     if (appUser) return appUser;
   } catch (_err) {
-    // on tente ensuite le token Supabase Auth
+    // fallback Supabase
   }
 
-  // 2. fallback éventuel si un vrai token Supabase est utilisé
   try {
     const supabaseUser = await resolveSupabaseAuthUser(token);
     if (supabaseUser) return supabaseUser;
@@ -87,23 +115,14 @@ async function resolveUserFromToken(token) {
   return null;
 }
 
-async function resolveSupabaseUserAndAdmin(req) {
-  if (!supabase) {
+async function findAdminRowForUser(user) {
+  if (!hasSupabase()) {
     throw new Error("Supabase non configuré");
   }
 
-  const token = extractBearerToken(req);
-  if (!token) {
-    return { ok: false, status: 401, error: "Token manquant" };
+  if (!user?.id) {
+    return null;
   }
-
-  const user = await resolveUserFromToken(token);
-
-  if (!user) {
-    return { ok: false, status: 401, error: "Token invalide" };
-  }
-
-  let adminRow = null;
 
   const { data: adminByUserId, error: adminByUserIdError } = await supabase
     .from("admin_users")
@@ -115,26 +134,53 @@ async function resolveSupabaseUserAndAdmin(req) {
     throw adminByUserIdError;
   }
 
-  adminRow = adminByUserId || null;
-
-  if (!adminRow && user.email) {
-    const { data: adminByEmail, error: adminByEmailError } = await supabase
-      .from("admin_users")
-      .select("user_id, email")
-      .ilike("email", user.email)
-      .maybeSingle();
-
-    if (adminByEmailError) {
-      throw adminByEmailError;
-    }
-
-    adminRow = adminByEmail || null;
+  if (adminByUserId) {
+    return adminByUserId;
   }
+
+  if (!user.email) {
+    return null;
+  }
+
+  const normalizedUserEmail = normalizeEmail(user.email);
+
+  const { data: adminByEmail, error: adminByEmailError } = await supabase
+    .from("admin_users")
+    .select("user_id, email")
+    .ilike("email", normalizedUserEmail)
+    .maybeSingle();
+
+  if (adminByEmailError) {
+    throw adminByEmailError;
+  }
+
+  return adminByEmail || null;
+}
+
+async function resolveSupabaseUserAndAdmin(req) {
+  if (!hasSupabase()) {
+    throw new Error("Supabase non configuré");
+  }
+
+  const token = extractBearerToken(req);
+
+  if (!token) {
+    return { ok: false, status: 401, error: "Token manquant" };
+  }
+
+  const user = await resolveUserFromToken(token);
+
+  if (!user) {
+    return { ok: false, status: 401, error: "Token invalide" };
+  }
+
+  const adminRow = await findAdminRowForUser(user);
 
   req.user = {
     id: user.id,
     email: user.email || null,
     is_admin: !!adminRow,
+    auth_source: user.source || null,
   };
   req.userId = user.id;
 
@@ -153,6 +199,7 @@ export async function requireSupabaseAdmin(req, res, next) {
       return res.status(403).json({ error: "Accès admin requis" });
     }
 
+    req.isCron = false;
     return next();
   } catch (error) {
     console.error("❌ requireSupabaseAdmin error:", error);
@@ -164,6 +211,13 @@ export async function requireAdminOrCron(req, res, next) {
   try {
     if (isCronAuthorized(req)) {
       req.isCron = true;
+      req.user = {
+        id: null,
+        email: null,
+        is_admin: true,
+        auth_source: "cron",
+      };
+      req.userId = null;
       return next();
     }
 
