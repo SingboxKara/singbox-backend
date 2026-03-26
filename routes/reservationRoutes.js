@@ -147,6 +147,167 @@ function buildFullName(customer) {
   return `${prenom}${prenom && nom ? " " : ""}${nom}`.trim();
 }
 
+function buildPromoPayload(promo) {
+  return promo
+    ? {
+        id: promo.id ?? null,
+        code: promo.code ?? null,
+        type: promo.type ?? null,
+        value: promo.value ?? null,
+      }
+    : null;
+}
+
+function round2(value) {
+  const n = Number(value || 0);
+  return Number(n.toFixed(2));
+}
+
+function buildPromoValidationContext({ email, cart }) {
+  return {
+    email: normalizeEmail(email) || null,
+    panier: Array.isArray(cart) ? cart : [],
+  };
+}
+
+function distributeDiscountAcrossItems(items, totalDiscount, fieldName) {
+  const safeItems = Array.isArray(items) ? items : [];
+  const safeDiscount = round2(totalDiscount);
+
+  if (!safeItems.length || safeDiscount <= 0) {
+    return safeItems.map((item) => ({
+      ...item,
+      [fieldName]: round2(item?.[fieldName] || 0),
+    }));
+  }
+
+  const totalCash = round2(
+    safeItems.reduce((sum, item) => sum + Number(item.cashAmountDue || 0), 0)
+  );
+
+  if (totalCash <= 0) {
+    return safeItems.map((item, index) => ({
+      ...item,
+      [fieldName]: index === 0 ? safeDiscount : 0,
+    }));
+  }
+
+  let allocated = 0;
+
+  return safeItems.map((item, index) => {
+    const lineCash = round2(item.cashAmountDue || 0);
+
+    let lineDiscount = 0;
+    if (index === safeItems.length - 1) {
+      lineDiscount = round2(safeDiscount - allocated);
+    } else {
+      lineDiscount = round2((lineCash / totalCash) * safeDiscount);
+      allocated = round2(allocated + lineDiscount);
+    }
+
+    return {
+      ...item,
+      [fieldName]: lineDiscount,
+    };
+  });
+}
+
+async function computeReservationCartPricing({
+  cart,
+  singcoinsUsed = false,
+  promoCode = null,
+  customer = null,
+  referralFreeSessionApplied = false,
+}) {
+  const basePricing = computeCartPricing(Array.isArray(cart) ? cart : [], {
+    singcoinsUsed: !!singcoinsUsed,
+  });
+
+  let items = (basePricing.normalizedItems || []).map((item) => ({
+    ...item,
+    promoCode: null,
+    promoDiscountAmount: 0,
+    referralFreeSessionDiscountAmount: 0,
+  }));
+
+  const totalBeforeDiscount = round2(basePricing.totalBeforeDiscount || 0);
+  const singcoinsDiscount = round2(basePricing.singcoinsDiscount || 0);
+
+  let promoDiscountAmount = 0;
+  let referralFreeSessionDiscountAmount = 0;
+  let appliedPromo = null;
+  let totalCashDue = round2(basePricing.totalCashDue || 0);
+
+  if (promoCode) {
+    const promoResult = await validatePromoCode(
+      promoCode,
+      totalCashDue,
+      buildPromoValidationContext({
+        email: customer?.email,
+        cart,
+      })
+    );
+
+    if (promoResult?.ok) {
+      promoDiscountAmount = round2(promoResult.discountAmount || 0);
+      totalCashDue = round2(promoResult.newTotal ?? totalCashDue);
+      appliedPromo = promoResult.promo || promoResult.promoPublic || null;
+
+      items = distributeDiscountAcrossItems(
+        items,
+        promoDiscountAmount,
+        "promoDiscountAmount"
+      ).map((item) => ({
+        ...item,
+        promoCode: appliedPromo?.code || safeText(promoCode, 80) || null,
+        cashAmountDue: round2(
+          Number(item.cashAmountDue || 0) - Number(item.promoDiscountAmount || 0)
+        ),
+      }));
+    }
+  }
+
+  if (referralFreeSessionApplied) {
+    referralFreeSessionDiscountAmount = round2(
+      items.reduce((sum, item) => sum + Number(item.cashAmountDue || 0), 0)
+    );
+
+    items = items.map((item) => ({
+      ...item,
+      referralFreeSessionDiscountAmount: round2(item.cashAmountDue || 0),
+      cashAmountDue: 0,
+    }));
+
+    totalCashDue = 0;
+  }
+
+  items = items.map((item) => ({
+    ...item,
+    theoreticalFullAmount: round2(item.theoreticalFullAmount || 0),
+    singcoinsDiscountAmount: round2(item.singcoinsDiscountAmount || 0),
+    promoDiscountAmount: round2(item.promoDiscountAmount || 0),
+    referralFreeSessionDiscountAmount: round2(
+      item.referralFreeSessionDiscountAmount || 0
+    ),
+    cashAmountDue: round2(Math.max(0, Number(item.cashAmountDue || 0))),
+  }));
+
+  return {
+    success: true,
+    items,
+    normalizedItems: items,
+    totalBeforeDiscount,
+    singcoinsDiscount,
+    promoDiscountAmount: round2(promoDiscountAmount),
+    referralFreeSessionDiscountAmount: round2(
+      referralFreeSessionDiscountAmount
+    ),
+    totalCashDue: round2(totalCashDue),
+    totalAfterDiscount: round2(totalCashDue),
+    promo: buildPromoPayload(appliedPromo),
+  };
+}
+
 async function invalidateGuestManageToken(reservationId) {
   if (!supabase || !reservationId) return;
 
@@ -731,11 +892,12 @@ router.post("/api/verify-cart", async (req, res) => {
       return res.status(400).json({ error: "Panier vide" });
     }
 
-    const pricing = await computeCartPricing({
+    const pricing = await computeReservationCartPricing({
       cart,
       singcoinsUsed,
       promoCode,
       customer,
+      referralFreeSessionApplied: false,
     });
 
     return res.json({
@@ -823,7 +985,7 @@ router.post("/api/confirm-reservation", optionalAuthMiddleware, async (req, res)
       totalPersons,
     });
 
-    const pricing = await computeCartPricing({
+    const pricing = await computeReservationCartPricing({
       cart,
       singcoinsUsed,
       promoCode,
@@ -1838,7 +2000,12 @@ router.post("/api/build-slot-range", async (req, res) => {
       return res.status(400).json({ error: "date et slot requis" });
     }
 
-    const range = buildSlotIsoRange(date, slot);
+    const slotValue = Number(slot);
+    if (!Number.isFinite(slotValue)) {
+      return res.status(400).json({ error: "slot invalide" });
+    }
+
+    const range = buildSlotIsoRange(date, slotValue);
     return res.json({
       success: true,
       ...range,
@@ -1858,7 +2025,15 @@ router.post("/api/build-times-from-slot", async (req, res) => {
       return res.status(400).json({ error: "date et slot requis" });
     }
 
-    const times = buildTimesFromSlot(date, slot);
+    const slotValue = Number(slot);
+    if (!Number.isFinite(slotValue)) {
+      return res.status(400).json({ error: "slot invalide" });
+    }
+
+    const times = buildTimesFromSlot({
+      date,
+      hour: slotValue,
+    });
 
     return res.json({
       success: true,
@@ -1878,20 +2053,19 @@ router.post("/api/session-cash-amount", async (req, res) => {
   try {
     const startTime = req.body?.startTime;
     const persons = clampPersons(req.body?.persons);
-    const promoCode = safeText(req.body?.promoCode, 80) || null;
     const singcoinsUsed = req.body?.singcoinsUsed === true;
-    const customer = req.body?.customer || null;
 
     if (!startTime) {
       return res.status(400).json({ error: "startTime requis" });
     }
 
-    const amount = await computeSessionCashAmount({
-      startTime,
-      persons,
-      promoCode,
+    const startDate = parseDateOrNull(startTime);
+    if (!startDate) {
+      return res.status(400).json({ error: "startTime invalide" });
+    }
+
+    const amount = computeSessionCashAmount(startDate, persons, {
       singcoinsUsed,
-      customer,
     });
 
     return res.json({
@@ -1900,34 +2074,6 @@ router.post("/api/session-cash-amount", async (req, res) => {
     });
   } catch (error) {
     console.error("Erreur /api/session-cash-amount :", error);
-    return res.status(500).json({ error: "Erreur serveur" });
-  }
-});
-
-/* =========================================================
-   PROMO VALIDATION
-========================================================= */
-
-router.post("/api/validate-promo", async (req, res) => {
-  try {
-    const code = safeText(req.body?.code, 80);
-    const email = normalizeEmail(req.body?.email || "");
-
-    if (!code) {
-      return res.status(400).json({ error: "Code promo manquant" });
-    }
-
-    const result = await validatePromoCode({
-      code,
-      email,
-    });
-
-    return res.json({
-      success: true,
-      result,
-    });
-  } catch (error) {
-    console.error("Erreur /api/validate-promo :", error);
     return res.status(500).json({ error: "Erreur serveur" });
   }
 });
