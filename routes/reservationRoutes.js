@@ -406,7 +406,7 @@ async function persistReservations(rows) {
 }
 
 async function markPaymentIntentReservations(paymentIntentId, reservationIds = []) {
-  if (!paymentIntentId || !reservationIds.length) return;
+  if (!paymentIntentId || !reservationIds.length || !stripe) return;
 
   try {
     await stripe.paymentIntents.update(paymentIntentId, {
@@ -476,8 +476,7 @@ async function ensureGuestTokenOnReservations(reservations = []) {
 }
 
 async function buildReservationAccessToken(reservation) {
-  if (!reservation?.id || !reservation?.email) return null;
-  if (!JWT_SECRET) return null;
+  if (!reservation?.id || !reservation?.email || !JWT_SECRET) return null;
 
   try {
     return jwt.sign(
@@ -763,4 +762,4 @@ router.post("/api/confirm-reservation", optionalAuthMiddleware, async (req, res)
     const singcoinsUsed = body.singcoinsUsed === true;
     const paymentIntentId = safeText(body.paymentIntentId, 200) || null;
 
-    const authenticatedUse
+    const authenticatedUserId = 
