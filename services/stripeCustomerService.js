@@ -5,37 +5,134 @@ import { supabase } from "../config/supabase.js";
 import { getUserById } from "./userService.js";
 import { roundMoney } from "../utils/formatters.js";
 
-export async function ensureStripeCustomer(userId) {
-  if (!stripe) throw new Error("Stripe non configuré");
-  if (!supabase) throw new Error("Supabase non configuré");
-
-  const user = await getUserById(userId);
-
-  if (user.stripe_customer_id) {
-    return { customerId: user.stripe_customer_id, user };
+function ensureStripe() {
+  if (!stripe) {
+    throw new Error("Stripe non configuré");
   }
+}
 
-  const customer = await stripe.customers.create({
-    email: user.email || undefined,
-    metadata: { supabase_user_id: String(userId) },
-  });
+function ensureSupabase() {
+  if (!supabase) {
+    throw new Error("Supabase non configuré");
+  }
+}
 
-  const { error: upErr } = await supabase
+function safeText(value, maxLen = 255) {
+  return String(value || "").trim().slice(0, maxLen);
+}
+
+function normalizeEmail(email) {
+  return String(email || "").trim().toLowerCase();
+}
+
+function toSafeAmountEur(amount) {
+  const n = Number(amount);
+  if (!Number.isFinite(n)) return 0;
+  return Math.max(0, roundMoney(n));
+}
+
+function toAmountCents(amountEur) {
+  return Math.max(0, Math.round(toSafeAmountEur(amountEur) * 100));
+}
+
+function buildCustomerFullName(customer = {}) {
+  const prenom = safeText(customer?.prenom, 120);
+  const nom = safeText(customer?.nom, 120);
+  return `${prenom}${prenom && nom ? " " : ""}${nom}`.trim();
+}
+
+async function getExistingStripeCustomer(customerId) {
+  if (!customerId) return null;
+
+  try {
+    const customer = await stripe.customers.retrieve(customerId);
+    if (customer?.deleted) {
+      return null;
+    }
+    return customer || null;
+  } catch (error) {
+    console.warn("⚠️ Impossible de relire le customer Stripe existant :", customerId, error?.message || error);
+    return null;
+  }
+}
+
+async function persistStripeCustomerId(userId, customerId) {
+  const { error } = await supabase
     .from("users")
     .update({
-      stripe_customer_id: customer.id,
+      stripe_customer_id: customerId,
       updated_at: new Date().toISOString(),
     })
     .eq("id", userId);
 
-  if (upErr) throw upErr;
+  if (error) {
+    throw error;
+  }
+}
 
-  const updated = await getUserById(userId);
+async function attachPaymentMethodIfNeeded(paymentMethodId, customerId) {
+  if (!paymentMethodId || !customerId) return;
+
+  try {
+    await stripe.paymentMethods.attach(paymentMethodId, {
+      customer: customerId,
+    });
+  } catch (error) {
+    const msg = String(error?.message || "").toLowerCase();
+    if (!msg.includes("already") && !msg.includes("attached")) {
+      throw error;
+    }
+  }
+}
+
+export async function ensureStripeCustomer(userId) {
+  ensureStripe();
+  ensureSupabase();
+
+  const safeUserId = safeText(userId, 120);
+  if (!safeUserId) {
+    throw new Error("userId manquant");
+  }
+
+  const user = await getUserById(safeUserId);
+  if (!user?.id) {
+    throw new Error("Utilisateur introuvable");
+  }
+
+  const existingCustomerId = safeText(user.stripe_customer_id, 120);
+
+  if (existingCustomerId) {
+    const existingCustomer = await getExistingStripeCustomer(existingCustomerId);
+
+    if (existingCustomer) {
+      return { customerId: existingCustomerId, user };
+    }
+
+    console.warn("⚠️ stripe_customer_id présent en base mais introuvable côté Stripe, recréation :", existingCustomerId);
+  }
+
+  const customer = await stripe.customers.create({
+    email: normalizeEmail(user.email) || undefined,
+    metadata: { supabase_user_id: String(safeUserId) },
+  });
+
+  await persistStripeCustomerId(safeUserId, customer.id);
+
+  const updated = await getUserById(safeUserId);
   return { customerId: customer.id, user: updated };
 }
 
 export async function saveDefaultCardToUsersTable(userId, paymentMethod) {
-  if (!supabase) throw new Error("Supabase non configuré");
+  ensureSupabase();
+
+  const safeUserId = safeText(userId, 120);
+  if (!safeUserId) {
+    throw new Error("userId manquant");
+  }
+
+  if (!paymentMethod?.id) {
+    throw new Error("paymentMethod invalide");
+  }
 
   const card = paymentMethod?.card || {};
 
@@ -48,23 +145,57 @@ export async function saveDefaultCardToUsersTable(userId, paymentMethod) {
     updated_at: new Date().toISOString(),
   };
 
-  const { error } = await supabase.from("users").update(update).eq("id", userId);
-  if (error) throw error;
+  const { error } = await supabase
+    .from("users")
+    .update(update)
+    .eq("id", safeUserId);
+
+  if (error) {
+    throw error;
+  }
 }
 
 export function getReservationPaymentIntentCandidates(reservation) {
-  return [
+  const rawCandidates = [
     reservation?.latest_payment_intent_id,
     reservation?.payment_intent_id,
     reservation?.original_payment_intent_id,
-  ].filter(Boolean);
+  ]
+    .map((value) => safeText(value, 200))
+    .filter(Boolean);
+
+  return [...new Set(rawCandidates)];
 }
 
-export async function attemptAutomaticRefundAcrossPaymentIntents(reservation, refundAmountEur) {
-  if (!stripe) throw new Error("Stripe non configuré");
+async function getRefundableAmountForPaymentIntent(paymentIntentId) {
+  const charges = await stripe.charges.list({
+    payment_intent: paymentIntentId,
+    limit: 100,
+  });
+
+  const chargeList = charges?.data || [];
+
+  const totalCaptured = chargeList.reduce((sum, charge) => {
+    return sum + Number(charge.amount_captured || charge.amount || 0);
+  }, 0);
+
+  const totalRefunded = chargeList.reduce((sum, charge) => {
+    return sum + Number(charge.amount_refunded || 0);
+  }, 0);
+
+  return Math.max(0, totalCaptured - totalRefunded);
+}
+
+export async function attemptAutomaticRefundAcrossPaymentIntents(
+  reservation,
+  refundAmountEur
+) {
+  ensureStripe();
 
   const candidates = getReservationPaymentIntentCandidates(reservation);
-  if (!candidates.length || refundAmountEur <= 0) {
+  const requestedRefundCents = toAmountCents(refundAmountEur);
+
+  if (!candidates.length || requestedRefundCents <= 0) {
     return {
       success: false,
       skipped: true,
@@ -72,53 +203,45 @@ export async function attemptAutomaticRefundAcrossPaymentIntents(reservation, re
     };
   }
 
-  let remaining = Math.round(refundAmountEur * 100);
+  let remaining = requestedRefundCents;
   const refunds = [];
 
   for (const paymentIntentId of candidates) {
     if (remaining <= 0) break;
 
     try {
-      const charges = await stripe.charges.list({
-        payment_intent: paymentIntentId,
-        limit: 100,
-      });
-
-      const chargeList = charges?.data || [];
-      const totalCaptured = chargeList.reduce((sum, charge) => {
-        return sum + Number(charge.amount_captured || charge.amount || 0);
-      }, 0);
-
-      const totalRefunded = chargeList.reduce((sum, charge) => {
-        return sum + Number(charge.amount_refunded || 0);
-      }, 0);
-
-      const refundable = Math.max(0, totalCaptured - totalRefunded);
+      const refundable = await getRefundableAmountForPaymentIntent(paymentIntentId);
       if (refundable <= 0) continue;
 
       const refundNow = Math.min(remaining, refundable);
+      if (refundNow <= 0) continue;
 
-      if (refundNow > 0) {
-        const refund = await stripe.refunds.create({
-          payment_intent: paymentIntentId,
-          amount: refundNow,
-          reason: "requested_by_customer",
-        });
+      const refund = await stripe.refunds.create({
+        payment_intent: paymentIntentId,
+        amount: refundNow,
+        reason: "requested_by_customer",
+      });
 
-        refunds.push(refund);
-        remaining -= refundNow;
-      }
-    } catch (e) {
-      console.warn("⚠️ Refund automatique impossible sur PI", paymentIntentId, e.message);
+      refunds.push(refund);
+      remaining -= refundNow;
+    } catch (error) {
+      console.warn(
+        "⚠️ Refund automatique impossible sur PI",
+        paymentIntentId,
+        error?.message || error
+      );
     }
   }
+
+  const refundedCents = requestedRefundCents - remaining;
+  const refundedAmountEur = roundMoney(refundedCents / 100);
 
   if (remaining > 0) {
     return {
       success: false,
       skipped: false,
       partial: refunds.length > 0,
-      refundedAmountEur: roundMoney((Math.round(refundAmountEur * 100) - remaining) / 100),
+      refundedAmountEur,
       reason: "Remboursement partiel ou impossible sur tous les paiements",
       refunds,
     };
@@ -126,7 +249,7 @@ export async function attemptAutomaticRefundAcrossPaymentIntents(reservation, re
 
   return {
     success: true,
-    refundedAmountEur: refundAmountEur,
+    refundedAmountEur,
     refunds,
   };
 }
@@ -137,13 +260,31 @@ export async function attemptAutomaticSavedCardCharge({
   amountEur,
   metadata = {},
 }) {
-  if (!stripe) throw new Error("Stripe non configuré");
-  if (!supabase) throw new Error("Supabase non configuré");
+  ensureStripe();
+  ensureSupabase();
 
-  const user = await getUserById(userId);
-  const { customerId } = await ensureStripeCustomer(userId);
+  const safeUserId = safeText(userId, 120);
+  if (!safeUserId) {
+    throw new Error("userId manquant");
+  }
 
-  const pmToUse = user.default_payment_method_id;
+  const amountCents = toAmountCents(amountEur);
+  if (amountCents <= 0) {
+    return {
+      success: false,
+      requiresAdditionalPayment: false,
+      reason: "Montant invalide",
+    };
+  }
+
+  const user = await getUserById(safeUserId);
+  if (!user?.id) {
+    throw new Error("Utilisateur introuvable");
+  }
+
+  const { customerId } = await ensureStripeCustomer(safeUserId);
+
+  const pmToUse = safeText(user.default_payment_method_id, 200);
   if (!pmToUse) {
     return {
       success: false,
@@ -152,21 +293,15 @@ export async function attemptAutomaticSavedCardCharge({
     };
   }
 
-  try {
-    await stripe.paymentMethods.attach(pmToUse, { customer: customerId });
-  } catch (e) {
-    const msg = String(e?.message || "");
-    if (!msg.toLowerCase().includes("already") && !msg.toLowerCase().includes("attached")) {
-      throw e;
-    }
-  }
+  await attachPaymentMethodIfNeeded(pmToUse, customerId);
 
-  const fullName =
-    (customer?.prenom || "") + (customer?.prenom ? " " : "") + (customer?.nom || "");
+  const fullName = buildCustomerFullName(customer);
+  const customerEmail =
+    normalizeEmail(customer?.email) || normalizeEmail(user.email) || "";
 
   try {
     const pi = await stripe.paymentIntents.create({
-      amount: Math.round(Number(amountEur) * 100),
+      amount: amountCents,
       currency: "eur",
       customer: customerId,
       payment_method: pmToUse,
@@ -174,7 +309,7 @@ export async function attemptAutomaticSavedCardCharge({
       confirm: true,
       off_session: true,
       metadata: {
-        customer_email: customer?.email || user.email || "",
+        customer_email: customerEmail,
         customer_name: fullName,
         auto_modification_charge: "true",
         ...metadata,
@@ -185,9 +320,11 @@ export async function attemptAutomaticSavedCardCharge({
       success: true,
       paymentIntent: pi,
     };
-  } catch (e) {
-    const code = e?.code || "";
-    const paymentIntent = e?.raw?.payment_intent || null;
+  } catch (error) {
+    const code = error?.code || "";
+    const paymentIntent = error?.raw?.payment_intent || error?.payment_intent || null;
+    const message =
+      error?.raw?.message || error?.message || "Authentification ou nouvelle carte requise";
 
     if (
       code === "authentication_required" ||
@@ -199,10 +336,10 @@ export async function attemptAutomaticSavedCardCharge({
         requiresAdditionalPayment: true,
         clientSecret: paymentIntent?.client_secret || null,
         paymentIntentId: paymentIntent?.id || null,
-        reason: e?.message || "Authentification ou nouvelle carte requise",
+        reason: message,
       };
     }
 
-    throw e;
+    throw error;
   }
 }
