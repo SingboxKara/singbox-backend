@@ -6,9 +6,14 @@ import { CRON_SECRET, JWT_SECRET } from "../config/env.js";
 import { supabase } from "../config/supabase.js";
 
 function extractBearerToken(req) {
-  const authHeader = req.headers.authorization || "";
-  if (!authHeader.startsWith("Bearer ")) return null;
-  return authHeader.replace("Bearer ", "").trim() || null;
+  const authHeader = String(req?.headers?.authorization || "").trim();
+
+  if (!authHeader.startsWith("Bearer ")) {
+    return null;
+  }
+
+  const token = authHeader.slice("Bearer ".length).trim();
+  return token || null;
 }
 
 function normalizeEmail(email) {
@@ -23,12 +28,26 @@ function hasSupabase() {
   return !!supabase;
 }
 
+function buildAuthUser({ id = null, email = null, isAdmin = false, source = null }) {
+  return {
+    id,
+    email: email || null,
+    is_admin: !!isAdmin,
+    auth_source: source || null,
+  };
+}
+
+function applyRequestUser(req, user) {
+  req.user = user;
+  req.userId = user?.id || null;
+}
+
 export function isCronAuthorized(req) {
   const configuredSecret = safeTrim(CRON_SECRET);
   if (!configuredSecret) return false;
 
   const bearerToken = extractBearerToken(req);
-  const headerSecret = safeTrim(req.headers["x-cron-secret"]);
+  const headerSecret = safeTrim(req?.headers?.["x-cron-secret"]);
 
   return bearerToken === configuredSecret || headerSecret === configuredSecret;
 }
@@ -102,7 +121,7 @@ async function resolveUserFromToken(token) {
     const appUser = await resolveAppJwtUser(token);
     if (appUser) return appUser;
   } catch (_err) {
-    // fallback Supabase
+    // fallback vers Supabase auth
   }
 
   try {
@@ -176,13 +195,14 @@ async function resolveSupabaseUserAndAdmin(req) {
 
   const adminRow = await findAdminRowForUser(user);
 
-  req.user = {
+  const requestUser = buildAuthUser({
     id: user.id,
     email: user.email || null,
-    is_admin: !!adminRow,
-    auth_source: user.source || null,
-  };
-  req.userId = user.id;
+    isAdmin: !!adminRow,
+    source: user.source || null,
+  });
+
+  applyRequestUser(req, requestUser);
 
   return { ok: true, isAdmin: !!adminRow };
 }
@@ -211,13 +231,17 @@ export async function requireAdminOrCron(req, res, next) {
   try {
     if (isCronAuthorized(req)) {
       req.isCron = true;
-      req.user = {
-        id: null,
-        email: null,
-        is_admin: true,
-        auth_source: "cron",
-      };
-      req.userId = null;
+
+      applyRequestUser(
+        req,
+        buildAuthUser({
+          id: null,
+          email: null,
+          isAdmin: true,
+          source: "cron",
+        })
+      );
+
       return next();
     }
 
