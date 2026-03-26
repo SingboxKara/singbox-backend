@@ -14,6 +14,29 @@ function isNonEmptyString(value) {
   return typeof value === "string" && value.trim().length > 0;
 }
 
+function safeText(value, maxLen = 255) {
+  return String(value || "").trim().slice(0, maxLen);
+}
+
+function normalizeStatus(status) {
+  return safeText(status, 80).toLowerCase();
+}
+
+function getStripeSignature(req) {
+  const raw = req?.headers?.["stripe-signature"];
+
+  if (typeof raw === "string" && raw.trim()) {
+    return raw.trim();
+  }
+
+  if (Array.isArray(raw) && raw.length > 0) {
+    const first = String(raw[0] || "").trim();
+    return first || null;
+  }
+
+  return null;
+}
+
 async function markModificationRequestStatus(modificationRequestId, payload = {}) {
   if (!supabase || !modificationRequestId) return false;
 
@@ -66,9 +89,10 @@ async function handleModificationPaymentIntentSucceeded(intent) {
     return;
   }
 
-  const modificationRequestId = String(
-    intent?.metadata?.modification_request_id || ""
-  ).trim();
+  const modificationRequestId = safeText(
+    intent?.metadata?.modification_request_id,
+    120
+  );
 
   if (!modificationRequestId) {
     console.warn(
@@ -87,7 +111,7 @@ async function handleModificationPaymentIntentSucceeded(intent) {
     return;
   }
 
-  const currentStatus = String(modReq.status || "").trim().toLowerCase();
+  const currentStatus = normalizeStatus(modReq.status);
 
   if (currentStatus === "applied") {
     return;
@@ -97,6 +121,17 @@ async function handleModificationPaymentIntentSucceeded(intent) {
     console.warn(
       "Webhook modification ignoré : requête déjà marquée failed",
       { modificationRequestId }
+    );
+    return;
+  }
+
+  if (currentStatus && currentStatus !== "pending") {
+    console.warn(
+      "Webhook modification ignoré : statut inattendu",
+      {
+        modificationRequestId,
+        status: currentStatus,
+      }
     );
     return;
   }
@@ -144,10 +179,50 @@ async function handlePaymentIntentSucceeded(event) {
     return;
   }
 
-  if (intent.metadata?.type === "modification") {
+  if (normalizeStatus(intent.metadata?.type) === "modification") {
     await handleModificationPaymentIntentSucceeded(intent);
     return;
   }
+}
+
+async function handlePaymentIntentPaymentFailed(event) {
+  const intent = event?.data?.object;
+
+  if (!intent || typeof intent !== "object") {
+    return;
+  }
+
+  if (!supabase) {
+    return;
+  }
+
+  if (normalizeStatus(intent.metadata?.type) !== "modification") {
+    return;
+  }
+
+  const modificationRequestId = safeText(
+    intent?.metadata?.modification_request_id,
+    120
+  );
+
+  if (!modificationRequestId) {
+    return;
+  }
+
+  const modReq = await fetchModificationRequest(modificationRequestId);
+  if (!modReq) {
+    return;
+  }
+
+  const currentStatus = normalizeStatus(modReq.status);
+  if (currentStatus === "applied" || currentStatus === "failed") {
+    return;
+  }
+
+  await markModificationRequestStatus(modificationRequestId, {
+    status: "failed",
+    stripe_payment_intent_id: modReq.stripe_payment_intent_id || intent.id,
+  });
 }
 
 router.post(
@@ -166,7 +241,7 @@ router.post(
       return res.status(500).json({ error: "Webhook non configuré" });
     }
 
-    const sig = req.headers["stripe-signature"];
+    const sig = getStripeSignature(req);
 
     if (!isNonEmptyString(sig)) {
       console.error("❌ Webhook Stripe : signature manquante");
@@ -190,6 +265,10 @@ router.post(
       switch (event.type) {
         case "payment_intent.succeeded":
           await handlePaymentIntentSucceeded(event);
+          break;
+
+        case "payment_intent.payment_failed":
+          await handlePaymentIntentPaymentFailed(event);
           break;
 
         default:
