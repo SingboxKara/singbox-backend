@@ -1,226 +1,199 @@
-// backend/routes/publicRoutes.js
-
-import express from "express";
+// backend/services/userService.js
 
 import { supabase } from "../config/supabase.js";
-import { VACANCES_ZONE_C } from "../constants/holidays.js";
-import { getHomeLeaderboards } from "../services/leaderboardService.js";
-import {
-  isDateInRange,
-  addDaysToDateString,
-  parseDateOrNull,
-} from "../utils/dates.js";
-import {
-  isReservationStatusConfirmed,
-  isReservationStatusCancelledOrRefunded,
-} from "../services/reservationService.js";
-import {
-  STANDARD_SLOT_STARTS,
-  buildSlotIsoRange,
-} from "../services/pricingService.js";
 
-const router = express.Router();
-
-function safeText(value, maxLen = 120) {
-  return String(value || "").trim().slice(0, maxLen);
+function ensureSupabase() {
+  if (!supabase) {
+    throw new Error("Supabase non configuré");
+  }
 }
 
-function isValidDateOnly(dateStr) {
-  return /^\d{4}-\d{2}-\d{2}$/.test(String(dateStr || "").trim());
+function safeText(value, maxLen = 255) {
+  return String(value ?? "").trim().slice(0, maxLen);
 }
 
-router.get("/api/is-vacances", (req, res) => {
-  const date = safeText(req.query.date, 20);
+function normalizeEmail(email) {
+  return safeText(email, 255).toLowerCase();
+}
 
-  if (!date) {
-    return res
-      .status(400)
-      .json({ error: "Paramètre 'date' manquant (YYYY-MM-DD)" });
+function normalizeNullableText(value, maxLen = 255) {
+  const text = safeText(value, maxLen);
+  return text || null;
+}
+
+function normalizeBirthdate(value) {
+  const raw = safeText(value, 20);
+  if (!raw) return null;
+  return /^\d{4}-\d{2}-\d{2}$/.test(raw) ? raw : null;
+}
+
+function sanitizeUserUpdatePayload(payload = {}) {
+  const input =
+    payload && typeof payload === "object" && !Array.isArray(payload)
+      ? payload
+      : {};
+
+  const out = {};
+
+  if ("email" in input) out.email = normalizeEmail(input.email);
+  if ("prenom" in input) out.prenom = safeText(input.prenom, 80);
+  if ("nom" in input) out.nom = safeText(input.nom, 80);
+  if ("telephone" in input) out.telephone = safeText(input.telephone, 40);
+  if ("pays" in input) out.pays = safeText(input.pays, 20).toUpperCase() || "FR";
+  if ("adresse" in input) out.adresse = safeText(input.adresse, 160);
+  if ("complement" in input) out.complement = safeText(input.complement, 160);
+  if ("cp" in input) out.cp = safeText(input.cp, 20);
+  if ("ville" in input) out.ville = safeText(input.ville, 80);
+  if ("naissance" in input) out.naissance = normalizeBirthdate(input.naissance);
+
+  if ("pseudo" in input) out.pseudo = safeText(input.pseudo, 40);
+  if ("username" in input) out.username = safeText(input.username, 40);
+  if ("firstName" in input) out.first_name = safeText(input.firstName, 80);
+  if ("firstname" in input) out.first_name = safeText(input.firstname, 80);
+
+  out.updated_at = new Date().toISOString();
+
+  return out;
+}
+
+export async function getUserById(userId) {
+  ensureSupabase();
+
+  const id = safeText(userId, 120);
+  if (!id) return null;
+
+  const { data, error } = await supabase
+    .from("users")
+    .select("*")
+    .eq("id", id)
+    .maybeSingle();
+
+  if (error) {
+    console.error("getUserById error:", error);
+    throw error;
   }
 
-  if (!isValidDateOnly(date)) {
-    return res
-      .status(400)
-      .json({ error: "Paramètre 'date' invalide (YYYY-MM-DD attendu)" });
+  return data || null;
+}
+
+export async function getUserByEmail(email) {
+  ensureSupabase();
+
+  const normalized = normalizeEmail(email);
+  if (!normalized) return null;
+
+  const { data, error } = await supabase
+    .from("users")
+    .select("*")
+    .eq("email", normalized)
+    .maybeSingle();
+
+  if (error) {
+    console.error("getUserByEmail error:", error);
+    throw error;
   }
 
-  const matchingPeriods = VACANCES_ZONE_C.filter((p) =>
-    isDateInRange(date, p.start, p.end)
-  );
-  const isHoliday = matchingPeriods.length > 0;
+  return data || null;
+}
 
-  return res.json({
-    vacances: isHoliday,
-    is_vacances: isHoliday,
-    zone: "C",
-    date,
-    periods: matchingPeriods,
-  });
-});
+export async function updateUserProfileInUsersTable(userId, payload = {}) {
+  ensureSupabase();
 
-router.get("/api/slots", async (req, res) => {
-  if (!supabase) {
-    return res.status(500).json({ error: "Supabase non configuré" });
+  const id = safeText(userId, 120);
+  if (!id) {
+    throw new Error("userId manquant");
   }
 
-  const date = safeText(req.query.date, 20);
+  const updatePayload = sanitizeUserUpdatePayload(payload);
 
-  if (!date) {
-    return res
-      .status(400)
-      .json({ error: "Paramètre 'date' manquant (YYYY-MM-DD)" });
+  const { data, error } = await supabase
+    .from("users")
+    .update(updatePayload)
+    .eq("id", id)
+    .select("*")
+    .maybeSingle();
+
+  if (error) {
+    console.error("updateUserProfileInUsersTable error:", error);
+    throw error;
   }
 
-  if (!isValidDateOnly(date)) {
-    return res
-      .status(400)
-      .json({ error: "Paramètre 'date' invalide (YYYY-MM-DD attendu)" });
+  return data || null;
+}
+
+export async function getReservationOwnedByUser(
+  reservationId,
+  userId = null,
+  fallbackEmail = null
+) {
+  ensureSupabase();
+
+  const safeReservationId = safeText(reservationId, 120);
+  if (!safeReservationId) return null;
+
+  const { data, error } = await supabase
+    .from("reservations")
+    .select("*")
+    .eq("id", safeReservationId)
+    .maybeSingle();
+
+  if (error) {
+    console.error("getReservationOwnedByUser error:", error);
+    throw error;
   }
 
-  try {
-    const previousDate = addDaysToDateString(date, -1);
-    const nextDate = addDaysToDateString(date, 1);
+  if (!data) return null;
 
-    const { data, error } = await supabase
-      .from("reservations")
-      .select("id, box_id, start_time, end_time, status, date")
-      .in("date", [previousDate, date, nextDate]);
+  const safeUserId = safeText(userId, 120);
+  const safeFallbackEmail = normalizeEmail(fallbackEmail);
 
-    if (error) {
-      console.error("Erreur /api/slots Supabase :", error);
-      return res.status(500).json({ error: "Erreur serveur Supabase" });
-    }
+  const reservationUserId = safeText(data.user_id, 120);
+  const reservationEmail = normalizeEmail(data.email);
 
-    const { startIso: dayStartIso } = buildSlotIsoRange(date, 0);
-    const nextDayStartDate = parseDateOrNull(
-      buildSlotIsoRange(nextDate, 0).startIso
-    );
+  const ownedByUserId =
+    safeUserId && reservationUserId && String(reservationUserId) === String(safeUserId);
 
-    const dayStart = parseDateOrNull(dayStartIso);
-    const dayEnd = nextDayStartDate
-      ? new Date(nextDayStartDate.getTime() - 1)
-      : null;
+  const ownedByEmail =
+    safeFallbackEmail &&
+    reservationEmail &&
+    reservationEmail === safeFallbackEmail;
 
-    if (!dayStart || !dayEnd) {
-      return res.status(500).json({
-        error: "Impossible de construire la fenêtre journalière",
-      });
-    }
-
-    const reservations = (data || []).filter((row) => {
-      if (!isReservationStatusConfirmed(row.status)) return false;
-
-      const start = parseDateOrNull(row.start_time);
-      const end = parseDateOrNull(row.end_time);
-
-      if (!start || !end) return false;
-
-      return (
-        start.getTime() <= dayEnd.getTime() &&
-        end.getTime() > dayStart.getTime()
-      );
-    });
-
-    return res.json({
-      reservations,
-      slotStarts: STANDARD_SLOT_STARTS,
-    });
-  } catch (e) {
-    console.error("Erreur /api/slots :", e);
-    return res.status(500).json({ error: "Erreur serveur" });
-  }
-});
-
-router.get("/api/check", async (req, res) => {
-  if (!supabase) {
-    return res
-      .status(500)
-      .json({ valid: false, error: "Supabase non configuré" });
+  if (ownedByUserId || ownedByEmail) {
+    return data;
   }
 
-  try {
-    const id = safeText(req.query.id, 120);
+  return null;
+}
 
-    if (!id) {
-      return res.status(400).json({ valid: false, error: "Missing id" });
-    }
+export async function getReservationOwnedByEmail(reservationId, email) {
+  return getReservationOwnedByUser(reservationId, null, email);
+}
 
-    const { data, error } = await supabase
-      .from("reservations")
-      .select("*")
-      .eq("id", id)
-      .single();
+export async function getUserLightProfileById(userId) {
+  ensureSupabase();
 
-    if (error || !data) {
-      return res
-        .status(404)
-        .json({ valid: false, reason: "Réservation introuvable." });
-    }
+  const id = safeText(userId, 120);
+  if (!id) return null;
 
-    const now = new Date();
-    const start = parseDateOrNull(data.start_time);
-    const end = parseDateOrNull(data.end_time);
+  const { data, error } = await supabase
+    .from("users")
+    .select(
+      "id, email, prenom, nom, telephone, pays, adresse, complement, cp, ville, naissance, pseudo, username, first_name, created_at, updated_at, singcoins, default_payment_method_id, stripe_default_payment_method_id, card_brand, card_last4, card_exp_month, card_exp_year"
+    )
+    .eq("id", id)
+    .maybeSingle();
 
-    if (!start || !end) {
-      return res.status(500).json({
-        valid: false,
-        error: "Horaires de réservation invalides",
-      });
-    }
-
-    const marginBeforeMinutes = 5;
-    const marginBeforeEndMinutes = 5;
-
-    const startWithMargin = new Date(
-      start.getTime() - marginBeforeMinutes * 60000
-    );
-    const lastEntryTime = new Date(
-      end.getTime() - marginBeforeEndMinutes * 60000
-    );
-
-    let access = false;
-    let reason = "OK";
-
-    if (isReservationStatusCancelledOrRefunded(data.status)) {
-      access = false;
-      reason = "Réservation annulée ou remboursée, accès refusé.";
-    } else if (now < startWithMargin) {
-      access = false;
-      reason = "Trop tôt pour accéder à la box.";
-    } else if (now > lastEntryTime) {
-      access = false;
-      reason = "Créneau terminé, accès refusé.";
-    } else if (!isReservationStatusConfirmed(data.status)) {
-      access = false;
-      reason = `Statut invalide : ${data.status}`;
-    } else {
-      access = true;
-      reason = "Créneau valide, accès autorisé.";
-    }
-
-    return res.json({ valid: true, access, reason, reservation: data });
-  } catch (e) {
-    console.error("Erreur /api/check :", e);
-    return res.status(500).json({ valid: false, error: e.message });
+  if (error) {
+    console.error("getUserLightProfileById error:", error);
+    throw error;
   }
-});
 
-router.get("/api/leaderboards/home", async (req, res) => {
-  try {
-    const limit = req.query.limit;
-    const leaderboards = await getHomeLeaderboards(limit);
+  return data || null;
+}
 
-    return res.json({
-      ok: true,
-      ...leaderboards,
-    });
-  } catch (e) {
-    console.error("Erreur /api/leaderboards/home :", e);
-    return res.status(500).json({
-      ok: false,
-      error: "Impossible de charger les leaderboards.",
-    });
-  }
-});
-
-export default router;
+export {
+  normalizeEmail,
+  safeText,
+  normalizeNullableText,
+  sanitizeUserUpdatePayload,
+};
