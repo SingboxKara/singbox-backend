@@ -4,14 +4,8 @@ import jwt from "jsonwebtoken";
 import { supabase } from "../config/supabase.js";
 import { stripe } from "../config/stripe.js";
 import { JWT_SECRET } from "../config/env.js";
-import {
-  authMiddleware,
-  optionalAuthMiddleware,
-} from "../middlewares/auth.js";
-import {
-  requireAdminOrCron,
-  requireSupabaseAdmin,
-} from "../middlewares/admin.js";
+import { authMiddleware } from "../middlewares/auth.js";
+import { requireAdminOrCron } from "../middlewares/admin.js";
 
 import {
   buildTimesFromSlot,
@@ -70,7 +64,11 @@ import {
   consumeFreeSessionReward,
 } from "../services/referralService.js";
 
-import { safeText, clampPersons } from "../utils/validators.js";
+import {
+  safeText,
+  clampPersons,
+  getNumericBoxId,
+} from "../utils/validators.js";
 import { parseDateOrNull, formatDateToYYYYMMDD } from "../utils/dates.js";
 import { roundMoney } from "../utils/formatters.js";
 import {
@@ -98,22 +96,6 @@ const router = express.Router();
 
 function normalizeEmail(email) {
   return String(email || "").trim().toLowerCase();
-}
-
-function isCancelledOrRefundedStatus(statusRaw) {
-  const status = normalizeReservationStatus(statusRaw);
-  return [
-    "cancelled",
-    "annulee",
-    "annulée",
-    "refunded",
-    "remboursee",
-    "remboursée",
-  ].includes(status);
-}
-
-function isCompletedStatus(statusRaw) {
-  return normalizeReservationStatus(statusRaw) === "completed";
 }
 
 function buildGuestReservationResponse(reservation) {
@@ -145,6 +127,36 @@ function buildFullName(customer) {
   const prenom = String(customer?.prenom || "").trim();
   const nom = String(customer?.nom || "").trim();
   return `${prenom}${prenom && nom ? " " : ""}${nom}`.trim();
+}
+
+async function isFirstReservationForEmail(email) {
+  const safeEmail = normalizeEmail(email);
+  if (!safeEmail || !supabase) return null;
+
+  const { data, error } = await supabase
+    .from("reservations")
+    .select("id, status")
+    .eq("email", safeEmail)
+    .limit(20);
+
+  if (error) {
+    console.error("Erreur vérification première réservation :", error);
+    return null;
+  }
+
+  const activeReservations = (data || []).filter((row) => {
+    const status = normalizeReservationStatus(row.status);
+    return ![
+      "cancelled",
+      "annulee",
+      "annulée",
+      "refunded",
+      "remboursee",
+      "remboursée",
+    ].includes(status);
+  });
+
+  return activeReservations.length === 0;
 }
 
 async function invalidateGuestManageToken(reservationId) {
@@ -185,10 +197,7 @@ async function findUserIdByEmail(email) {
   }
 }
 
-async function resolveReservationUserId({
-  explicitUserId = null,
-  email = null,
-}) {
+async function resolveReservationUserId({ explicitUserId = null, email = null }) {
   if (explicitUserId) return explicitUserId;
   if (!email) return null;
   return await findUserIdByEmail(email);
@@ -341,12 +350,8 @@ function buildReservationRow({
   const nowIso = new Date().toISOString();
 
   const lineAmount = Number(item.cashAmountDue || 0);
-  const lineTheoreticalFullAmount = Number(
-    item.theoreticalFullAmount || lineAmount
-  );
-  const lineSingcoinsDiscountAmount = Number(
-    item.singcoinsDiscountAmount || 0
-  );
+  const lineTheoreticalFullAmount = Number(item.theoreticalFullAmount || lineAmount);
+  const lineSingcoinsDiscountAmount = Number(item.singcoinsDiscountAmount || 0);
 
   return {
     name: fullName,
@@ -444,19 +449,14 @@ async function ensureGuestTokenOnReservations(reservations = []) {
       continue;
     }
 
-    if (
-      reservation.guest_manage_token &&
-      reservation.guest_manage_token_expires_at
-    ) {
+    if (reservation.guest_manage_token && reservation.guest_manage_token_expires_at) {
       updatedReservations.push(reservation);
       continue;
     }
 
     const token = generateGuestManageToken();
     const createdAt = new Date().toISOString();
-    const expiresAt = new Date(
-      Date.now() + 1000 * 60 * 60 * 24 * 30
-    ).toISOString();
+    const expiresAt = new Date(Date.now() + 1000 * 60 * 60 * 24 * 30).toISOString();
 
     try {
       const updated = await updateReservationById(reservation.id, {
@@ -477,14 +477,12 @@ async function ensureGuestTokenOnReservations(reservations = []) {
 
 async function buildReservationAccessToken(reservation) {
   if (!reservation?.id || !reservation?.email) return null;
-  if (!JWT_SECRET) return null;
 
   try {
     return jwt.sign(
       {
         reservationId: reservation.id,
         email: normalizeEmail(reservation.email),
-        guestManageToken: reservation.guest_manage_token || null,
         mode: "guest",
       },
       JWT_SECRET,
@@ -753,14 +751,11 @@ router.post("/api/verify-cart", async (req, res) => {
    CONFIRM RESERVATION
 ========================================================= */
 
-router.post("/api/confirm-reservation", optionalAuthMiddleware, async (req, res) => {
+router.post("/api/confirm-reservation", async (req, res) => {
   try {
     const body = req.body || {};
     const cart = Array.isArray(body.cart) ? body.cart : [];
     const customer = body.customer || {};
     const promoCode = safeText(body.promoCode, 80) || null;
     const referralCodeRaw = safeText(body.referralCode, 80) || null;
-    const singcoinsUsed = body.singcoinsUsed === true;
-    const paymentIntentId = safeText(body.paymentIntentId, 200) || null;
-
-    const authenticatedUse
+  
