@@ -10,7 +10,25 @@ function extractBearerToken(req) {
     return null;
   }
 
-  return authHeader.replace("Bearer ", "").trim();
+  const token = authHeader.replace("Bearer ", "").trim();
+  return token || null;
+}
+
+function normalizeDecodedToken(decoded) {
+  if (!decoded || typeof decoded !== "object") {
+    throw new Error("Payload token invalide");
+  }
+
+  const userId = decoded.userId || decoded.id || null;
+
+  if (!userId) {
+    throw new Error("Payload token invalide");
+  }
+
+  return {
+    ...decoded,
+    userId,
+  };
 }
 
 function verifyUserToken(token) {
@@ -18,15 +36,22 @@ function verifyUserToken(token) {
     throw new Error("JWT_SECRET manquant");
   }
 
+  if (!token) {
+    throw new Error("Token manquant");
+  }
+
   const decoded = jwt.verify(token, JWT_SECRET, {
     algorithms: ["HS256"],
   });
 
-  if (!decoded || !decoded.userId) {
-    throw new Error("Payload token invalide");
-  }
+  return normalizeDecodedToken(decoded);
+}
 
-  return decoded;
+function buildAuthUser(decoded) {
+  return {
+    ...decoded,
+    userId: decoded.userId,
+  };
 }
 
 export function authMiddleware(req, res, next) {
@@ -39,13 +64,19 @@ export function authMiddleware(req, res, next) {
 
     const decoded = verifyUserToken(token);
 
-    req.user = decoded;
+    req.user = buildAuthUser(decoded);
     req.userId = decoded.userId;
 
     return next();
   } catch (error) {
     console.error("❌ Auth error:", error.message);
-    return res.status(401).json({ error: "Token invalide" });
+
+    return res.status(401).json({
+      error:
+        error.message === "JWT_SECRET manquant"
+          ? "Authentification indisponible"
+          : "Token invalide",
+    });
   }
 }
 
@@ -54,16 +85,20 @@ export function optionalAuthMiddleware(req, res, next) {
     const token = extractBearerToken(req);
 
     if (!token) {
+      req.user = null;
+      req.userId = null;
       return next();
     }
 
     const decoded = verifyUserToken(token);
 
-    req.user = decoded;
+    req.user = buildAuthUser(decoded);
     req.userId = decoded.userId;
 
     return next();
   } catch (_error) {
+    req.user = null;
+    req.userId = null;
     return next();
   }
 }
