@@ -1,0 +1,400 @@
+// backend/services/passService.js
+
+import { supabase } from "../config/supabase.js";
+import { buildTimesFromSlot, computeCartPricing } from "./pricingService.js";
+
+const PASS_CATALOG = Object.freeze({
+  before_15: {
+    type: "before_15",
+    label: "Carte 10 places avant 15h",
+    description: "Valable avant 15h.",
+    price: 69,
+    places: 10,
+    currency: "EUR",
+  },
+  after_15_weekday: {
+    type: "after_15_weekday",
+    label: "Carte 10 places après 15h",
+    description: "Valable après 15h du lundi au jeudi, hors vendredi soir et hors week-end.",
+    price: 89,
+    places: 10,
+    currency: "EUR",
+  },
+});
+
+function ensureSupabase() {
+  if (!supabase) {
+    throw new Error("Supabase non configuré");
+  }
+}
+
+function safeText(value, maxLen = 255) {
+  return String(value ?? "").trim().slice(0, maxLen);
+}
+
+function toSafeInt(value, fallback = 0) {
+  const n = Number.parseInt(value, 10);
+  return Number.isFinite(n) ? n : fallback;
+}
+
+function normalizeEmail(email) {
+  return safeText(email, 255).toLowerCase();
+}
+
+function weekdayFromDateOnly(dateStr) {
+  const match = String(dateStr || "").match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  if (!match) return null;
+
+  const year = toSafeInt(match[1], 0);
+  const month = toSafeInt(match[2], 1);
+  const day = toSafeInt(match[3], 1);
+
+  return new Date(Date.UTC(year, month - 1, day)).getUTCDay();
+}
+
+function localHourFromIsoString(iso) {
+  const match = String(iso || "").match(/T(\d{2}):(\d{2})/);
+  if (!match) return null;
+  return toSafeInt(match[1], null);
+}
+
+function isItemEligibleForPass(item, passType) {
+  const hour = localHourFromIsoString(item.start_time);
+  const weekday = weekdayFromDateOnly(item.date);
+
+  if (hour == null || weekday == null) {
+    return false;
+  }
+
+  if (passType === "before_15") {
+    return hour < 15;
+  }
+
+  if (passType === "after_15_weekday") {
+    const isWeekend = weekday === 0 || weekday === 6;
+    const isFriday = weekday === 5;
+    return hour >= 15 && !isWeekend && !isFriday;
+  }
+
+  return false;
+}
+
+export function getPassCatalog() {
+  return Object.values(PASS_CATALOG);
+}
+
+export function getPassDefinition(passType) {
+  return PASS_CATALOG[safeText(passType, 80)] || null;
+}
+
+export function buildPassPricingSummary(passType) {
+  const def = getPassDefinition(passType);
+
+  if (!def) {
+    return null;
+  }
+
+  return {
+    type: def.type,
+    label: def.label,
+    description: def.description,
+    price: def.price,
+    currency: def.currency,
+    places: def.places,
+    amountInCents: Math.round(def.price * 100),
+  };
+}
+
+export function analyzeCartForPass(cart, passType) {
+  const passDef = getPassDefinition(passType);
+
+  if (!passDef) {
+    return {
+      ok: false,
+      reason: "PASS_TYPE_INVALIDE",
+      message: "Type de pass invalide.",
+      items: [],
+      requiredPlaces: 0,
+      pricing: null,
+    };
+  }
+
+  const pricing = computeCartPricing(Array.isArray(cart) ? cart : [], {
+    singcoinsUsed: false,
+  });
+
+  const items = (pricing.normalizedItems || []).map((item) => ({
+    ...item,
+    eligible: isItemEligibleForPass(item, passType),
+  }));
+
+  const invalidItem = items.find((item) => !item.eligible);
+
+  if (invalidItem) {
+    return {
+      ok: false,
+      reason: "CART_NOT_ELIGIBLE",
+      message:
+        passType === "before_15"
+          ? "Ce pass est valable uniquement avant 15h."
+          : "Ce pass est valable uniquement après 15h du lundi au jeudi, hors vendredi soir et hors week-end.",
+      items,
+      requiredPlaces: items.reduce((sum, item) => sum + Number(item.persons || 0), 0),
+      pricing,
+    };
+  }
+
+  const requiredPlaces = items.reduce(
+    (sum, item) => sum + Number(item.persons || 0),
+    0
+  );
+
+  return {
+    ok: true,
+    reason: null,
+    message: null,
+    items,
+    requiredPlaces,
+    pricing,
+  };
+}
+
+export async function listUserPasses(userId) {
+  ensureSupabase();
+
+  const safeUserId = safeText(userId, 120);
+  if (!safeUserId) return [];
+
+  const { data, error } = await supabase
+    .from("user_passes")
+    .select("*")
+    .eq("user_id", safeUserId)
+    .order("created_at", { ascending: false });
+
+  if (error) {
+    console.error("listUserPasses error:", error);
+    throw error;
+  }
+
+  return data || [];
+}
+
+export async function getUserPassById(userPassId, userId) {
+  ensureSupabase();
+
+  const safeUserPassId = safeText(userPassId, 120);
+  const safeUserId = safeText(userId, 120);
+
+  if (!safeUserPassId || !safeUserId) return null;
+
+  const { data, error } = await supabase
+    .from("user_passes")
+    .select("*")
+    .eq("id", safeUserPassId)
+    .eq("user_id", safeUserId)
+    .maybeSingle();
+
+  if (error) {
+    console.error("getUserPassById error:", error);
+    throw error;
+  }
+
+  return data || null;
+}
+
+export async function getPassByPaymentIntentId(paymentIntentId) {
+  ensureSupabase();
+
+  const safePi = safeText(paymentIntentId, 200);
+  if (!safePi) return null;
+
+  const { data, error } = await supabase
+    .from("user_passes")
+    .select("*")
+    .eq("stripe_payment_intent_id", safePi)
+    .maybeSingle();
+
+  if (error) {
+    console.error("getPassByPaymentIntentId error:", error);
+    throw error;
+  }
+
+  return data || null;
+}
+
+export async function createPurchasedPass({
+  userId,
+  passType,
+  paymentIntentId,
+  purchasePrice,
+  metadata = {},
+}) {
+  ensureSupabase();
+
+  const passDef = getPassDefinition(passType);
+  if (!passDef) {
+    throw new Error("Type de pass invalide");
+  }
+
+  const payload = {
+    user_id: safeText(userId, 120),
+    pass_type: passDef.type,
+    initial_places: passDef.places,
+    remaining_places: passDef.places,
+    purchase_price: Number(purchasePrice ?? passDef.price),
+    currency: passDef.currency,
+    status: "active",
+    stripe_payment_intent_id: safeText(paymentIntentId, 200) || null,
+    metadata: metadata && typeof metadata === "object" ? metadata : {},
+  };
+
+  const { data, error } = await supabase
+    .from("user_passes")
+    .insert(payload)
+    .select("*")
+    .maybeSingle();
+
+  if (error) {
+    console.error("createPurchasedPass error:", error);
+    throw error;
+  }
+
+  return data || null;
+}
+
+export async function createPassTransaction({
+  userPassId,
+  userId,
+  reservationId = null,
+  transactionType,
+  deltaPlaces,
+  notes = null,
+  metadata = {},
+}) {
+  ensureSupabase();
+
+  const payload = {
+    user_pass_id: safeText(userPassId, 120),
+    user_id: safeText(userId, 120),
+    reservation_id: reservationId || null,
+    transaction_type: safeText(transactionType, 40),
+    delta_places: Number(deltaPlaces || 0),
+    notes: notes ? safeText(notes, 500) : null,
+    metadata: metadata && typeof metadata === "object" ? metadata : {},
+  };
+
+  const { data, error } = await supabase
+    .from("pass_transactions")
+    .insert(payload)
+    .select("*")
+    .maybeSingle();
+
+  if (error) {
+    console.error("createPassTransaction error:", error);
+    throw error;
+  }
+
+  return data || null;
+}
+
+export async function consumeUserPassPlaces({ userPassId, userId, places }) {
+  ensureSupabase();
+
+  const { data, error } = await supabase.rpc("consume_user_pass_places", {
+    p_user_pass_id: userPassId,
+    p_user_id: userId,
+    p_places: Number(places || 0),
+  });
+
+  if (error) {
+    console.error("consumeUserPassPlaces error:", error);
+    throw error;
+  }
+
+  return Array.isArray(data) ? data[0] || null : data || null;
+}
+
+export async function restoreUserPassPlaces({ userPassId, userId, places }) {
+  ensureSupabase();
+
+  const { data, error } = await supabase.rpc("restore_user_pass_places", {
+    p_user_pass_id: userPassId,
+    p_user_id: userId,
+    p_places: Number(places || 0),
+  });
+
+  if (error) {
+    console.error("restoreUserPassPlaces error:", error);
+    throw error;
+  }
+
+  return Array.isArray(data) ? data[0] || null : data || null;
+}
+
+export function buildPassReservationRows({
+  items,
+  customer,
+  userId,
+  userPass,
+}) {
+  const email = normalizeEmail(customer?.email);
+  const prenom = safeText(customer?.prenom, 120);
+  const nom = safeText(customer?.nom, 120);
+  const fullName = `${prenom}${prenom && nom ? " " : ""}${nom}`.trim();
+  const nowIso = new Date().toISOString();
+
+  return (Array.isArray(items) ? items : []).map((item) => {
+    const start = new Date(item.start_time);
+    const end = new Date(item.end_time);
+    const hour = start.getHours();
+    const day = start.getDay();
+    const persons = Number(item.persons || 0);
+
+    return {
+      name: fullName,
+      email,
+      user_id: userId,
+
+      datetime: start.toISOString(),
+      created_at: nowIso,
+      start_time: start.toISOString(),
+      end_time: end.toISOString(),
+      date: item.date,
+
+      box_id: item.box_id,
+      status: "confirmed",
+
+      persons,
+      billable_persons: Math.max(persons, 2),
+
+      montant: 0,
+      free_session: true,
+
+      payment_intent_id: null,
+      original_payment_intent_id: null,
+      latest_payment_intent_id: null,
+
+      singcoins_used: false,
+      singcoins_spent: 0,
+
+      promo_code: null,
+      promo_discount_amount: 0,
+
+      theoretical_full_amount: Number(item.theoreticalFullAmount || item.cashAmountDue || 0),
+      singcoins_discount_amount: 0,
+
+      paid_with_pass: true,
+      user_pass_id: userPass.id,
+      pass_places_used: persons,
+      pass_type: userPass.pass_type,
+
+      is_weekend: day === 0 || day === 6,
+      is_daytime: hour >= 12 && hour < 18,
+      is_group_session: persons >= 3,
+      session_minutes: Math.max(
+        0,
+        Math.round((end.getTime() - start.getTime()) / 60000)
+      ),
+    };
+  });
+}
