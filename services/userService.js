@@ -6,9 +6,17 @@ import {
 } from "../utils/validators.js";
 import { ensureUserReferralCode } from "./referralService.js";
 
-export async function updateUserProfileInUsersTable(userId, payload) {
-  if (!supabase) return;
+function ensureSupabase() {
+  if (!supabase) {
+    throw new Error("Supabase non configuré");
+  }
+}
 
+function normalizeEmail(email) {
+  return String(email || "").trim().toLowerCase();
+}
+
+function buildSafeUserProfileUpdate(payload = {}) {
   const update = {
     prenom: safeText(payload.prenom, 80),
     nom: safeText(payload.nom, 80),
@@ -22,7 +30,28 @@ export async function updateUserProfileInUsersTable(userId, payload) {
     updated_at: new Date().toISOString(),
   };
 
-  const { error } = await supabase.from("users").update(update).eq("id", userId);
+  if (typeof payload.email === "string" && payload.email.trim()) {
+    update.email = normalizeEmail(payload.email);
+  }
+
+  return update;
+}
+
+export async function updateUserProfileInUsersTable(userId, payload) {
+  ensureSupabase();
+
+  const safeUserId = safeText(userId, 120);
+  if (!safeUserId) {
+    throw new Error("userId manquant");
+  }
+
+  const update = buildSafeUserProfileUpdate(payload);
+
+  const { error } = await supabase
+    .from("users")
+    .update(update)
+    .eq("id", safeUserId);
+
   if (error) throw error;
 }
 
@@ -35,19 +64,48 @@ export function getUserEmailOrThrow(user) {
 }
 
 export async function getUserById(userId) {
-  if (!supabase) throw new Error("Supabase non configuré");
+  ensureSupabase();
+
+  const safeUserId = safeText(userId, 120);
+  if (!safeUserId) {
+    throw new Error("userId manquant");
+  }
 
   const { data, error } = await supabase
     .from("users")
     .select(
-      "id,email,singcoins,stripe_customer_id,default_payment_method_id,card_brand,card_last4,card_exp_month,card_exp_year,telephone,referral_code,referred_by_code"
+      [
+        "id",
+        "email",
+        "prenom",
+        "nom",
+        "telephone",
+        "pays",
+        "adresse",
+        "complement",
+        "cp",
+        "ville",
+        "naissance",
+        "singcoins",
+        "stripe_customer_id",
+        "default_payment_method_id",
+        "card_brand",
+        "card_last4",
+        "card_exp_month",
+        "card_exp_year",
+        "referral_code",
+        "referred_by_code",
+      ].join(",")
     )
-    .eq("id", userId)
-    .single();
+    .eq("id", safeUserId)
+    .maybeSingle();
 
   if (error) throw error;
+  if (!data) {
+    throw new Error("Utilisateur introuvable");
+  }
 
-  if (data?.id) {
+  if (data.id) {
     data.referral_code = await ensureUserReferralCode(data.id);
   }
 
@@ -55,13 +113,35 @@ export async function getUserById(userId) {
 }
 
 export async function getAuthenticatedUserById(userId) {
-  if (!supabase) throw new Error("Supabase non configuré");
+  ensureSupabase();
+
+  const safeUserId = safeText(userId, 120);
+  if (!safeUserId) {
+    throw new Error("userId manquant");
+  }
 
   const { data, error } = await supabase
     .from("users")
-    .select("id,email,singcoins,telephone,referral_code,referred_by_code")
-    .eq("id", userId)
-    .single();
+    .select(
+      [
+        "id",
+        "email",
+        "prenom",
+        "nom",
+        "telephone",
+        "pays",
+        "adresse",
+        "complement",
+        "cp",
+        "ville",
+        "naissance",
+        "singcoins",
+        "referral_code",
+        "referred_by_code",
+      ].join(",")
+    )
+    .eq("id", safeUserId)
+    .maybeSingle();
 
   if (error || !data) {
     throw new Error("Utilisateur introuvable");
@@ -73,37 +153,65 @@ export async function getAuthenticatedUserById(userId) {
 }
 
 async function resolveUserEmail(userId, userEmail) {
-  if (userEmail) return String(userEmail).trim().toLowerCase();
-  if (!userId || !supabase) return null;
+  const safeEmail = normalizeEmail(userEmail);
+  if (safeEmail) return safeEmail;
 
-  const { data } = await supabase
+  const safeUserId = safeText(userId, 120);
+  if (!safeUserId) return null;
+
+  ensureSupabase();
+
+  const { data, error } = await supabase
     .from("users")
     .select("email")
-    .eq("id", userId)
+    .eq("id", safeUserId)
     .maybeSingle();
 
-  return data?.email ? String(data.email).trim().toLowerCase() : null;
+  if (error) {
+    throw error;
+  }
+
+  return data?.email ? normalizeEmail(data.email) : null;
 }
 
 export async function getReservationOwnedByUser(reservationId, userId, userEmail) {
-  const { data: direct } = await supabase
-    .from("reservations")
-    .select("*")
-    .eq("id", reservationId)
-    .eq("user_id", userId)
-    .maybeSingle();
+  ensureSupabase();
 
-  if (direct) return direct;
+  const safeReservationId = safeText(reservationId, 120);
+  if (!safeReservationId) {
+    return null;
+  }
 
-  const safeEmail = await resolveUserEmail(userId, userEmail);
+  const safeUserId = safeText(userId, 120);
+
+  if (safeUserId) {
+    const { data: direct, error: directError } = await supabase
+      .from("reservations")
+      .select("*")
+      .eq("id", safeReservationId)
+      .eq("user_id", safeUserId)
+      .maybeSingle();
+
+    if (directError) {
+      throw directError;
+    }
+
+    if (direct) return direct;
+  }
+
+  const safeEmail = await resolveUserEmail(safeUserId, userEmail);
   if (!safeEmail) return null;
 
-  const { data: fallback } = await supabase
+  const { data: fallback, error: fallbackError } = await supabase
     .from("reservations")
     .select("*")
-    .eq("id", reservationId)
+    .eq("id", safeReservationId)
     .eq("email", safeEmail)
     .maybeSingle();
 
-  return fallback;
+  if (fallbackError) {
+    throw fallbackError;
+  }
+
+  return fallback || null;
 }
