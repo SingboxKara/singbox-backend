@@ -36,6 +36,12 @@ function buildFullName(customer = {}) {
   return `${prenom}${prenom && nom ? " " : ""}${nom}`.trim();
 }
 
+function readCartFromBody(body) {
+  if (Array.isArray(body?.cart)) return body.cart;
+  if (Array.isArray(body?.panier)) return body.panier;
+  return [];
+}
+
 function ensureStripeConfigured(res) {
   if (!stripe) {
     res.status(500).json({ error: "Stripe non configuré" });
@@ -221,7 +227,7 @@ router.post("/api/passes/preview-usage", authMiddleware, async (req, res) => {
   try {
     if (!ensureSupabaseConfigured(res)) return;
 
-    const cart = Array.isArray(req.body?.cart) ? req.body.cart : [];
+    const cart = readCartFromBody(req.body || {});
     const userPassId = safeText(req.body?.userPassId, 120);
     const promoCode = safeText(req.body?.promoCode, 80);
     const singcoinsUsed = req.body?.singcoinsUsed === true;
@@ -292,7 +298,7 @@ router.post("/api/passes/confirm-reservation", authMiddleware, async (req, res) 
     if (!ensureSupabaseConfigured(res)) return;
 
     const body = req.body || {};
-    const cart = Array.isArray(body.cart) ? body.cart : [];
+    const cart = readCartFromBody(body);
     const customer = body.customer || {};
     const userPassId = safeText(body.userPassId, 120);
     const promoCode = safeText(body.promoCode, 80);
@@ -441,6 +447,10 @@ router.post("/api/passes/confirm-reservation", authMiddleware, async (req, res) 
 
       return res.status(500).json({
         error: "Erreur création réservation avec pass",
+        details:
+          process.env.NODE_ENV !== "production"
+            ? String(reservationError?.message || reservationError)
+            : undefined,
       });
     }
 
@@ -455,7 +465,13 @@ router.post("/api/passes/confirm-reservation", authMiddleware, async (req, res) 
     });
   } catch (error) {
     console.error("Erreur /api/passes/confirm-reservation :", error);
-    return res.status(500).json({ error: "Erreur serveur" });
+    return res.status(500).json({
+      error: "Erreur serveur",
+      details:
+        process.env.NODE_ENV !== "production"
+          ? String(error?.message || error)
+          : undefined,
+    });
   }
 });
 
