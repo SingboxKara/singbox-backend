@@ -164,6 +164,12 @@ function round2(value) {
   return Number(n.toFixed(2));
 }
 
+function readCartFromBody(body) {
+  if (Array.isArray(body?.cart)) return body.cart;
+  if (Array.isArray(body?.panier)) return body.panier;
+  return [];
+}
+
 function buildPromoValidationContext({ email, cart }) {
   return {
     email: normalizeEmail(email) || null,
@@ -884,7 +890,7 @@ function sumCartPersons(cart = []) {
 router.post("/api/verify-cart", async (req, res) => {
   try {
     const body = req.body || {};
-    const cart = Array.isArray(body.cart) ? body.cart : [];
+    const cart = readCartFromBody(body);
     const promoCode = safeText(body.promoCode, 80) || null;
     const singcoinsUsed = body.singcoinsUsed === true;
     const customer = body.customer || null;
@@ -907,7 +913,7 @@ router.post("/api/verify-cart", async (req, res) => {
     });
   } catch (error) {
     console.error("Erreur /api/verify-cart :", error);
-    return res.status(500).json({ error: "Erreur serveur" });
+    return res.status(500).json({ error: error?.message || "Erreur serveur" });
   }
 });
 
@@ -918,7 +924,7 @@ router.post("/api/verify-cart", async (req, res) => {
 router.post("/api/confirm-reservation", optionalAuthMiddleware, async (req, res) => {
   try {
     const body = req.body || {};
-    const cart = Array.isArray(body.cart) ? body.cart : [];
+    const cart = readCartFromBody(body);
     const customer = body.customer || {};
     const promoCode = safeText(body.promoCode, 80) || null;
     const referralCodeRaw = safeText(body.referralCode, 80) || null;
@@ -1123,7 +1129,10 @@ router.post("/api/confirm-reservation", optionalAuthMiddleware, async (req, res)
     console.error("Erreur /api/confirm-reservation :", error);
     return res.status(500).json({
       error: error?.message || "Erreur serveur",
-      details: process.env.NODE_ENV !== "production" ? String(error?.stack || "") : undefined,
+      details:
+        process.env.NODE_ENV !== "production"
+          ? String(error?.stack || "")
+          : undefined,
     });
   }
 });
