@@ -446,11 +446,8 @@ router.post("/api/passes/confirm-reservation", authMiddleware, async (req, res) 
       }
 
       return res.status(500).json({
-        error: "Erreur création réservation avec pass",
-        details:
-          process.env.NODE_ENV !== "production"
-            ? String(reservationError?.message || reservationError)
-            : undefined,
+        error: reservationError?.message || "Erreur création réservation avec pass",
+        details: String(reservationError?.stack || reservationError || ""),
       });
     }
 
@@ -466,11 +463,8 @@ router.post("/api/passes/confirm-reservation", authMiddleware, async (req, res) 
   } catch (error) {
     console.error("Erreur /api/passes/confirm-reservation :", error);
     return res.status(500).json({
-      error: "Erreur serveur",
-      details:
-        process.env.NODE_ENV !== "production"
-          ? String(error?.message || error)
-          : undefined,
+      error: error?.message || "Erreur serveur",
+      details: String(error?.stack || error || ""),
     });
   }
 });
