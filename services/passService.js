@@ -468,11 +468,6 @@ export function buildPassReservationRows({
       theoretical_full_amount: Number(item.theoreticalFullAmount || item.cashAmountDue || 0),
       singcoins_discount_amount: 0,
 
-      paid_with_pass: true,
-      user_pass_id: userPass.id,
-      pass_places_used: persons,
-      pass_type: userPass.pass_type,
-
       is_weekend: day === 0 || day === 6,
       is_daytime: hour >= 12 && hour < 18,
       is_group_session: persons >= 3,
