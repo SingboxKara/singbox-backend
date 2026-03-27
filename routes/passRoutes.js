@@ -66,20 +66,12 @@ async function persistPassReservations(rows) {
   return data || [];
 }
 
-/* =========================================================
-   CATALOG
-========================================================= */
-
 router.get("/api/passes/catalog", async (_req, res) => {
   return res.json({
     success: true,
     passes: getPassCatalog(),
   });
 });
-
-/* =========================================================
-   MY PASSES
-========================================================= */
 
 router.get("/api/passes/me", authMiddleware, async (req, res) => {
   try {
@@ -96,10 +88,6 @@ router.get("/api/passes/me", authMiddleware, async (req, res) => {
     return res.status(500).json({ error: "Erreur serveur" });
   }
 });
-
-/* =========================================================
-   CREATE PAYMENT INTENT FOR PASS PURCHASE
-========================================================= */
 
 router.post("/api/passes/create-payment-intent", authMiddleware, async (req, res) => {
   try {
@@ -122,6 +110,7 @@ router.post("/api/passes/create-payment-intent", authMiddleware, async (req, res
         user_id: String(req.userId),
         places: String(passDef.places),
         unit_price: String(passDef.price),
+        validity_months: String(passDef.validityMonths || 3),
       },
     });
 
@@ -136,10 +125,6 @@ router.post("/api/passes/create-payment-intent", authMiddleware, async (req, res
     return res.status(500).json({ error: "Erreur serveur" });
   }
 });
-
-/* =========================================================
-   CONFIRM PASS PURCHASE
-========================================================= */
 
 router.post("/api/passes/confirm-purchase", authMiddleware, async (req, res) => {
   try {
@@ -232,10 +217,6 @@ router.post("/api/passes/confirm-purchase", authMiddleware, async (req, res) => 
   }
 });
 
-/* =========================================================
-   PREVIEW PASS USAGE
-========================================================= */
-
 router.post("/api/passes/preview-usage", authMiddleware, async (req, res) => {
   try {
     if (!ensureSupabaseConfigured(res)) return;
@@ -270,8 +251,8 @@ router.post("/api/passes/preview-usage", authMiddleware, async (req, res) => {
       return res.status(404).json({ error: "Pass introuvable" });
     }
 
-    if (userPass.status !== "active") {
-      return res.status(409).json({ error: "Ce pass n'est plus actif." });
+    if (userPass.status !== "active" || userPass.is_expired) {
+      return res.status(409).json({ error: "Ce pass n'est plus actif ou a expiré." });
     }
 
     const analysis = analyzeCartForPass(cart, userPass.pass_type);
@@ -305,10 +286,6 @@ router.post("/api/passes/preview-usage", authMiddleware, async (req, res) => {
     return res.status(500).json({ error: "Erreur serveur" });
   }
 });
-
-/* =========================================================
-   CONFIRM RESERVATION WITH PASS
-========================================================= */
 
 router.post("/api/passes/confirm-reservation", authMiddleware, async (req, res) => {
   try {
@@ -362,8 +339,8 @@ router.post("/api/passes/confirm-reservation", authMiddleware, async (req, res) 
       return res.status(404).json({ error: "Pass introuvable" });
     }
 
-    if (userPass.status !== "active") {
-      return res.status(409).json({ error: "Ce pass n'est plus actif." });
+    if (userPass.status !== "active" || userPass.is_expired) {
+      return res.status(409).json({ error: "Ce pass n'est plus actif ou a expiré." });
     }
 
     const analysis = analyzeCartForPass(cart, userPass.pass_type);
