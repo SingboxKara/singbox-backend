@@ -15,6 +15,7 @@ import reservationRoutes from "./routes/reservationRoutes.js";
 import reviewRoutes from "./routes/reviewRoutes.js";
 import adminRoutes from "./routes/adminRoutes.js";
 import chestRoutes from "./routes/chestRoutes.js";
+import passRoutes from "./routes/passRoutes.js";
 
 const app = express();
 
@@ -128,7 +129,7 @@ app.use(
 app.use(cors(corsOptions));
 app.options("*", cors(corsOptions));
 
-console.log("🌍 CORS configuré avec liste blanche");
+console.log("✅ CORS configuré avec liste blanche");
 
 /* =========================================================
    HELPERS RATE LIMIT
@@ -158,10 +159,7 @@ function getClientIp(req) {
   }
 
   return normalizeIp(
-    req.ip ||
-      req.socket?.remoteAddress ||
-      req.connection?.remoteAddress ||
-      "unknown"
+    req.ip || req.socket?.remoteAddress || req.connection?.remoteAddress || "unknown"
   );
 }
 
@@ -283,7 +281,7 @@ app.use(
   })
 );
 
-console.log("🌍 Sécurité HTTP + CORS + JSON configurés");
+console.log("✅ Sécurité HTTP + CORS + JSON configurés");
 
 /* =========================================================
    ROUTES PUBLIQUES / SANTÉ
@@ -300,6 +298,7 @@ app.use(authLimiter, authRoutes);
 app.use(userRoutes);
 app.use(paymentLimiter, paymentRoutes);
 app.use(paymentLimiter, reservationRoutes);
+app.use(paymentLimiter, passRoutes);
 app.use(chestLimiter, chestRoutes);
 app.use(guestLimiter, reviewRoutes);
 app.use(adminLimiter, adminRoutes);
