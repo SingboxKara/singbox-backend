@@ -15,7 +15,6 @@ import {
   createPurchasedPass,
   getPassByPaymentIntentId,
   getPassCatalog,
-  getPassDefinition,
   getUserPassById,
   listUserPasses,
   restoreUserPassPlaces,
