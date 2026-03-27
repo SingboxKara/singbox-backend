@@ -47,6 +47,12 @@ function round2(value) {
   return Number(toSafeNumber(value, 0).toFixed(2));
 }
 
+function readCartFromBody(body) {
+  if (Array.isArray(body?.cart)) return body.cart;
+  if (Array.isArray(body?.panier)) return body.panier;
+  return [];
+}
+
 function buildPromoValidationContext({ customerEmail, panier }) {
   return {
     email: customerEmail || null,
@@ -260,7 +266,7 @@ router.post("/api/set-default-payment-method", authMiddleware, async (req, res) 
 router.post("/api/validate-promo", async (req, res) => {
   try {
     const code = safeText(req.body?.code, 120);
-    const panier = Array.isArray(req.body?.panier) ? req.body.panier : [];
+    const panier = readCartFromBody(req.body || {});
     const singcoinsUsed = toSafeBoolean(req.body?.singcoinsUsed);
     const customer = req.body?.customer || null;
 
@@ -327,7 +333,7 @@ router.post("/api/create-payment-intent", optionalAuthMiddleware, async (req, re
   try {
     if (!ensureStripeConfigured(res)) return;
 
-    const panier = Array.isArray(req.body?.panier) ? req.body.panier : [];
+    const panier = readCartFromBody(req.body || {});
     const customer = req.body?.customer || {};
     const promoCode = safeText(req.body?.promoCode, 120) || null;
     const singcoinsUsed = toSafeBoolean(req.body?.singcoinsUsed);
