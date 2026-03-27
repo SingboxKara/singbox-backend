@@ -1,7 +1,7 @@
 // backend/services/passService.js
 
 import { supabase } from "../config/supabase.js";
-import { buildTimesFromSlot, computeCartPricing } from "./pricingService.js";
+import { computeCartPricing } from "./pricingService.js";
 
 const PASS_CATALOG = Object.freeze({
   before_15: {
@@ -21,6 +21,8 @@ const PASS_CATALOG = Object.freeze({
     currency: "EUR",
   },
 });
+
+const PASS_VALIDITY_MONTHS = 3;
 
 function ensureSupabase() {
   if (!supabase) {
@@ -79,8 +81,87 @@ function isItemEligibleForPass(item, passType) {
   return false;
 }
 
+function addMonths(date, months) {
+  const d = new Date(date);
+  d.setMonth(d.getMonth() + months);
+  return d;
+}
+
+function computePassExpiresAt(baseDate = new Date()) {
+  return addMonths(baseDate, PASS_VALIDITY_MONTHS).toISOString();
+}
+
+function isPassExpired(pass) {
+  if (!pass?.expires_at) return false;
+  const expiresAt = new Date(pass.expires_at);
+  if (Number.isNaN(expiresAt.getTime())) return false;
+  return expiresAt.getTime() <= Date.now();
+}
+
+function normalizeUserPassRecord(pass) {
+  if (!pass) return null;
+
+  const expired = isPassExpired(pass);
+  const remaining = Number(pass.remaining_places || 0);
+
+  return {
+    ...pass,
+    status:
+      pass.status === "expired" || expired
+        ? "expired"
+        : remaining <= 0 && pass.status === "active"
+          ? "used"
+          : pass.status,
+    is_expired: expired,
+    is_usable: !expired && pass.status === "active" && remaining > 0,
+  };
+}
+
+async function syncExpiredPassById(userPassId) {
+  ensureSupabase();
+  const safeUserPassId = safeText(userPassId, 120);
+  if (!safeUserPassId) return null;
+
+  const { data, error } = await supabase
+    .from("user_passes")
+    .select("*")
+    .eq("id", safeUserPassId)
+    .maybeSingle();
+
+  if (error) {
+    console.error("syncExpiredPassById read error:", error);
+    throw error;
+  }
+
+  if (!data) return null;
+
+  if (data.status !== "expired" && isPassExpired(data)) {
+    const { data: updated, error: updateError } = await supabase
+      .from("user_passes")
+      .update({
+        status: "expired",
+        updated_at: new Date().toISOString(),
+      })
+      .eq("id", safeUserPassId)
+      .select("*")
+      .maybeSingle();
+
+    if (updateError) {
+      console.error("syncExpiredPassById update error:", updateError);
+      throw updateError;
+    }
+
+    return normalizeUserPassRecord(updated);
+  }
+
+  return normalizeUserPassRecord(data);
+}
+
 export function getPassCatalog() {
-  return Object.values(PASS_CATALOG);
+  return Object.values(PASS_CATALOG).map((pass) => ({
+    ...pass,
+    validity_months: PASS_VALIDITY_MONTHS,
+  }));
 }
 
 export function getPassDefinition(passType) {
@@ -101,6 +182,7 @@ export function buildPassPricingSummary(passType) {
     price: def.price,
     currency: def.currency,
     places: def.places,
+    validityMonths: PASS_VALIDITY_MONTHS,
     amountInCents: Math.round(def.price * 100),
   };
 }
@@ -176,7 +258,15 @@ export async function listUserPasses(userId) {
     throw error;
   }
 
-  return data || [];
+  const passes = Array.isArray(data) ? data : [];
+  const normalized = [];
+
+  for (const pass of passes) {
+    const synced = await syncExpiredPassById(pass.id);
+    if (synced) normalized.push(synced);
+  }
+
+  return normalized;
 }
 
 export async function getUserPassById(userPassId, userId) {
@@ -187,19 +277,11 @@ export async function getUserPassById(userPassId, userId) {
 
   if (!safeUserPassId || !safeUserId) return null;
 
-  const { data, error } = await supabase
-    .from("user_passes")
-    .select("*")
-    .eq("id", safeUserPassId)
-    .eq("user_id", safeUserId)
-    .maybeSingle();
+  const synced = await syncExpiredPassById(safeUserPassId);
+  if (!synced) return null;
+  if (String(synced.user_id) !== String(safeUserId)) return null;
 
-  if (error) {
-    console.error("getUserPassById error:", error);
-    throw error;
-  }
-
-  return data || null;
+  return synced;
 }
 
 export async function getPassByPaymentIntentId(paymentIntentId) {
@@ -219,7 +301,7 @@ export async function getPassByPaymentIntentId(paymentIntentId) {
     throw error;
   }
 
-  return data || null;
+  return normalizeUserPassRecord(data || null);
 }
 
 export async function createPurchasedPass({
@@ -236,6 +318,8 @@ export async function createPurchasedPass({
     throw new Error("Type de pass invalide");
   }
 
+  const now = new Date();
+
   const payload = {
     user_id: safeText(userId, 120),
     pass_type: passDef.type,
@@ -245,6 +329,7 @@ export async function createPurchasedPass({
     currency: passDef.currency,
     status: "active",
     stripe_payment_intent_id: safeText(paymentIntentId, 200) || null,
+    expires_at: computePassExpiresAt(now),
     metadata: metadata && typeof metadata === "object" ? metadata : {},
   };
 
@@ -259,7 +344,7 @@ export async function createPurchasedPass({
     throw error;
   }
 
-  return data || null;
+  return normalizeUserPassRecord(data || null);
 }
 
 export async function createPassTransaction({
