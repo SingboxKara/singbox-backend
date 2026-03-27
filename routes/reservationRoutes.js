@@ -932,13 +932,10 @@ router.post("/api/confirm-reservation", optionalAuthMiddleware, async (req, res)
       authenticatedUserId &&
       String(body.userId) !== String(authenticatedUserId)
     ) {
-      console.warn(
-        "⚠️ confirm-reservation: userId body ignoré car différent du token",
-        {
-          bodyUserId: body.userId,
-          authUserId: authenticatedUserId,
-        }
-      );
+      console.warn("confirm-reservation: userId body ignoré car différent du token", {
+        bodyUserId: body.userId,
+        authUserId: authenticatedUserId,
+      });
     }
 
     if (cart.length === 0) {
@@ -969,22 +966,35 @@ router.post("/api/confirm-reservation", optionalAuthMiddleware, async (req, res)
       email: normalizedCustomerEmail,
     });
 
-    const referralContext = await resolveReferralContext({
-      referralCode: referralCodeRaw,
-      resolvedUserId,
-      normalizedCustomerEmail,
-      customer,
-    });
+    let referralContext = { ok: true, referralCode: null, referrer: null };
+    try {
+      referralContext = await resolveReferralContext({
+        referralCode: referralCodeRaw,
+        resolvedUserId,
+        normalizedCustomerEmail,
+        customer,
+      });
 
-    if (!referralContext.ok) {
-      return res.status(400).json({ error: referralContext.reason });
+      if (!referralContext.ok) {
+        return res.status(400).json({ error: referralContext.reason });
+      }
+    } catch (referralError) {
+      console.error("Erreur resolveReferralContext :", referralError);
+      referralContext = { ok: true, referralCode: null, referrer: null };
     }
 
     const totalPersons = sumCartPersons(cart);
-    const referralRewardResult = await consumeReferralRewardIfNeeded({
-      resolvedUserId,
-      totalPersons,
-    });
+
+    let referralRewardResult = { applied: false, reward: null };
+    try {
+      referralRewardResult = await consumeReferralRewardIfNeeded({
+        resolvedUserId,
+        totalPersons,
+      });
+    } catch (rewardError) {
+      console.error("Erreur consumeReferralRewardIfNeeded :", rewardError);
+      referralRewardResult = { applied: false, reward: null };
+    }
 
     const pricing = await computeReservationCartPricing({
       cart,
@@ -1059,26 +1069,49 @@ router.post("/api/confirm-reservation", optionalAuthMiddleware, async (req, res)
       return res.status(500).json({ error: "Erreur création réservation" });
     }
 
-    await handleReferralAfterReservationCreation({
-      reservations,
-      referralContext,
-      userId: resolvedUserId,
-      customerEmail: normalizedCustomerEmail,
-    });
+    try {
+      await handleReferralAfterReservationCreation({
+        reservations,
+        referralContext,
+        userId: resolvedUserId,
+        customerEmail: normalizedCustomerEmail,
+      });
+    } catch (referralAttachError) {
+      console.error("Erreur handleReferralAfterReservationCreation :", referralAttachError);
+    }
 
-    await markPaymentIntentReservations(
-      paymentIntentId,
-      reservations.map((row) => row.id)
-    );
+    try {
+      await markPaymentIntentReservations(
+        paymentIntentId,
+        reservations.map((row) => row.id)
+      );
+    } catch (paymentIntentLinkError) {
+      console.error("Erreur markPaymentIntentReservations :", paymentIntentLinkError);
+    }
 
-    await sendReservationEmailsSafe(reservations, customer);
+    try {
+      await sendReservationEmailsSafe(reservations, customer);
+    } catch (mailError) {
+      console.error("Erreur sendReservationEmailsSafe :", mailError);
+    }
 
     for (const reservation of reservations) {
-      await safeCreateReservationGamificationEvent(reservation);
+      try {
+        await safeCreateReservationGamificationEvent(reservation);
+      } catch (gamiError) {
+        console.error("Erreur safeCreateReservationGamificationEvent :", gamiError);
+      }
     }
 
     const firstReservation = reservations[0] || null;
-    const accessToken = await buildReservationAccessToken(firstReservation);
+    let accessToken = null;
+
+    try {
+      accessToken = await buildReservationAccessToken(firstReservation);
+    } catch (tokenError) {
+      console.error("Erreur buildReservationAccessToken :", tokenError);
+      accessToken = null;
+    }
 
     return res.json({
       success: true,
@@ -1088,7 +1121,10 @@ router.post("/api/confirm-reservation", optionalAuthMiddleware, async (req, res)
     });
   } catch (error) {
     console.error("Erreur /api/confirm-reservation :", error);
-    return res.status(500).json({ error: "Erreur serveur" });
+    return res.status(500).json({
+      error: error?.message || "Erreur serveur",
+      details: process.env.NODE_ENV !== "production" ? String(error?.stack || "") : undefined,
+    });
   }
 });
 
