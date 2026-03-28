@@ -458,15 +458,35 @@ export function buildPassReservationRows({
       payment_intent_id: null,
       original_payment_intent_id: null,
       latest_payment_intent_id: null,
+      deposit_payment_intent_id: null,
+      deposit_amount_cents: 0,
+      deposit_status: null,
+
+      refunded_amount: 0,
+      last_auto_charge_amount: 0,
 
       singcoins_used: false,
       singcoins_spent: 0,
+      singcoins_discount_amount: 0,
 
       promo_code: null,
       promo_discount_amount: 0,
 
-      theoretical_full_amount: Number(item.theoreticalFullAmount || item.cashAmountDue || 0),
-      singcoins_discount_amount: 0,
+      theoretical_full_amount: Number(
+        item.theoreticalFullAmount || item.cashAmountDue || 0
+      ),
+
+      paid_with_pass: true,
+      user_pass_id: userPass?.id || null,
+      pass_places_used: persons,
+      pass_type: userPass?.pass_type || null,
+
+      free_session_reason: "pass_singbox",
+
+      checked_in_at: null,
+      completed_at: null,
+      cancelled_at: null,
+      refunded_at: null,
 
       is_weekend: day === 0 || day === 6,
       is_daytime: hour >= 12 && hour < 18,
