@@ -58,6 +58,7 @@ import {
   getUserGamificationSnapshot,
   createGamificationEvent,
   processReservationGamification,
+  getAvailableSingcoinsForUser,
 } from "../services/gamificationService.js";
 
 import {
@@ -89,6 +90,11 @@ import {
   sendReservationEmail,
   sendReservationModificationEmail,
 } from "../services/emailService.js";
+
+import {
+  sendReviewRequestEmail,
+  getExistingReviewRequestByReservationId,
+} from "../services/reviewService.js";
 import { validatePromoCode } from "../services/promoService.js";
 
 const router = express.Router();
@@ -914,6 +920,20 @@ router.post("/api/verify-cart", async (req, res) => {
   } catch (error) {
     console.error("Erreur /api/verify-cart :", error);
     return res.status(500).json({ error: error?.message || "Erreur serveur" });
+  }
+});
+
+/* =========================================================
+   SINGCOINS BALANCE (endpoint léger pour la page paiement)
+========================================================= */
+
+router.get("/api/singcoins/balance", authMiddleware, async (req, res) => {
+  try {
+    const balance = await getAvailableSingcoinsForUser(req.userId);
+    return res.json({ success: true, balance });
+  } catch (error) {
+    console.error("Erreur /api/singcoins/balance :", error);
+    return res.status(500).json({ error: "Erreur serveur" });
   }
 });
 
@@ -1969,6 +1989,16 @@ router.post("/api/complete-reservation", requireAdminOrCron, async (req, res) =>
       completed_at: new Date().toISOString(),
       updated_at: new Date().toISOString(),
     });
+
+    // Envoi automatique du mail d'avis après chaque séance terminée
+    try {
+      const existingReview = await getExistingReviewRequestByReservationId(reservation.id);
+      if (!existingReview || (existingReview.status !== "used" && existingReview.status !== "pending")) {
+        await sendReviewRequestEmail(updated || reservation);
+      }
+    } catch (reviewMailErr) {
+      console.error("Erreur envoi mail d'avis après completion :", reviewMailErr);
+    }
 
     if (updated?.user_id) {
       try {
