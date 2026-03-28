@@ -135,6 +135,7 @@ function buildSharedPaymentIntentMetadata({
   rewardValue,
 }) {
   return {
+    type: "booking",
     panier: JSON.stringify(pricing.normalizedItems || []),
     customer_email: customerEmail,
     customer_name: buildCustomerFullName(customer),
@@ -592,7 +593,7 @@ router.post("/api/create-deposit-intent", optionalAuthMiddleware, async (req, re
         payment_method_types: ["card"],
         capture_method: "manual",
         metadata: {
-          type: "singbox_deposit",
+          type: "deposit",
           reservation_id: reservationId || "",
           customer_email: customerEmail,
           customer_name: fullName,
@@ -622,7 +623,7 @@ router.post("/api/create-deposit-intent", optionalAuthMiddleware, async (req, re
       capture_method: "manual",
       payment_method_types: ["card"],
       metadata: {
-        type: "singbox_deposit",
+        type: "deposit",
         reservation_id: reservationId || "",
         customer_email: customerEmail,
         customer_name: fullName,
