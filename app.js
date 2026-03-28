@@ -42,12 +42,7 @@ function normalizeOrigin(origin) {
 
 function isLocalDevOrigin(url) {
   const hostname = String(url.hostname || "").toLowerCase();
-
-  if (hostname === "localhost" || hostname === "127.0.0.1") {
-    return true;
-  }
-
-  return false;
+  return hostname === "localhost" || hostname === "127.0.0.1";
 }
 
 function isAllowedOrigin(origin) {
@@ -80,7 +75,7 @@ function isAllowedOrigin(origin) {
       return true;
     }
 
-    // autorise localhost / 127.0.0.1 sur n'importe quel port en dev
+    // Autorise localhost / 127.0.0.1 sur n'importe quel port en dev
     if (protocol === "http:" && isLocalDevOrigin(url)) {
       return true;
     }
@@ -97,11 +92,16 @@ const corsOptions = {
       return callback(null, true);
     }
 
-    return callback(new Error("Origine non autorisée par CORS"));
+    return callback(new Error(`Origine non autorisée par CORS: ${origin}`));
   },
   methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
-  allowedHeaders: ["Content-Type", "Authorization", "x-cron-secret"],
-  credentials: false,
+  allowedHeaders: [
+    "Content-Type",
+    "Authorization",
+    "X-Requested-With",
+    "x-cron-secret",
+  ],
+  credentials: true,
   optionsSuccessStatus: 204,
 };
 
@@ -119,6 +119,65 @@ app.set("trust proxy", 1);
 app.use(
   helmet({
     crossOriginResourcePolicy: false,
+    crossOriginEmbedderPolicy: false,
+    contentSecurityPolicy: {
+      useDefaults: true,
+      directives: {
+        defaultSrc: ["'self'"],
+
+        scriptSrc: [
+          "'self'",
+          "'unsafe-inline'",
+          "https://js.stripe.com",
+          "https://cdn.jsdelivr.net",
+        ],
+
+        styleSrc: [
+          "'self'",
+          "'unsafe-inline'",
+          "https://fonts.googleapis.com",
+          "https://cdn.jsdelivr.net",
+        ],
+
+        imgSrc: ["'self'", "data:", "blob:", "https:"],
+
+        fontSrc: ["'self'", "data:", "https://fonts.gstatic.com"],
+
+        connectSrc: [
+          "'self'",
+          "https://www.singbox.fr",
+          "https://singbox.fr",
+          "https://site-reservation-qr.vercel.app",
+          "https://site-reservation-qr-git-main.vercel.app",
+          "https://singbox-backend.onrender.com",
+          "https://api.stripe.com",
+          "https://js.stripe.com",
+          "https://cdn.jsdelivr.net",
+          "https://*.supabase.co",
+          "wss://*.supabase.co",
+          "https://api.web3forms.com",
+          "https://hcaptcha.com",
+          "https://*.hcaptcha.com",
+          "https://www.google.com",
+          "https://maps.googleapis.com",
+          "https://maps.google.com",
+          "https://www.gstatic.com",
+        ],
+
+        frameSrc: [
+          "'self'",
+          "https://js.stripe.com",
+          "https://hooks.stripe.com",
+          "https://hcaptcha.com",
+          "https://*.hcaptcha.com",
+          "https://www.google.com",
+        ],
+
+        objectSrc: ["'none'"],
+        baseUri: ["'self'"],
+        formAction: ["'self'"],
+      },
+    },
   })
 );
 
