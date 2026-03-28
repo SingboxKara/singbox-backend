@@ -147,7 +147,7 @@ router.get("/api/check", async (req, res) => {
 
     const { data, error } = await supabase
       .from("reservations")
-      .select("*")
+      .select("id, box_id, start_time, end_time, status")
       .eq("id", id)
       .single();
 
@@ -198,7 +198,14 @@ router.get("/api/check", async (req, res) => {
       reason = "Créneau valide, accès autorisé.";
     }
 
-    return res.json({ valid: true, access, reason, reservation: data });
+    return res.json({
+      valid: true,
+      access,
+      reason,
+      box_id: data.box_id,
+      start_time: data.start_time,
+      end_time: data.end_time,
+    });
   } catch (e) {
     console.error("Erreur /api/check :", e);
     return res.status(500).json({ valid: false, error: e.message });
