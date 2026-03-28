@@ -83,6 +83,33 @@ async function fetchModificationRequest(modificationRequestId) {
   return data || null;
 }
 
+async function updateReservationDepositStatusByPaymentIntent(
+  paymentIntentId,
+  depositStatus
+) {
+  if (!supabase || !paymentIntentId || !depositStatus) return false;
+
+  try {
+    const { error } = await supabase
+      .from("reservations")
+      .update({
+        deposit_status: depositStatus,
+        updated_at: new Date().toISOString(),
+      })
+      .eq("deposit_payment_intent_id", String(paymentIntentId));
+
+    if (error) {
+      console.error("Erreur update reservations deposit_status :", error);
+      return false;
+    }
+
+    return true;
+  } catch (err) {
+    console.error("Erreur catch update reservations deposit_status :", err);
+    return false;
+  }
+}
+
 async function handleModificationPaymentIntentSucceeded(intent) {
   if (!supabase) {
     console.error("Webhook modification: Supabase non configuré");
@@ -160,6 +187,8 @@ async function handleModificationPaymentIntentSucceeded(intent) {
     await markModificationRequestStatus(modificationRequestId, {
       status: "applied",
       stripe_payment_intent_id: modReq.stripe_payment_intent_id || intent.id,
+      paid_at: modReq.paid_at || new Date().toISOString(),
+      applied_at: new Date().toISOString(),
     });
   } catch (applyErr) {
     console.error("Erreur application modification :", applyErr);
@@ -167,8 +196,33 @@ async function handleModificationPaymentIntentSucceeded(intent) {
     await markModificationRequestStatus(modificationRequestId, {
       status: "failed",
       stripe_payment_intent_id: modReq.stripe_payment_intent_id || intent.id,
+      paid_at: modReq.paid_at || new Date().toISOString(),
     });
   }
+}
+
+async function handleDepositPaymentIntentSucceeded(intent) {
+  if (!intent?.id) return;
+
+  await updateReservationDepositStatusByPaymentIntent(intent.id, "captured");
+}
+
+async function handleDepositPaymentIntentCapturableUpdated(intent) {
+  if (!intent?.id) return;
+
+  await updateReservationDepositStatusByPaymentIntent(intent.id, "authorized");
+}
+
+async function handleDepositPaymentIntentFailed(intent) {
+  if (!intent?.id) return;
+
+  await updateReservationDepositStatusByPaymentIntent(intent.id, "failed");
+}
+
+async function handleDepositPaymentIntentCanceled(intent) {
+  if (!intent?.id) return;
+
+  await updateReservationDepositStatusByPaymentIntent(intent.id, "canceled");
 }
 
 async function handlePaymentIntentSucceeded(event) {
@@ -179,8 +233,19 @@ async function handlePaymentIntentSucceeded(event) {
     return;
   }
 
-  if (normalizeStatus(intent.metadata?.type) === "modification") {
+  const intentType = normalizeStatus(intent.metadata?.type);
+
+  if (intentType === "modification") {
     await handleModificationPaymentIntentSucceeded(intent);
+    return;
+  }
+
+  if (intentType === "deposit") {
+    await handleDepositPaymentIntentSucceeded(intent);
+    return;
+  }
+
+  if (intentType === "booking") {
     return;
   }
 }
@@ -196,7 +261,14 @@ async function handlePaymentIntentPaymentFailed(event) {
     return;
   }
 
-  if (normalizeStatus(intent.metadata?.type) !== "modification") {
+  const intentType = normalizeStatus(intent.metadata?.type);
+
+  if (intentType === "deposit") {
+    await handleDepositPaymentIntentFailed(intent);
+    return;
+  }
+
+  if (intentType !== "modification") {
     return;
   }
 
@@ -223,6 +295,38 @@ async function handlePaymentIntentPaymentFailed(event) {
     status: "failed",
     stripe_payment_intent_id: modReq.stripe_payment_intent_id || intent.id,
   });
+}
+
+async function handlePaymentIntentAmountCapturableUpdated(event) {
+  const intent = event?.data?.object;
+
+  if (!intent || typeof intent !== "object") {
+    return;
+  }
+
+  const intentType = normalizeStatus(intent.metadata?.type);
+
+  if (intentType !== "deposit") {
+    return;
+  }
+
+  await handleDepositPaymentIntentCapturableUpdated(intent);
+}
+
+async function handlePaymentIntentCanceled(event) {
+  const intent = event?.data?.object;
+
+  if (!intent || typeof intent !== "object") {
+    return;
+  }
+
+  const intentType = normalizeStatus(intent.metadata?.type);
+
+  if (intentType !== "deposit") {
+    return;
+  }
+
+  await handleDepositPaymentIntentCanceled(intent);
 }
 
 router.post(
@@ -269,6 +373,14 @@ router.post(
 
         case "payment_intent.payment_failed":
           await handlePaymentIntentPaymentFailed(event);
+          break;
+
+        case "payment_intent.amount_capturable_updated":
+          await handlePaymentIntentAmountCapturableUpdated(event);
+          break;
+
+        case "payment_intent.canceled":
+          await handlePaymentIntentCanceled(event);
           break;
 
         default:
