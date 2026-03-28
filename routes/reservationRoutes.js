@@ -123,6 +123,14 @@ function isCompletedStatus(statusRaw) {
   return normalizeReservationStatus(statusRaw) === "completed";
 }
 
+function isPassReservation(reservation) {
+  return (
+    reservation?.paid_with_pass === true ||
+    !!reservation?.user_pass_id ||
+    Number(reservation?.pass_places_used || 0) > 0
+  );
+}
+
 function buildGuestReservationResponse(reservation) {
   return {
     reservation: {
@@ -137,13 +145,20 @@ function buildGuestReservationResponse(reservation) {
       status: reservation?.status ?? null,
       montant: reservation?.montant ?? null,
       free_session: reservation?.free_session ?? false,
+      paid_with_pass: reservation?.paid_with_pass ?? false,
+      user_pass_id: reservation?.user_pass_id ?? null,
+      pass_places_used: reservation?.pass_places_used ?? 0,
+      pass_type: reservation?.pass_type ?? null,
     },
     accessMode: "guest",
     rules: {
       modificationDeadlineHours: MODIFICATION_DEADLINE_HOURS,
       refundDeadlineHours: REFUND_DEADLINE_HOURS,
       canModify: isWithinModificationWindow(reservation.start_time),
-      canRefund: isWithinRefundWindow(reservation.start_time),
+      canRefund:
+        isPassReservation(reservation)
+          ? false
+          : isWithinRefundWindow(reservation.start_time),
     },
   };
 }
@@ -723,9 +738,6 @@ async function createPendingModificationRequest({
     box_id: Number(targetBoxId || reservation.box_id || 1),
 
     singcoins_used: !!isReservationPaidWithSingcoins(reservation),
-    singcoins_spent: isReservationPaidWithSingcoins(reservation)
-      ? Number(getReservationSingcoinsUsed(reservation))
-      : 0,
 
     stripe_payment_intent_id: stripePaymentIntentId,
     stripe_client_secret: stripeClientSecret,
@@ -1398,6 +1410,23 @@ async function runReservationModification({
     targetPersons: safePersons,
   });
 
+  if (isPassReservation(reservation) && deltaAmount < 0) {
+    return {
+      ok: false,
+      status: 409,
+      body: {
+        error:
+          "Les réservations payées avec un pass Singbox ne peuvent pas générer de remboursement.",
+        code: "PASS_RESERVATION_NO_REFUND",
+        financial: {
+          oldAmount,
+          newAmount,
+          deltaAmount,
+        },
+      },
+    };
+  }
+
   let autoChargeDone = false;
   let refundDone = false;
   let newPaymentIntentId = null;
@@ -1583,7 +1612,7 @@ async function runReservationModification({
     persons: safePersons,
     billable_persons: Math.max(safePersons, 2),
     montant: newAmount,
-    free_session: newAmount <= 0,
+    free_session: isPassReservation(reservation) ? true : newAmount <= 0,
     singcoins_used: singcoinsRewardUsed,
     singcoins_spent: singcoinsRewardUsed ? SINGCOINS_REWARD_COST : 0,
     latest_payment_intent_id:
@@ -1675,6 +1704,18 @@ async function runReservationRefund({
       ok: false,
       status: 400,
       body: { error: "Date de réservation invalide" },
+    };
+  }
+
+  if (isPassReservation(reservation)) {
+    return {
+      ok: false,
+      status: 409,
+      body: {
+        error:
+          "Les réservations payées avec un pass Singbox ne sont pas remboursables.",
+        code: "PASS_RESERVATION_NOT_REFUNDABLE",
+      },
     };
   }
 
@@ -1990,7 +2031,6 @@ router.post("/api/complete-reservation", requireAdminOrCron, async (req, res) =>
       updated_at: new Date().toISOString(),
     });
 
-    // Envoi automatique du mail d'avis après chaque séance terminée
     try {
       const existingReview = await getExistingReviewRequestByReservationId(reservation.id);
       if (!existingReview || (existingReview.status !== "used" && existingReview.status !== "pending")) {
