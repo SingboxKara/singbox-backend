@@ -20,6 +20,8 @@ import {
   restoreUserPassPlaces,
 } from "../services/passService.js";
 
+import { sendReservationEmail } from "../services/emailService.js";
+
 const router = express.Router();
 
 function safeText(value, maxLen = 255) {
@@ -422,6 +424,15 @@ router.post("/api/passes/confirm-reservation", authMiddleware, async (req, res) 
             passType: userPass.pass_type,
           },
         });
+      }
+
+      // Envoi des emails de confirmation pour chaque réservation créée via pass
+      for (const reservation of reservations) {
+        try {
+          await sendReservationEmail(reservation);
+        } catch (mailError) {
+          console.error("Erreur envoi email confirmation réservation pass :", mailError);
+        }
       }
     } catch (reservationError) {
       console.error("Erreur création réservations via pass :", reservationError);
