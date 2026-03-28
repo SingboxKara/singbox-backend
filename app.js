@@ -48,7 +48,6 @@ function isLocalDevOrigin(url) {
 function isAllowedOrigin(origin) {
   const safeOrigin = normalizeOrigin(origin);
 
-  // Requêtes serveur-à-serveur / curl / Stripe / cron etc.
   if (!safeOrigin) return true;
 
   if (STATIC_ALLOWED_ORIGINS.includes(safeOrigin)) {
@@ -75,7 +74,6 @@ function isAllowedOrigin(origin) {
       return true;
     }
 
-    // Autorise localhost / 127.0.0.1 sur n'importe quel port en dev
     if (protocol === "http:" && isLocalDevOrigin(url)) {
       return true;
     }
@@ -109,7 +107,6 @@ const corsOptions = {
    PROXY / IP
 ========================================================= */
 
-// Important derrière Render / reverse proxy
 app.set("trust proxy", 1);
 
 /* =========================================================
@@ -199,7 +196,6 @@ function normalizeIp(ip) {
 
   if (!value) return "unknown";
 
-  // IPv6 localhost / IPv4-mapped IPv6
   if (value === "::1") return "127.0.0.1";
   if (value.startsWith("::ffff:")) return value.replace("::ffff:", "");
 
@@ -388,12 +384,10 @@ app.use((err, req, res, next) => {
     return res.status(403).json({ error: "Origine non autorisée" });
   }
 
-  // JSON invalide envoyé au backend
   if (err?.type === "entity.parse.failed") {
     return res.status(400).json({ error: "JSON invalide" });
   }
 
-  // payload trop gros
   if (err?.type === "entity.too.large") {
     return res.status(413).json({ error: "Requête trop volumineuse" });
   }
