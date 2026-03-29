@@ -12,6 +12,7 @@ import {
 import { safeText } from "../utils/validators.js";
 import { parseDateOrNull } from "../utils/dates.js";
 import { isReservationStatusConfirmed } from "./reservationService.js";
+import { getExpressRebookUrl } from "./emailService.js";
 
 const FALLBACK_FRONTEND_BASE_URL = "https://site-reservation-qr.vercel.app";
 const POST_SESSION_PROMO_CODE_PREFIX = "SINGBACK";
@@ -543,6 +544,7 @@ export async function sendReviewRequestEmail(reservation) {
   const reviewRequest = upsertResult.request;
   const reviewLink = buildReviewLink(reviewRequest.token);
   const bookingLink = buildBookingLink();
+  const expressRebookLink = getExpressRebookUrl(reservation);
 
   let promo = null;
 
@@ -599,8 +601,8 @@ export async function sendReviewRequestEmail(reservation) {
           </div>
 
           <ul style="margin:12px 0 0 18px;padding:0;color:#E5E7EB;font-size:12.5px;line-height:1.8;">
-            <li><strong>-30%</strong> pendant les <strong>2 premiers jours</strong></li>
-            <li><strong>-20%</strong> jusqu’au <strong>7e jour</strong></li>
+            <li><strong>-30%</strong> pendant les <strong>${POST_SESSION_PROMO_STAGE_1_DAYS} premiers jours</strong></li>
+            <li><strong>-20%</strong> jusqu’au <strong>${POST_SESSION_PROMO_STAGE_2_DAYS}e jour</strong></li>
             <li><strong>-10%</strong> jusqu’au <strong>${promoExpiryLabel}</strong></li>
             <li><strong>Utilisable une seule fois</strong></li>
           </ul>
@@ -608,18 +610,43 @@ export async function sendReviewRequestEmail(reservation) {
           <div style="margin-top:12px;font-size:12px;color:#CBD5E1;line-height:1.7;">
             Le même code reste actif pendant toute la période, mais sa réduction diminue automatiquement avec le temps.
           </div>
-
-          <div style="margin-top:14px;text-align:center;">
-            <a
-              href="${bookingLink}"
-              style="display:inline-block;padding:12px 22px;border-radius:999px;background:linear-gradient(90deg,#c94c35,#f97316);color:#F9FAFB;font-weight:800;font-size:14px;text-decoration:none;"
-            >
-              Réserver une nouvelle session
-            </a>
-          </div>
         </div>
       `
       : "";
+
+    const rebookBlock = `
+      <div style="margin-top:18px;padding:18px;border-radius:16px;background:linear-gradient(135deg,rgba(34,197,94,0.14),rgba(249,115,22,0.10));border:1px solid rgba(74,222,128,0.24);">
+        <div style="font-size:12.5px;font-weight:900;letter-spacing:0.08em;text-transform:uppercase;color:#86EFAC;">
+          RÉSERVER À NOUVEAU EN QUELQUES CLICS
+        </div>
+
+        <div style="margin-top:10px;font-size:13px;color:#E5E7EB;line-height:1.7;">
+          Envie de revenir chanter chez <strong>Singbox</strong> ?
+          Reprenez directement une session à partir de votre réservation précédente.
+        </div>
+
+        <div style="margin-top:10px;font-size:12px;color:#CBD5E1;line-height:1.7;">
+          Si le créneau n’est plus disponible, nous vous proposerons automatiquement d’autres options.
+        </div>
+
+        <div style="margin-top:16px;text-align:center;">
+          <a
+            href="${expressRebookLink || bookingLink}"
+            style="display:inline-block;padding:12px 22px;border-radius:999px;background:linear-gradient(90deg,#c94c35,#f97316);color:#F9FAFB;font-weight:800;font-size:14px;text-decoration:none;"
+          >
+            Réserver à nouveau
+          </a>
+        </div>
+
+        <div style="margin-top:10px;text-align:center;font-size:11.5px;color:#9CA3AF;line-height:1.6;">
+          ${
+            expressRebookLink
+              ? "Lien personnel valable pour relancer rapidement une nouvelle réservation."
+              : "Vous serez redirigé vers les disponibilités Singbox."
+          }
+        </div>
+      </div>
+    `;
 
     const htmlBody = `
       <div style="margin:0;padding:22px 0;background:#050814;">
@@ -661,22 +688,7 @@ export async function sendReviewRequestEmail(reservation) {
 
             ${promoBlock}
 
-            <div style="margin-top:18px;padding:16px;border-radius:16px;background:rgba(15,23,42,0.62);border:1px solid rgba(148,163,184,0.26);text-align:center;">
-              <div style="font-size:13px;font-weight:800;color:#F9FAFB;">
-                Envie de revenir chanter avec votre groupe ?
-              </div>
-              <div style="margin-top:7px;font-size:12px;color:#CBD5E1;line-height:1.6;">
-                Retrouvez vos prochaines disponibilités directement sur le site Singbox.
-              </div>
-              <div style="margin-top:14px;">
-                <a
-                  href="${bookingLink}"
-                  style="display:inline-block;padding:12px 20px;border-radius:999px;background:transparent;color:#F9FAFB;text-decoration:none;font-weight:800;font-size:13px;border:1px solid rgba(148,163,184,0.45);"
-                >
-                  Voir les disponibilités
-                </a>
-              </div>
-            </div>
+            ${rebookBlock}
 
             <div style="margin-top:16px;font-size:11px;color:#9CA3AF;line-height:1.6;">
               Si vous n’arrivez pas à cliquer sur le bouton, copiez-collez ce lien dans votre navigateur :
@@ -709,6 +721,7 @@ export async function sendReviewRequestEmail(reservation) {
       reviewRequest,
       reviewLink,
       promoCode: promo?.code || null,
+      expressRebookLink: expressRebookLink || null,
     };
   } catch (err) {
     console.error("❌ Erreur envoi email demande d'avis :", err);
@@ -718,6 +731,7 @@ export async function sendReviewRequestEmail(reservation) {
       error: err.message,
       reviewRequest,
       promoCode: promo?.code || null,
+      expressRebookLink: expressRebookLink || null,
     };
   }
 }
@@ -746,10 +760,10 @@ export async function processCompletedReviewRequests(options = {}) {
     throw error;
   }
 
-const confirmedFinishedReservations = (reservations || []).filter(
-  (row) =>
-    (isReservationStatusConfirmed(row.status) || row.status === "completed") &&
-    isReservationFinished(row)
+  const confirmedFinishedReservations = (reservations || []).filter(
+    (row) =>
+      (isReservationStatusConfirmed(row.status) || row.status === "completed") &&
+      isReservationFinished(row)
   );
 
   const results = [];
@@ -786,6 +800,7 @@ const confirmedFinishedReservations = (reservations || []).filter(
         sent: !!sendResult.sent,
         reason: sendResult.reason || null,
         promoCode: sendResult.promoCode || null,
+        expressRebookLink: sendResult.expressRebookLink || null,
       });
     } catch (itemErr) {
       console.error("Erreur envoi review request reservation", reservation.id, itemErr);
