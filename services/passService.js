@@ -117,6 +117,30 @@ function normalizeUserPassRecord(pass) {
   };
 }
 
+async function syncExpiredPassesForUser(userId) {
+  ensureSupabase();
+
+  const safeUserId = safeText(userId, 120);
+  if (!safeUserId) return;
+
+  const nowIso = new Date().toISOString();
+
+  const { error } = await supabase
+    .from("user_passes")
+    .update({
+      status: "expired",
+      updated_at: nowIso,
+    })
+    .eq("user_id", safeUserId)
+    .eq("status", "active")
+    .lt("expires_at", nowIso);
+
+  if (error) {
+    console.error("syncExpiredPassesForUser update error:", error);
+    throw error;
+  }
+}
+
 async function syncExpiredPassById(userPassId) {
   ensureSupabase();
   const safeUserPassId = safeText(userPassId, 120);
@@ -247,6 +271,8 @@ export async function listUserPasses(userId) {
   const safeUserId = safeText(userId, 120);
   if (!safeUserId) return [];
 
+  await syncExpiredPassesForUser(safeUserId);
+
   const { data, error } = await supabase
     .from("user_passes")
     .select("*")
@@ -258,15 +284,7 @@ export async function listUserPasses(userId) {
     throw error;
   }
 
-  const passes = Array.isArray(data) ? data : [];
-  const normalized = [];
-
-  for (const pass of passes) {
-    const synced = await syncExpiredPassById(pass.id);
-    if (synced) normalized.push(synced);
-  }
-
-  return normalized;
+  return (Array.isArray(data) ? data : []).map(normalizeUserPassRecord).filter(Boolean);
 }
 
 export async function getUserPassById(userPassId, userId) {
