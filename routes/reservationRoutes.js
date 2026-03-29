@@ -39,6 +39,7 @@ import {
 import {
   updateUserProfileInUsersTable,
   getReservationOwnedByUser,
+  getUserById,
 } from "../services/userService.js";
 
 import {
@@ -82,6 +83,7 @@ import {
   REFUND_DEADLINE_HOURS,
   SLOT_DURATION_MINUTES,
   SINGCOINS_REWARD_COST,
+  DEPOSIT_AMOUNT_EUR,
 } from "../constants/booking.js";
 import {
   REFERRAL_REQUIRED_VALID_COUNT,
@@ -185,6 +187,157 @@ function buildPromoPayload(promo) {
 function round2(value) {
   const n = Number(value || 0);
   return Number(n.toFixed(2));
+}
+
+function normalizeStripeMetadataValue(value) {
+  return String(value || "").trim().toLowerCase();
+}
+
+function amountEurToCents(amount) {
+  const numeric = Number(amount || 0);
+  if (!Number.isFinite(numeric)) return 0;
+  return Math.round(numeric * 100);
+}
+
+function isPositiveAmount(amount) {
+  const numeric = Number(amount || 0);
+  return Number.isFinite(numeric) && numeric > 0;
+}
+
+async function verifySuccessfulPaymentIntent({
+  paymentIntentId,
+  expectedAmountEur,
+  expectedType,
+  expectedEmail = null,
+}) {
+  if (!stripe) {
+    throw new Error("Stripe non configuré");
+  }
+
+  const safePaymentIntentId = safeText(paymentIntentId, 200);
+  if (!safePaymentIntentId) {
+    throw new Error("paymentIntentId manquant");
+  }
+
+  const paymentIntent = await stripe.paymentIntents.retrieve(safePaymentIntentId);
+
+  if (!paymentIntent || !paymentIntent.id) {
+    throw new Error("PaymentIntent introuvable");
+  }
+
+  if (paymentIntent.status !== "succeeded") {
+    throw new Error(`PaymentIntent non validé (${paymentIntent.status})`);
+  }
+
+  if (String(paymentIntent.currency || "").toLowerCase() !== "eur") {
+    throw new Error("Devise Stripe invalide");
+  }
+
+  const expectedAmountCents = amountEurToCents(expectedAmountEur);
+  if (expectedAmountCents <= 0) {
+    throw new Error("Montant attendu invalide");
+  }
+
+  if (Number(paymentIntent.amount || 0) !== expectedAmountCents) {
+    throw new Error(
+      `Montant Stripe incohérent (${paymentIntent.amount} au lieu de ${expectedAmountCents})`
+    );
+  }
+
+  const actualType = normalizeStripeMetadataValue(paymentIntent.metadata?.type);
+  const safeExpectedType = normalizeStripeMetadataValue(expectedType);
+
+  if (!safeExpectedType) {
+    throw new Error("Type Stripe attendu manquant");
+  }
+
+  if (actualType !== safeExpectedType) {
+    throw new Error(`Type Stripe incohérent (${actualType || "vide"})`);
+  }
+
+  if (expectedEmail) {
+    const actualEmail = normalizeEmail(
+      paymentIntent.metadata?.customer_email || ""
+    );
+    const safeExpectedEmail = normalizeEmail(expectedEmail);
+
+    if (!actualEmail || actualEmail !== safeExpectedEmail) {
+      throw new Error("Email Stripe incohérent");
+    }
+  }
+
+  return paymentIntent;
+}
+
+async function verifySuccessfulDepositPaymentIntent({
+  paymentIntentId,
+  expectedReservationId = null,
+  expectedEmail = null,
+  expectedType = "deposit",
+}) {
+  if (!stripe) {
+    throw new Error("Stripe non configuré");
+  }
+
+  const safePaymentIntentId = safeText(paymentIntentId, 200);
+  if (!safePaymentIntentId) {
+    throw new Error("deposit paymentIntentId manquant");
+  }
+
+  const paymentIntent = await stripe.paymentIntents.retrieve(safePaymentIntentId);
+
+  if (!paymentIntent || !paymentIntent.id) {
+    throw new Error("PaymentIntent de caution introuvable");
+  }
+
+  const validStatuses = ["requires_capture", "succeeded"];
+  if (!validStatuses.includes(paymentIntent.status)) {
+    throw new Error(`Caution non valide (${paymentIntent.status})`);
+  }
+
+  if (String(paymentIntent.currency || "").toLowerCase() !== "eur") {
+    throw new Error("Devise caution invalide");
+  }
+
+  const actualType = normalizeStripeMetadataValue(paymentIntent.metadata?.type);
+  const safeExpectedType = normalizeStripeMetadataValue(expectedType);
+
+  if (actualType !== safeExpectedType) {
+    throw new Error(`Type de caution incohérent (${actualType || "vide"})`);
+  }
+
+  if (
+    String(paymentIntent.capture_method || "").toLowerCase() !== "manual"
+  ) {
+    throw new Error("La caution doit être en capture manuelle");
+  }
+
+  if (expectedReservationId) {
+    const metadataReservationId = safeText(
+      paymentIntent.metadata?.reservation_id,
+      120
+    );
+
+    if (
+      metadataReservationId &&
+      String(metadataReservationId) !== String(expectedReservationId)
+    ) {
+      throw new Error("reservation_id de caution incohérent");
+    }
+  }
+
+  if (expectedEmail) {
+    const actualEmail = normalizeEmail(
+      paymentIntent.metadata?.customer_email || ""
+    );
+    const safeExpectedEmail = normalizeEmail(expectedEmail);
+
+    if (actualEmail && actualEmail !== safeExpectedEmail) {
+      throw new Error("Email de caution incohérent");
+    }
+  }
+
+  return paymentIntent;
 }
 
 function verifyExpressRebookToken(rawToken) {
@@ -311,6 +464,7 @@ async function resolveExpressRebookContext(rawToken) {
   }
 
   const user = await getUserById(userId);
+
   if (!user?.id) {
     throw new Error("Compte client introuvable");
   }
@@ -884,7 +1038,7 @@ async function buildReservationAccessToken(reservation) {
         mode: "guest",
       },
       JWT_SECRET,
-      { expiresIn: "30d" }
+      { expiresIn: "7d" }
     );
   } catch (e) {
     console.error("Erreur génération reservation access token :", e);
@@ -1183,6 +1337,8 @@ router.post(
       const referralCodeRaw = safeText(body.referralCode, 80) || null;
       const singcoinsUsed = body.singcoinsUsed === true;
       const paymentIntentId = safeText(body.paymentIntentId, 200) || null;
+      const depositPaymentIntentId =
+        safeText(body.depositPaymentIntentId, 200) || null;
 
       const authenticatedUserId = req.userId || null;
 
@@ -1305,6 +1461,85 @@ router.post(
           return res.status(400).json({
             error:
               spendResult?.reason || "Impossible d'utiliser les Singcoins.",
+          });
+        }
+      }
+
+      const totalCashDue = Number(
+        pricing.totalAfterDiscount ?? pricing.totalCashDue ?? 0
+      );
+
+      if (isPositiveAmount(totalCashDue)) {
+        if (!paymentIntentId) {
+          if (singcoinsUsed && resolvedUserId) {
+            try {
+              await refundSingcoinsToUser(
+                resolvedUserId,
+                SINGCOINS_REWARD_COST
+              );
+            } catch (refundErr) {
+              console.error(
+                "Erreur rollback Singcoins après absence de paiement :",
+                refundErr
+              );
+            }
+          }
+
+          return res.status(400).json({
+            error: "paymentIntentId requis pour confirmer une réservation payante.",
+          });
+        }
+
+        try {
+          await verifySuccessfulPaymentIntent({
+            paymentIntentId,
+            expectedAmountEur: totalCashDue,
+            expectedType: "booking",
+            expectedEmail: normalizedCustomerEmail,
+          });
+        } catch (paymentVerificationError) {
+          if (singcoinsUsed && resolvedUserId) {
+            try {
+              await refundSingcoinsToUser(
+                resolvedUserId,
+                SINGCOINS_REWARD_COST
+              );
+            } catch (refundErr) {
+              console.error(
+                "Erreur rollback Singcoins après paiement invalide :",
+                refundErr
+              );
+            }
+          }
+
+          return res.status(400).json({
+            error:
+              paymentVerificationError?.message ||
+              "Paiement Stripe invalide pour cette réservation.",
+          });
+        }
+      } else if (paymentIntentId) {
+        const paymentIntentAlreadyUsed =
+          await isPaymentIntentAlreadyUsed(paymentIntentId);
+        if (paymentIntentAlreadyUsed) {
+          return res.status(409).json({
+            error: "Ce paiement a déjà été utilisé pour une réservation.",
+          });
+        }
+      }
+
+      if (depositPaymentIntentId) {
+        try {
+          await verifySuccessfulDepositPaymentIntent({
+            paymentIntentId: depositPaymentIntentId,
+            expectedEmail: normalizedCustomerEmail,
+            expectedType: "deposit",
+          });
+        } catch (depositError) {
+          return res.status(400).json({
+            error:
+              depositError?.message ||
+              "Caution Stripe invalide pour cette réservation.",
           });
         }
       }
@@ -1651,6 +1886,8 @@ router.post("/api/rebook/confirm", async (req, res) => {
     const safeToken = safeText(token, 2000) || "";
     const { reservation, user } = await resolveExpressRebookContext(safeToken);
     const safePaymentIntentId = safeText(paymentIntentId, 200) || null;
+    const safeDepositPaymentIntentId =
+      safeText(body.depositPaymentIntentId, 200) || null;
 
     if (!safePaymentIntentId) {
       return res.status(400).json({ error: "paymentIntentId manquant" });
@@ -1684,6 +1921,31 @@ router.post("/api/rebook/confirm", async (req, res) => {
       return res.status(400).json({ error: "Créneau invalide" });
     }
 
+    const totalCashDue = Number(
+      pricing.totalAfterDiscount ?? pricing.totalCashDue ?? 0
+    );
+
+    if (!isPositiveAmount(totalCashDue)) {
+      return res.status(400).json({
+        error: "Montant invalide pour le rebooking express",
+      });
+    }
+
+    try {
+      await verifySuccessfulPaymentIntent({
+        paymentIntentId: safePaymentIntentId,
+        expectedAmountEur: totalCashDue,
+        expectedType: "express_rebook",
+        expectedEmail: user.email || reservation.email || "",
+      });
+    } catch (paymentVerificationError) {
+      return res.status(400).json({
+        error:
+          paymentVerificationError?.message ||
+          "Paiement express invalide pour ce rebooking.",
+      });
+    }
+
     const conflict = await hasReservationConflict({
       boxId: item.box_id,
       startTime: item.start_time,
@@ -1693,7 +1955,7 @@ router.post("/api/rebook/confirm", async (req, res) => {
 
     if (conflict) {
       const refunds = await refundExpressPaymentIntents(
-        readPaymentIntentIdsFromBody(body)
+        [safePaymentIntentId, safeDepositPaymentIntentId].filter(Boolean)
       );
       const alternatives = await listExpressRebookAlternatives(
         {
@@ -1715,6 +1977,22 @@ router.post("/api/rebook/confirm", async (req, res) => {
           label: formatExpressSlotLabel(slot),
         })),
       });
+    }
+
+    if (safeDepositPaymentIntentId) {
+      try {
+        await verifySuccessfulDepositPaymentIntent({
+          paymentIntentId: safeDepositPaymentIntentId,
+          expectedEmail: user.email || reservation.email || "",
+          expectedType: "deposit_express_rebook",
+        });
+      } catch (depositError) {
+        return res.status(400).json({
+          error:
+            depositError?.message ||
+            "Caution express invalide pour ce rebooking.",
+        });
+      }
     }
 
     const reservations = await createReservationsFromCart({
@@ -1739,7 +2017,7 @@ router.post("/api/rebook/confirm", async (req, res) => {
 
     if (!reservations?.length) {
       const refunds = await refundExpressPaymentIntents(
-        readPaymentIntentIdsFromBody(body)
+        [safePaymentIntentId, safeDepositPaymentIntentId].filter(Boolean)
       );
       return res.status(500).json({
         error: "Erreur création réservation",
