@@ -29,6 +29,7 @@ import {
   isWithinModificationWindow,
   isWithinRefundWindow,
   updateReservationById,
+  getReservationById,
   getReservationByGuestToken,
   generateGuestManageToken,
   normalizeReservationStatus,
@@ -51,6 +52,7 @@ import {
 import {
   attemptAutomaticSavedCardCharge,
   attemptAutomaticRefundAcrossPaymentIntents,
+  ensureStripeCustomer,
 } from "../services/stripeCustomerService.js";
 
 import {
@@ -183,6 +185,172 @@ function buildPromoPayload(promo) {
 function round2(value) {
   const n = Number(value || 0);
   return Number(n.toFixed(2));
+}
+
+function verifyExpressRebookToken(rawToken) {
+  const safeToken = String(rawToken || "").trim();
+  if (!safeToken) {
+    throw new Error("Token de rebooking manquant");
+  }
+
+  const payload = jwt.verify(safeToken, JWT_SECRET);
+  if (payload?.type !== "express_rebook") {
+    throw new Error("Token de rebooking invalide");
+  }
+
+  return {
+    reservationId: String(payload?.reservationId || "").trim(),
+    userId: String(payload?.userId || "").trim() || null,
+    email: normalizeEmail(payload?.email || "") || null,
+  };
+}
+
+function addDaysToIso(isoString, days) {
+  const date = new Date(isoString);
+  if (Number.isNaN(date.getTime())) {
+    throw new Error("Date ISO invalide");
+  }
+
+  date.setUTCDate(date.getUTCDate() + Number(days || 0));
+  return date.toISOString();
+}
+
+function buildExpressRebookCartFromReservation(reservation, overrides = {}) {
+  const persons = clampPersons(overrides?.persons ?? reservation?.persons ?? 2);
+  const boxId = Number(overrides?.box_id ?? overrides?.boxId ?? reservation?.box_id ?? 1);
+  const startTime = overrides?.start_time || addDaysToIso(reservation.start_time, 7);
+  const endTime = overrides?.end_time || addDaysToIso(reservation.end_time, 7);
+  const startDate = new Date(startTime);
+
+  return [{
+    box_id: boxId,
+    persons,
+    start_time: startTime,
+    end_time: endTime,
+    date: formatDateToYYYYMMDD(startDate),
+  }];
+}
+
+async function listExpressRebookAlternatives(reservation, { max = 3 } = {}) {
+  const sourceStart = new Date(reservation?.start_time);
+  if (Number.isNaN(sourceStart.getTime())) return [];
+
+  const targetDate = formatDateToYYYYMMDD(new Date(addDaysToIso(reservation.start_time, 7)));
+  const sourceHourFloat = sourceStart.getHours() + sourceStart.getMinutes() / 60;
+
+  const preferredHours = [
+    sourceHourFloat,
+    sourceHourFloat - 0.5,
+    sourceHourFloat + 0.5,
+    sourceHourFloat - 1,
+    sourceHourFloat + 1,
+    sourceHourFloat - 1.5,
+    sourceHourFloat + 1.5,
+  ];
+
+  const validHours = preferredHours.filter((hour) =>
+    STANDARD_SLOT_STARTS.some((slotHour) => Number(slotHour) === Number(hour))
+  );
+
+  const uniqueHours = [...new Set(validHours)];
+  const alternatives = [];
+
+  for (const hour of uniqueHours) {
+    if (alternatives.length >= max) break;
+    const range = buildSlotIsoRange(targetDate, hour);
+    const conflict = await hasReservationConflict({
+      boxId: reservation.box_id,
+      startTime: range.startIso,
+      endTime: range.endIso,
+      localDate: targetDate,
+    });
+
+    if (!conflict) {
+      alternatives.push({
+        box_id: reservation.box_id,
+        persons: clampPersons(reservation.persons || 2),
+        start_time: range.startIso,
+        end_time: range.endIso,
+        date: targetDate,
+      });
+    }
+  }
+
+  return alternatives;
+}
+
+async function resolveExpressRebookContext(rawToken) {
+  const tokenData = verifyExpressRebookToken(rawToken);
+  const fetchedReservation = await getReservationById(tokenData.reservationId);
+
+  if (!fetchedReservation?.id) {
+    throw new Error("Réservation source introuvable");
+  }
+
+  const reservationEmail = normalizeEmail(fetchedReservation.email);
+  if (tokenData.email && reservationEmail && tokenData.email !== reservationEmail) {
+    throw new Error("Token et réservation non cohérents");
+  }
+
+  const userId = fetchedReservation.user_id || tokenData.userId || null;
+  if (!userId) {
+    throw new Error("Cette réservation n’est liée à aucun compte client");
+  }
+
+  const user = await getUserById(userId);
+  if (!user?.id) {
+    throw new Error("Compte client introuvable");
+  }
+
+  return { tokenData, reservation: fetchedReservation, user };
+}
+
+function formatExpressSlotLabel(slot) {
+  const start = new Date(slot?.start_time);
+  const end = new Date(slot?.end_time);
+  if (Number.isNaN(start.getTime()) || Number.isNaN(end.getTime())) return "Créneau";
+  const datePart = start.toLocaleDateString("fr-FR", { timeZone: "Europe/Paris", weekday: "long", day: "2-digit", month: "2-digit" });
+  const timePart = `${start.toLocaleTimeString("fr-FR", { timeZone: "Europe/Paris", hour: "2-digit", minute: "2-digit" })} - ${end.toLocaleTimeString("fr-FR", { timeZone: "Europe/Paris", hour: "2-digit", minute: "2-digit" })}`;
+  return `${datePart} · ${timePart}`;
+}
+
+function readExpressRequestedSlot(body = {}) {
+  const requested = body?.requestedSlot || body?.slot || {};
+  const start_time = safeText(requested?.start_time, 80) || null;
+  const end_time = safeText(requested?.end_time, 80) || null;
+  const box_id = Number(requested?.box_id ?? requested?.boxId ?? 0) || null;
+  const persons = clampPersons(requested?.persons ?? body?.persons ?? 2);
+
+  if (!start_time || !end_time || !box_id) return null;
+
+  const start = new Date(start_time);
+  return {
+    start_time,
+    end_time,
+    box_id,
+    persons,
+    date: formatDateToYYYYMMDD(start),
+  };
+}
+
+function readPaymentIntentIdsFromBody(body = {}) {
+  return [
+    safeText(body?.paymentIntentId, 200),
+    safeText(body?.depositPaymentIntentId, 200),
+  ].filter(Boolean);
+}
+
+async function refundExpressPaymentIntents(paymentIntentIds = []) {
+  const results = [];
+  for (const id of paymentIntentIds) {
+    const result = await attemptAutomaticRefundAcrossPaymentIntents({
+      payment_intent_id: id,
+      original_payment_intent_id: id,
+      latest_payment_intent_id: id,
+    }, 999999);
+    results.push({ id, result });
+  }
+  return results;
 }
 
 function readCartFromBody(body) {
@@ -1166,6 +1334,301 @@ router.post("/api/confirm-reservation", optionalAuthMiddleware, async (req, res)
           ? String(error?.stack || "")
           : undefined,
     });
+  }
+});
+
+router.get("/api/rebook/prepare", async (req, res) => {
+  try {
+    const token = safeText(req.query?.token, 2000) || "";
+    const { reservation, user } = await resolveExpressRebookContext(token);
+
+    const requestedCart = buildExpressRebookCartFromReservation(reservation);
+    const requestedPricing = await computeReservationCartPricing({
+      cart: requestedCart,
+      customer: { email: user.email || reservation.email || "" },
+      singcoinsUsed: false,
+    });
+
+    const requestedItem = requestedPricing.items?.[0] || requestedCart[0];
+    const conflict = await hasReservationConflict({
+      boxId: requestedItem.box_id,
+      startTime: requestedItem.start_time,
+      endTime: requestedItem.end_time,
+      localDate: requestedItem.date,
+    });
+
+    const alternatives = conflict ? await listExpressRebookAlternatives(reservation, { max: 3 }) : [];
+
+    return res.json({
+      success: true,
+      available: !conflict,
+      requestedSlot: {
+        ...requestedItem,
+        label: formatExpressSlotLabel(requestedItem),
+      },
+      alternatives: alternatives.map((slot) => ({
+        ...slot,
+        label: formatExpressSlotLabel(slot),
+      })),
+      customer: {
+        prenom: user.prenom || "",
+        nom: user.nom || "",
+        email: user.email || reservation.email || "",
+        telephone: user.telephone || "",
+        pays: user.pays || "FR",
+        adresse: user.adresse || "",
+        complement: user.complement || "",
+        cp: user.cp || "",
+        ville: user.ville || "",
+        naissance: user.naissance || null,
+      },
+      savedCard: {
+        available: !!(user.default_payment_method_id && user.card_last4),
+        paymentMethodId: user.default_payment_method_id || null,
+        brand: user.card_brand || null,
+        last4: user.card_last4 || null,
+        exp_month: user.card_exp_month || null,
+        exp_year: user.card_exp_year || null,
+      },
+      sourceReservation: {
+        id: reservation.id,
+        box_id: reservation.box_id,
+        persons: reservation.persons,
+        start_time: reservation.start_time,
+        end_time: reservation.end_time,
+      },
+    });
+  } catch (error) {
+    console.error("Erreur /api/rebook/prepare :", error);
+    return res.status(400).json({ error: error?.message || "Lien de rebooking invalide" });
+  }
+});
+
+router.post("/api/rebook/create-payment-intent", async (req, res) => {
+  try {
+    if (!stripe) {
+      return res.status(500).json({ error: "Stripe non configuré" });
+    }
+
+    const body = req.body || {};
+    const token = safeText(body?.token, 2000) || "";
+    const { reservation, user } = await resolveExpressRebookContext(token);
+
+    const requestedSlot = readExpressRequestedSlot(body) || buildExpressRebookCartFromReservation(reservation)[0];
+    const pricing = await computeReservationCartPricing({
+      cart: [requestedSlot],
+      customer: { email: user.email || reservation.email || "" },
+      singcoinsUsed: false,
+    });
+
+    const item = pricing.items?.[0];
+    if (!item) {
+      return res.status(400).json({ error: "Créneau invalide" });
+    }
+
+    const conflict = await hasReservationConflict({
+      boxId: item.box_id,
+      startTime: item.start_time,
+      endTime: item.end_time,
+      localDate: item.date,
+    });
+
+    if (conflict) {
+      const alternatives = await listExpressRebookAlternatives({ ...reservation, persons: item.persons, box_id: item.box_id }, { max: 3 });
+      return res.status(409).json({
+        error: "Le créneau demandé n’est plus disponible.",
+        code: "slot_unavailable",
+        alternatives: alternatives.map((slot) => ({ ...slot, label: formatExpressSlotLabel(slot) })),
+      });
+    }
+
+    if (!user.default_payment_method_id) {
+      return res.status(400).json({ error: "Aucune carte enregistrée disponible" });
+    }
+
+    const { customerId } = await ensureStripeCustomer(user.id);
+    const amountInCents = Math.max(0, Math.round(Number(pricing.totalAfterDiscount || pricing.totalCashDue || 0) * 100));
+    if (amountInCents <= 0) {
+      return res.status(400).json({ error: "Montant invalide pour le paiement express" });
+    }
+
+    const paymentIntent = await stripe.paymentIntents.create({
+      amount: amountInCents,
+      currency: "eur",
+      customer: customerId,
+      payment_method: user.default_payment_method_id,
+      payment_method_types: ["card"],
+      metadata: {
+        type: "express_rebook",
+        source_reservation_id: String(reservation.id),
+        rebook_start_time: String(item.start_time),
+        rebook_end_time: String(item.end_time),
+        rebook_box_id: String(item.box_id),
+        rebook_persons: String(item.persons),
+        customer_email: normalizeEmail(user.email || reservation.email || ""),
+      },
+    });
+
+    return res.json({
+      success: true,
+      clientSecret: paymentIntent.client_secret,
+      paymentIntentId: paymentIntent.id,
+      amountEur: pricing.totalAfterDiscount || pricing.totalCashDue || 0,
+      slot: { ...item, label: formatExpressSlotLabel(item) },
+      savedPaymentMethodId: user.default_payment_method_id,
+    });
+  } catch (error) {
+    console.error("Erreur /api/rebook/create-payment-intent :", error);
+    return res.status(400).json({ error: error?.message || "Impossible de préparer le paiement express" });
+  }
+});
+
+router.post("/api/rebook/create-deposit-intent", async (req, res) => {
+  try {
+    if (!stripe) {
+      return res.status(500).json({ error: "Stripe non configuré" });
+    }
+
+    const body = req.body || {};
+    const token = safeText(body?.token, 2000) || "";
+    const reservationId = safeText(body?.reservationId, 120) || null;
+    const { reservation, user } = await resolveExpressRebookContext(token);
+
+    if (!reservationId) {
+      return res.status(400).json({ error: "reservationId manquant" });
+    }
+
+    if (!user.default_payment_method_id) {
+      return res.status(400).json({ error: "Aucune carte enregistrée disponible pour la caution" });
+    }
+
+    const { customerId } = await ensureStripeCustomer(user.id);
+    const paymentIntent = await stripe.paymentIntents.create({
+      amount: Math.round(Number(DEPOSIT_AMOUNT_EUR || 0) * 100),
+      currency: "eur",
+      customer: customerId,
+      payment_method: user.default_payment_method_id,
+      payment_method_types: ["card"],
+      capture_method: "manual",
+      metadata: {
+        type: "deposit_express_rebook",
+        reservation_id: reservationId,
+        source_reservation_id: String(reservation.id),
+        customer_email: normalizeEmail(user.email || reservation.email || ""),
+      },
+    });
+
+    return res.json({
+      success: true,
+      clientSecret: paymentIntent.client_secret,
+      paymentIntentId: paymentIntent.id,
+      savedPaymentMethodId: user.default_payment_method_id,
+    });
+  } catch (error) {
+    console.error("Erreur /api/rebook/create-deposit-intent :", error);
+    return res.status(400).json({ error: error?.message || "Impossible de préparer la caution express" });
+  }
+});
+
+router.post("/api/rebook/confirm", async (req, res) => {
+  try {
+    const body = req.body || {};
+    const token = safeText(body?.token, 2000) || "";
+    const { reservation, user } = await resolveExpressRebookContext(token);
+    const paymentIntentId = safeText(body?.paymentIntentId, 200) || null;
+
+    if (!paymentIntentId) {
+      return res.status(400).json({ error: "paymentIntentId manquant" });
+    }
+
+    const paymentIntentAlreadyUsed = await isPaymentIntentAlreadyUsed(paymentIntentId);
+    if (paymentIntentAlreadyUsed) {
+      return res.status(409).json({ error: "Ce paiement a déjà été utilisé pour une réservation." });
+    }
+
+    const requestedSlot = readExpressRequestedSlot(body) || buildExpressRebookCartFromReservation(reservation)[0];
+    const pricing = await computeReservationCartPricing({
+      cart: [requestedSlot],
+      customer: { email: user.email || reservation.email || "" },
+      singcoinsUsed: false,
+    });
+
+    const item = pricing.items?.[0];
+    if (!item) {
+      return res.status(400).json({ error: "Créneau invalide" });
+    }
+
+    const conflict = await hasReservationConflict({
+      boxId: item.box_id,
+      startTime: item.start_time,
+      endTime: item.end_time,
+      localDate: item.date,
+    });
+
+    if (conflict) {
+      const refunds = await refundExpressPaymentIntents(readPaymentIntentIdsFromBody(body));
+      const alternatives = await listExpressRebookAlternatives({ ...reservation, persons: item.persons, box_id: item.box_id }, { max: 3 });
+      return res.status(409).json({
+        error: "Le créneau vient d’être pris. Le paiement a été annulé automatiquement si possible.",
+        code: "slot_conflict_after_payment",
+        refunded: refunds.some((entry) => entry?.result?.success),
+        refundResults: refunds,
+        alternatives: alternatives.map((slot) => ({ ...slot, label: formatExpressSlotLabel(slot) })),
+      });
+    }
+
+    const reservations = await createReservationsFromCart({
+      cartItems: pricing.items || [],
+      customer: {
+        prenom: user.prenom || "",
+        nom: user.nom || "",
+        email: user.email || reservation.email || "",
+        telephone: user.telephone || "",
+        pays: user.pays || "FR",
+        adresse: user.adresse || "",
+        complement: user.complement || "",
+        cp: user.cp || "",
+        ville: user.ville || "",
+        naissance: user.naissance || null,
+      },
+      userId: user.id,
+      singcoinsUsed: false,
+      paymentIntentId,
+      referralFreeSessionApplied: false,
+    });
+
+    if (!reservations?.length) {
+      const refunds = await refundExpressPaymentIntents(readPaymentIntentIdsFromBody(body));
+      return res.status(500).json({
+        error: "Erreur création réservation",
+        refunded: refunds.some((entry) => entry?.result?.success),
+        refundResults: refunds,
+      });
+    }
+
+    try {
+      await markPaymentIntentReservations(paymentIntentId, reservations.map((row) => row.id));
+    } catch (paymentIntentLinkError) {
+      console.error("Erreur markPaymentIntentReservations express:", paymentIntentLinkError);
+    }
+
+    try {
+      await sendReservationEmailsSafe(reservations, user);
+    } catch (mailError) {
+      console.error("Erreur sendReservationEmailsSafe express:", mailError);
+    }
+
+    let accessToken = null;
+    try {
+      accessToken = await buildReservationAccessToken(reservations[0] || null);
+    } catch (tokenError) {
+      console.error("Erreur buildReservationAccessToken express:", tokenError);
+    }
+
+    return res.json({ success: true, reservations, accessToken });
+  } catch (error) {
+    console.error("Erreur /api/rebook/confirm :", error);
+    return res.status(400).json({ error: error?.message || "Impossible de confirmer le rebooking express" });
   }
 });
 
