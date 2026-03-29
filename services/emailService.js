@@ -1,9 +1,10 @@
 // backend/services/emailService.js
 
 import QRCode from "qrcode";
+import jwt from "jsonwebtoken";
 
 import { resend, mailEnabled } from "../config/mail.js";
-import { BACKEND_BASE_URL, RESEND_FROM_EMAIL } from "../config/env.js";
+import { BACKEND_BASE_URL, RESEND_FROM_EMAIL, JWT_SECRET } from "../config/env.js";
 import {
   DEPOSIT_AMOUNT_EUR,
   MODIFICATION_DEADLINE_HOURS,
@@ -28,6 +29,26 @@ function getManageReservationUrl(reservation) {
   }
 
   return `${frontBase}/mon-compte.html`;
+}
+
+
+function getExpressRebookUrl(reservation) {
+  const frontBase = getFrontendBaseUrl();
+  const reservationId = String(reservation?.id || "").trim();
+  if (!reservationId || !JWT_SECRET) return null;
+
+  const token = jwt.sign(
+    {
+      type: "express_rebook",
+      reservationId,
+      email: String(reservation?.email || "").trim().toLowerCase() || null,
+      userId: reservation?.user_id || null,
+    },
+    JWT_SECRET,
+    { expiresIn: "30d" }
+  );
+
+  return `${frontBase}/rebook.html?token=${encodeURIComponent(token)}`;
 }
 
 function formatReservationDateTime(value) {
@@ -75,6 +96,7 @@ function buildCommonMailLayout({
   manageBlockIntro = "Vous pouvez consulter votre réservation via un <strong>lien sécurisé</strong>, puis :",
 }) {
   const manageReservationUrl = getManageReservationUrl(reservation);
+  const expressRebookUrl = getExpressRebookUrl(reservation);
   const { primary, secondary } = buildMailButtonStyles();
 
   return `
@@ -182,6 +204,24 @@ function buildCommonMailLayout({
               <div style="margin-top:6px;color:#9CA3AF;font-size:11.5px;">Pensez à vérifier l’accès et le stationnement avant votre venue.</div>
             </div>
           </div>
+
+          ${expressRebookUrl ? `
+          <div style="margin-top:16px;padding:16px 14px;border-radius:16px;background:linear-gradient(135deg,rgba(34,197,94,0.14),rgba(249,115,22,0.10));border:1px solid rgba(74,222,128,0.28);text-align:center;">
+            <div style="font-size:12.5px;font-weight:900;letter-spacing:0.08em;text-transform:uppercase;color:#86EFAC;">
+              RÉSERVER À NOUVEAU EN 1 CLIC
+            </div>
+            <div style="margin-top:9px;font-size:12px;color:#E5E7EB;line-height:1.6;">
+              Reprenez le <strong>même créneau la semaine suivante</strong>. Si le créneau n’est plus disponible, Singbox vous proposera directement les meilleures alternatives.
+            </div>
+            <div style="margin-top:16px;">
+              <a href="${expressRebookUrl}" target="_blank" rel="noopener noreferrer" style="${primary}">
+                Réserver à nouveau
+              </a>
+            </div>
+            <div style="margin-top:8px;font-size:11px;color:#9CA3AF;">
+              Paiement express avec votre carte enregistrée, si disponible.
+            </div>
+          </div>` : ""}
 
           <div style="margin-top:18px;padding:16px 14px;border-radius:14px;background:rgba(15,23,42,0.62);border:1px solid rgba(148,163,184,0.26);text-align:center;">
             <div style="font-size:13px;font-weight:800;color:#F9FAFB;">
