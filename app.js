@@ -10,6 +10,7 @@ import healthRoutes from "./routes/healthRoutes.js";
 import publicRoutes from "./routes/publicRoutes.js";
 import authRoutes from "./routes/authRoutes.js";
 import userRoutes from "./routes/userRoutes.js";
+import accountRoutes from "./routes/accountRoutes.js";
 import paymentRoutes from "./routes/paymentRoutes.js";
 import reservationRoutes from "./routes/reservationRoutes.js";
 import reviewRoutes from "./routes/reviewRoutes.js";
@@ -351,6 +352,10 @@ app.use(publicRoutes);
 
 app.use(authLimiter, authRoutes);
 app.use(userRoutes);
+
+// ✅ NOUVELLE ROUTE (protégée comme user)
+app.use(accountRoutes);
+
 app.use(paymentLimiter, paymentRoutes);
 app.use(paymentLimiter, reservationRoutes);
 app.use(paymentLimiter, passRoutes);
