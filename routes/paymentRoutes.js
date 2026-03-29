@@ -1,4 +1,5 @@
 import express from "express";
+import crypto from "crypto";
 
 import { stripe } from "../config/stripe.js";
 import { supabase } from "../config/supabase.js";
@@ -98,6 +99,94 @@ function ensurePositiveAmountInCents(amountEur) {
   return Math.max(0, cents);
 }
 
+function stableStringify(value) {
+  if (value === null || typeof value !== "object") {
+    return JSON.stringify(value);
+  }
+
+  if (Array.isArray(value)) {
+    return `[${value.map((item) => stableStringify(item)).join(",")}]`;
+  }
+
+  const keys = Object.keys(value).sort();
+  return `{${keys
+    .map((key) => `${JSON.stringify(key)}:${stableStringify(value[key])}`)
+    .join(",")}}`;
+}
+
+function hashPayload(value) {
+  return crypto.createHash("sha256").update(String(value)).digest("hex");
+}
+
+function toStripeMetadataValue(value, maxLen = 500) {
+  return String(value ?? "").slice(0, maxLen);
+}
+
+function sanitizeMetadata(input = {}) {
+  const output = {};
+  for (const [key, value] of Object.entries(input)) {
+    output[key] = toStripeMetadataValue(value);
+  }
+  return output;
+}
+
+function buildSetupIntentIdempotencyKey({ userId, customerId }) {
+  return [
+    "setup-intent",
+    safeText(userId, 120) || "anonymous",
+    safeText(customerId, 120) || "no-customer",
+  ].join(":");
+}
+
+function buildPaymentIntentIdempotencyKey({
+  scope,
+  customerEmail,
+  pricing,
+  promoCode,
+  singcoinsUsed,
+  useSavedPaymentMethod,
+  paymentMethodId,
+  chestReward,
+  rewardType,
+  rewardValue,
+}) {
+  const payload = stableStringify({
+    scope,
+    customerEmail: normalizeEmail(customerEmail),
+    items: pricing?.normalizedItems || [],
+    totalBeforeDiscount: round2(pricing?.totalBeforeDiscount || 0),
+    totalCashDue: round2(pricing?.totalCashDue || 0),
+    promoCode: safeText(promoCode, 120) || null,
+    singcoinsUsed: !!singcoinsUsed,
+    useSavedPaymentMethod: !!useSavedPaymentMethod,
+    paymentMethodId: safeText(paymentMethodId, 200) || null,
+    chestReward: safeText(chestReward, 120) || null,
+    rewardType: safeText(rewardType, 120) || null,
+    rewardValue: rewardValue ?? null,
+  });
+
+  return `${scope}:${hashPayload(payload)}`;
+}
+
+function buildDepositIntentIdempotencyKey({
+  scope,
+  reservationId,
+  customerEmail,
+  userId,
+  paymentMethodId,
+}) {
+  const payload = stableStringify({
+    scope,
+    reservationId: safeText(reservationId, 120) || null,
+    customerEmail: normalizeEmail(customerEmail),
+    userId: safeText(userId, 120) || null,
+    paymentMethodId: safeText(paymentMethodId, 200) || null,
+    depositAmount: round2(DEPOSIT_AMOUNT_EUR),
+  });
+
+  return `${scope}:${hashPayload(payload)}`;
+}
+
 async function tryAttachPaymentMethod(paymentMethodId, customerId) {
   try {
     await stripe.paymentMethods.attach(paymentMethodId, {
@@ -134,9 +223,9 @@ function buildSharedPaymentIntentMetadata({
   rewardType,
   rewardValue,
 }) {
-  return {
+  return sanitizeMetadata({
     type: "booking",
-    panier: JSON.stringify(pricing.normalizedItems || []),
+    panier: stableStringify(pricing.normalizedItems || []),
     customer_email: customerEmail,
     customer_name: buildCustomerFullName(customer),
     promo_code: promoCode || "",
@@ -149,7 +238,7 @@ function buildSharedPaymentIntentMetadata({
     chest_reward: chestReward || "",
     reward_type: rewardType || "",
     reward_value: rewardValue != null ? String(rewardValue) : "",
-  };
+  });
 }
 
 /* =========================================================
@@ -163,12 +252,23 @@ router.post("/api/create-setup-intent", authMiddleware, async (req, res) => {
 
     const { customerId } = await ensureStripeCustomer(req.userId);
 
-    const setupIntent = await stripe.setupIntents.create({
-      customer: customerId,
-      payment_method_types: ["card"],
-      usage: "off_session",
-      metadata: { supabase_user_id: String(req.userId) },
-    });
+    const setupIntent = await stripe.setupIntents.create(
+      {
+        customer: customerId,
+        payment_method_types: ["card"],
+        usage: "off_session",
+        metadata: sanitizeMetadata({
+          supabase_user_id: String(req.userId),
+          type: "setup_card",
+        }),
+      },
+      {
+        idempotencyKey: buildSetupIntentIdempotencyKey({
+          userId: req.userId,
+          customerId,
+        }),
+      }
+    );
 
     return res.json({
       clientSecret: setupIntent.client_secret,
@@ -418,6 +518,31 @@ router.post("/api/create-payment-intent", optionalAuthMiddleware, async (req, re
       });
     }
 
+    const baseMetadata = buildSharedPaymentIntentMetadata({
+      pricing,
+      customerEmail,
+      customer,
+      promoCode,
+      singcoinsUsed,
+      promoDiscountAmount,
+      chestReward,
+      rewardType,
+      rewardValue,
+    });
+
+    const idempotencyKey = buildPaymentIntentIdempotencyKey({
+      scope: useSavedPaymentMethod ? "booking-saved-card" : "booking-standard",
+      customerEmail,
+      pricing,
+      promoCode,
+      singcoinsUsed,
+      useSavedPaymentMethod,
+      paymentMethodId,
+      chestReward,
+      rewardType,
+      rewardValue,
+    });
+
     if (useSavedPaymentMethod) {
       if (!req.userId) {
         return res.status(401).json({
@@ -453,27 +578,22 @@ router.post("/api/create-payment-intent", optionalAuthMiddleware, async (req, re
       }
 
       try {
-        const paymentIntent = await stripe.paymentIntents.create({
-          amount: amountInCents,
-          currency: "eur",
-          customer: customerId,
-          payment_method: paymentMethodToUse,
-          payment_method_types: ["card"],
-          metadata: {
-            ...buildSharedPaymentIntentMetadata({
-              pricing,
-              customerEmail,
-              customer,
-              promoCode,
-              singcoinsUsed,
-              promoDiscountAmount,
-              chestReward,
-              rewardType,
-              rewardValue,
+        const paymentIntent = await stripe.paymentIntents.create(
+          {
+            amount: amountInCents,
+            currency: "eur",
+            customer: customerId,
+            payment_method: paymentMethodToUse,
+            payment_method_types: ["card"],
+            metadata: sanitizeMetadata({
+              ...baseMetadata,
+              saved_card: "true",
             }),
-            saved_card: "true",
           },
-        });
+          {
+            idempotencyKey,
+          }
+        );
 
         return res.json({
           clientSecret: paymentIntent.client_secret,
@@ -496,22 +616,17 @@ router.post("/api/create-payment-intent", optionalAuthMiddleware, async (req, re
       }
     }
 
-    const paymentIntent = await stripe.paymentIntents.create({
-      amount: amountInCents,
-      currency: "eur",
-      payment_method_types: ["card"],
-      metadata: buildSharedPaymentIntentMetadata({
-        pricing,
-        customerEmail,
-        customer,
-        promoCode,
-        singcoinsUsed,
-        promoDiscountAmount,
-        chestReward,
-        rewardType,
-        rewardValue,
-      }),
-    });
+    const paymentIntent = await stripe.paymentIntents.create(
+      {
+        amount: amountInCents,
+        currency: "eur",
+        payment_method_types: ["card"],
+        metadata: baseMetadata,
+      },
+      {
+        idempotencyKey,
+      }
+    );
 
     return res.json({
       clientSecret: paymentIntent.client_secret,
@@ -585,21 +700,32 @@ router.post("/api/create-deposit-intent", optionalAuthMiddleware, async (req, re
         });
       }
 
-      const paymentIntent = await stripe.paymentIntents.create({
-        amount: amountInCents,
-        currency: "eur",
-        customer: customerId,
-        payment_method: paymentMethodToUse,
-        payment_method_types: ["card"],
-        capture_method: "manual",
-        metadata: {
-          type: "deposit",
-          reservation_id: reservationId || "",
-          customer_email: customerEmail,
-          customer_name: fullName,
-          saved_card: "true",
+      const paymentIntent = await stripe.paymentIntents.create(
+        {
+          amount: amountInCents,
+          currency: "eur",
+          customer: customerId,
+          payment_method: paymentMethodToUse,
+          payment_method_types: ["card"],
+          capture_method: "manual",
+          metadata: sanitizeMetadata({
+            type: "deposit",
+            reservation_id: reservationId || "",
+            customer_email: customerEmail,
+            customer_name: fullName,
+            saved_card: "true",
+          }),
         },
-      });
+        {
+          idempotencyKey: buildDepositIntentIdempotencyKey({
+            scope: "deposit-saved-card",
+            reservationId,
+            customerEmail,
+            userId: req.userId,
+            paymentMethodId: paymentMethodToUse,
+          }),
+        }
+      );
 
       if (supabase && reservationId) {
         await updateReservationById(reservationId, {
@@ -617,18 +743,29 @@ router.post("/api/create-deposit-intent", optionalAuthMiddleware, async (req, re
       });
     }
 
-    const paymentIntent = await stripe.paymentIntents.create({
-      amount: amountInCents,
-      currency: "eur",
-      capture_method: "manual",
-      payment_method_types: ["card"],
-      metadata: {
-        type: "deposit",
-        reservation_id: reservationId || "",
-        customer_email: customerEmail,
-        customer_name: fullName,
+    const paymentIntent = await stripe.paymentIntents.create(
+      {
+        amount: amountInCents,
+        currency: "eur",
+        capture_method: "manual",
+        payment_method_types: ["card"],
+        metadata: sanitizeMetadata({
+          type: "deposit",
+          reservation_id: reservationId || "",
+          customer_email: customerEmail,
+          customer_name: fullName,
+        }),
       },
-    });
+      {
+        idempotencyKey: buildDepositIntentIdempotencyKey({
+          scope: "deposit-standard",
+          reservationId,
+          customerEmail,
+          userId: req.userId || null,
+          paymentMethodId: null,
+        }),
+      }
+    );
 
     if (supabase && reservationId) {
       await updateReservationById(reservationId, {
