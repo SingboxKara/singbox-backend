@@ -10,6 +10,7 @@ import { JWT_SECRET } from "../config/env.js";
 const router = express.Router();
 
 const PASSWORD_MIN_LENGTH = 8;
+const PASSWORD_MAX_LENGTH = 72; // bcrypt tronque au-delà, donc on bloque à la création
 const BCRYPT_ROUNDS = 12;
 
 function normalizeEmail(email) {
@@ -25,7 +26,27 @@ function isValidEmail(email) {
 }
 
 function isStrongEnoughPassword(password) {
-  return typeof password === "string" && password.length >= PASSWORD_MIN_LENGTH;
+  return (
+    typeof password === "string"
+    && password.length >= PASSWORD_MIN_LENGTH
+    && password.length <= PASSWORD_MAX_LENGTH
+  );
+}
+
+function getPasswordValidationError(password) {
+  if (typeof password !== "string" || password.length === 0) {
+    return "Email et mot de passe requis";
+  }
+
+  if (password.length < PASSWORD_MIN_LENGTH) {
+    return `Le mot de passe doit contenir au moins ${PASSWORD_MIN_LENGTH} caractères`;
+  }
+
+  if (password.length > PASSWORD_MAX_LENGTH) {
+    return `Le mot de passe doit contenir au maximum ${PASSWORD_MAX_LENGTH} caractères`;
+  }
+
+  return null;
 }
 
 function ensureAuthDependencies(res) {
@@ -83,7 +104,7 @@ router.post("/api/register", async (req, res) => {
     const rawPassword = req.body?.password;
 
     const email = normalizeEmail(rawEmail);
-    const password = String(rawPassword || "");
+    const password = typeof rawPassword === "string" ? rawPassword : "";
 
     if (!email || !password) {
       return res.status(400).json({
@@ -97,9 +118,16 @@ router.post("/api/register", async (req, res) => {
       });
     }
 
+    const passwordError = getPasswordValidationError(password);
+    if (passwordError) {
+      return res.status(400).json({
+        error: passwordError,
+      });
+    }
+
     if (!isStrongEnoughPassword(password)) {
       return res.status(400).json({
-        error: `Le mot de passe doit contenir au moins ${PASSWORD_MIN_LENGTH} caractères`,
+        error: `Le mot de passe doit contenir entre ${PASSWORD_MIN_LENGTH} et ${PASSWORD_MAX_LENGTH} caractères`,
       });
     }
 
@@ -162,7 +190,7 @@ router.post("/api/login", async (req, res) => {
     const rawPassword = req.body?.password;
 
     const email = normalizeEmail(rawEmail);
-    const password = String(rawPassword || "");
+    const password = typeof rawPassword === "string" ? rawPassword : "";
 
     if (!email || !password) {
       return res.status(400).json({
