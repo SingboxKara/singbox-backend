@@ -9,46 +9,62 @@ router.get("/api/account-dashboard", authMiddleware, async (req, res) => {
   try {
     const userId = req.userId;
 
-    // USER
-    const { data: user, error: userError } = await supabase
-      .from("users")
-      .select("id, email, singcoins, pseudo, created_at")
-      .eq("id", userId)
-      .single();
+    // 🔥 TOUT EN PARALLÈLE
+    const [
+      userRes,
+      reservationsRes,
+      referralsRes,
+      passesRes
+    ] = await Promise.all([
 
-    if (userError) throw userError;
+      // USER
+      supabase
+        .from("users")
+        .select("id, email, singcoins, pseudo, created_at")
+        .eq("id", userId)
+        .single(),
 
-    // RESERVATIONS (optimisé)
-    const { data: reservations, error: reservationsError } = await supabase
-      .from("reservations")
-      .select(`
-        id,
-        date,
-        start_time,
-        end_time,
-        box_id,
-        status,
-        montant,
-        paid_with_pass,
-        user_pass_id,
-        pass_places_used,
-        persons
-      `)
-      .eq("user_id", userId)
-      .order("start_time", { ascending: false });
+      // RESERVATIONS
+      supabase
+        .from("reservations")
+        .select(`
+          id,
+          date,
+          start_time,
+          end_time,
+          box_id,
+          status,
+          montant,
+          paid_with_pass,
+          user_pass_id,
+          pass_places_used,
+          persons
+        `)
+        .eq("user_id", userId)
+        .order("start_time", { ascending: false }),
 
-    if (reservationsError) throw reservationsError;
+      // REFERRALS
+      supabase
+        .from("referrals")
+        .select("status")
+        .eq("referrer_user_id", userId),
 
-    // PASSES
-    const passes = await listUserPasses(userId);
+      // PASSES
+      listUserPasses(userId)
+    ]);
 
-    // REFERRAL (simple version safe)
-    const { data: referrals } = await supabase
-      .from("referrals")
-      .select("status")
-      .eq("referrer_user_id", userId);
+    // 🔒 Gestion erreurs propre
+    if (userRes.error) throw userRes.error;
+    if (reservationsRes.error) throw reservationsRes.error;
+    if (referralsRes.error) throw referralsRes.error;
 
-    const validatedCount = (referrals || []).filter(r => r.status === "validated").length;
+    const user = userRes.data;
+    const reservations = reservationsRes.data || [];
+    const referrals = referralsRes.data || [];
+    const passes = passesRes || [];
+
+    // REFERRAL LOGIC
+    const validatedCount = referrals.filter(r => r.status === "validated").length;
 
     const referral = {
       code: user?.pseudo || userId,
@@ -60,14 +76,16 @@ router.get("/api/account-dashboard", authMiddleware, async (req, res) => {
     return res.json({
       success: true,
       user,
-      reservations: reservations || [],
-      passes: passes || [],
+      reservations,
+      passes,
       referral
     });
 
   } catch (error) {
-    console.error("Erreur /api/account-dashboard :", error);
-    return res.status(500).json({ error: "Erreur serveur" });
+    console.error("❌ /api/account-dashboard :", error);
+    return res.status(500).json({
+      error: "Erreur serveur"
+    });
   }
 });
 
