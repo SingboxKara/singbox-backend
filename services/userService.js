@@ -16,11 +16,6 @@ function normalizeEmail(email) {
   return safeText(email, 255).toLowerCase();
 }
 
-function normalizeNullableText(value, maxLen = 255) {
-  const text = safeText(value, maxLen);
-  return text || null;
-}
-
 function normalizeBirthdate(value) {
   const raw = safeText(value, 20);
   if (!raw) return null;
@@ -46,11 +41,6 @@ function sanitizeUserUpdatePayload(payload = {}) {
   if ("ville" in input) out.ville = safeText(input.ville, 80);
   if ("naissance" in input) out.naissance = normalizeBirthdate(input.naissance);
 
-  if ("pseudo" in input) out.pseudo = safeText(input.pseudo, 40);
-  if ("username" in input) out.username = safeText(input.username, 40);
-  if ("firstName" in input) out.first_name = safeText(input.firstName, 80);
-  if ("firstname" in input) out.first_name = safeText(input.firstname, 80);
-
   out.updated_at = new Date().toISOString();
 
   return out;
@@ -64,7 +54,30 @@ export async function getUserById(userId) {
 
   const { data, error } = await supabase
     .from("users")
-    .select("*")
+    .select(`
+      id,
+      email,
+      singcoins_balance,
+      created_at,
+      updated_at,
+      prenom,
+      nom,
+      telephone,
+      pays,
+      adresse,
+      complement,
+      cp,
+      ville,
+      naissance,
+      stripe_customer_id,
+      default_payment_method_id,
+      card_brand,
+      card_last4,
+      card_exp_month,
+      card_exp_year,
+      referral_code,
+      referred_by_code
+    `)
     .eq("id", id)
     .maybeSingle();
 
@@ -84,7 +97,31 @@ export async function getUserByEmail(email) {
 
   const { data, error } = await supabase
     .from("users")
-    .select("*")
+    .select(`
+      id,
+      email,
+      password_hash,
+      singcoins_balance,
+      created_at,
+      updated_at,
+      prenom,
+      nom,
+      telephone,
+      pays,
+      adresse,
+      complement,
+      cp,
+      ville,
+      naissance,
+      stripe_customer_id,
+      default_payment_method_id,
+      card_brand,
+      card_last4,
+      card_exp_month,
+      card_exp_year,
+      referral_code,
+      referred_by_code
+    `)
     .eq("email", normalized)
     .maybeSingle();
 
@@ -110,7 +147,30 @@ export async function updateUserProfileInUsersTable(userId, payload = {}) {
     .from("users")
     .update(updatePayload)
     .eq("id", id)
-    .select("*")
+    .select(`
+      id,
+      email,
+      singcoins_balance,
+      created_at,
+      updated_at,
+      prenom,
+      nom,
+      telephone,
+      pays,
+      adresse,
+      complement,
+      cp,
+      ville,
+      naissance,
+      stripe_customer_id,
+      default_payment_method_id,
+      card_brand,
+      card_last4,
+      card_exp_month,
+      card_exp_year,
+      referral_code,
+      referred_by_code
+    `)
     .maybeSingle();
 
   if (error) {
@@ -177,9 +237,29 @@ export async function getUserLightProfileById(userId) {
 
   const { data, error } = await supabase
     .from("users")
-    .select(
-      "id, email, prenom, nom, telephone, pays, adresse, complement, cp, ville, naissance, pseudo, username, first_name, created_at, updated_at, singcoins, default_payment_method_id, stripe_default_payment_method_id, card_brand, card_last4, card_exp_month, card_exp_year"
-    )
+    .select(`
+      id,
+      email,
+      singcoins_balance,
+      prenom,
+      nom,
+      telephone,
+      pays,
+      adresse,
+      complement,
+      cp,
+      ville,
+      naissance,
+      created_at,
+      updated_at,
+      default_payment_method_id,
+      card_brand,
+      card_last4,
+      card_exp_month,
+      card_exp_year,
+      referral_code,
+      referred_by_code
+    `)
     .eq("id", id)
     .maybeSingle();
 
@@ -194,6 +274,5 @@ export async function getUserLightProfileById(userId) {
 export {
   normalizeEmail,
   safeText,
-  normalizeNullableText,
   sanitizeUserUpdatePayload,
 };
