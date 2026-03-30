@@ -1,6 +1,10 @@
-// backend/services/userService.js
-
 import { supabase } from "../config/supabase.js";
+import {
+  getAccountProfile,
+  getAccountPayment,
+  getAccountReferral,
+  getAccountLoyalty,
+} from "./accountReadService.js";
 
 function ensureSupabase() {
   if (!supabase) {
@@ -52,41 +56,19 @@ export async function getUserById(userId) {
   const id = safeText(userId, 120);
   if (!id) return null;
 
-  const { data, error } = await supabase
-    .from("users")
-    .select(`
-      id,
-      email,
-      singcoins_balance,
-      created_at,
-      updated_at,
-      prenom,
-      nom,
-      telephone,
-      pays,
-      adresse,
-      complement,
-      cp,
-      ville,
-      naissance,
-      stripe_customer_id,
-      default_payment_method_id,
-      card_brand,
-      card_last4,
-      card_exp_month,
-      card_exp_year,
-      referral_code,
-      referred_by_code
-    `)
-    .eq("id", id)
-    .maybeSingle();
+  const [profile, payment, referral, loyalty] = await Promise.all([
+    getAccountProfile(id),
+    getAccountPayment(id),
+    getAccountReferral(id),
+    getAccountLoyalty(id),
+  ]);
 
-  if (error) {
-    console.error("getUserById error:", error);
-    throw error;
-  }
-
-  return data || null;
+  return {
+    profile,
+    payment,
+    referral,
+    loyalty,
+  };
 }
 
 export async function getUserByEmail(email) {
@@ -100,27 +82,7 @@ export async function getUserByEmail(email) {
     .select(`
       id,
       email,
-      password_hash,
-      singcoins_balance,
-      created_at,
-      updated_at,
-      prenom,
-      nom,
-      telephone,
-      pays,
-      adresse,
-      complement,
-      cp,
-      ville,
-      naissance,
-      stripe_customer_id,
-      default_payment_method_id,
-      card_brand,
-      card_last4,
-      card_exp_month,
-      card_exp_year,
-      referral_code,
-      referred_by_code
+      password_hash
     `)
     .eq("email", normalized)
     .maybeSingle();
@@ -143,42 +105,17 @@ export async function updateUserProfileInUsersTable(userId, payload = {}) {
 
   const updatePayload = sanitizeUserUpdatePayload(payload);
 
-  const { data, error } = await supabase
+  const { error } = await supabase
     .from("users")
     .update(updatePayload)
-    .eq("id", id)
-    .select(`
-      id,
-      email,
-      singcoins_balance,
-      created_at,
-      updated_at,
-      prenom,
-      nom,
-      telephone,
-      pays,
-      adresse,
-      complement,
-      cp,
-      ville,
-      naissance,
-      stripe_customer_id,
-      default_payment_method_id,
-      card_brand,
-      card_last4,
-      card_exp_month,
-      card_exp_year,
-      referral_code,
-      referred_by_code
-    `)
-    .maybeSingle();
+    .eq("id", id);
 
   if (error) {
     console.error("updateUserProfileInUsersTable error:", error);
     throw error;
   }
 
-  return data || null;
+  return getAccountProfile(id);
 }
 
 export async function getReservationOwnedByUser(
@@ -235,40 +172,7 @@ export async function getUserLightProfileById(userId) {
   const id = safeText(userId, 120);
   if (!id) return null;
 
-  const { data, error } = await supabase
-    .from("users")
-    .select(`
-      id,
-      email,
-      singcoins_balance,
-      prenom,
-      nom,
-      telephone,
-      pays,
-      adresse,
-      complement,
-      cp,
-      ville,
-      naissance,
-      created_at,
-      updated_at,
-      default_payment_method_id,
-      card_brand,
-      card_last4,
-      card_exp_month,
-      card_exp_year,
-      referral_code,
-      referred_by_code
-    `)
-    .eq("id", id)
-    .maybeSingle();
-
-  if (error) {
-    console.error("getUserLightProfileById error:", error);
-    throw error;
-  }
-
-  return data || null;
+  return getAccountProfile(id);
 }
 
 export {
