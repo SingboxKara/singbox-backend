@@ -1,11 +1,12 @@
 import { supabase } from "../config/supabase.js";
 import {
   getReservationById,
-  isReservationFinished,
   sendReviewRequestEmail,
 } from "./reviewService.js";
 import { processReservationGamification } from "./gamificationService.js";
-import { isReservationStatusConfirmed } from "./reservationService.js";
+import {
+  isReservationEligibleForPostSession,
+} from "./reservationLifecycleService.js";
 
 function nowIso() {
   return new Date().toISOString();
@@ -24,23 +25,11 @@ function canProcessReservationPostSession(reservation) {
     };
   }
 
-  const status = String(reservation.status || "").trim().toLowerCase();
-  const isEligibleStatus =
-    isReservationStatusConfirmed(status) || status === "completed";
-
-  if (!isEligibleStatus) {
+  if (!isReservationEligibleForPostSession(reservation)) {
     return {
       ok: false,
-      reason: "invalid_status",
-      message: `Statut non éligible au post-session : ${reservation.status || "unknown"}`,
-    };
-  }
-
-  if (!isReservationFinished(reservation)) {
-    return {
-      ok: false,
-      reason: "not_finished",
-      message: "La séance n’est pas encore terminée",
+      reason: "not_eligible",
+      message: "Réservation non éligible au post-session",
     };
   }
 
