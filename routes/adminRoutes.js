@@ -19,12 +19,10 @@ import {
 
 import {
   hasReservationConflict,
-  isReservationStatusConfirmed,
 } from "../services/reservationService.js";
 
 import {
   getReservationById,
-  isReservationFinished,
   sendReviewRequestEmail,
   getExistingReviewRequestByReservationId,
 } from "../services/reviewService.js";
@@ -39,6 +37,10 @@ import {
   processReservationPostSession,
   processFinishedReservationsPostSessionBatch,
 } from "../services/postSessionService.js";
+
+import {
+  isReservationEligibleForReview,
+} from "../services/reservationLifecycleService.js";
 
 const router = express.Router();
 
@@ -429,19 +431,9 @@ router.post("/api/admin/send-review-request", requireSupabaseAdmin, async (req, 
       return res.status(404).json({ error: "Réservation introuvable" });
     }
 
-    if (
-      !isReservationStatusConfirmed(reservation.status) &&
-      reservation.status !== "completed"
-    ) {
+    if (!isReservationEligibleForReview(reservation)) {
       return res.status(400).json({
-        error:
-          "La réservation doit être confirmée ou complétée pour envoyer une demande d’avis",
-      });
-    }
-
-    if (!isReservationFinished(reservation)) {
-      return res.status(400).json({
-        error: "La séance n’est pas encore terminée",
+        error: "La réservation n’est pas éligible à une demande d’avis",
       });
     }
 
@@ -494,9 +486,7 @@ router.all("/api/admin/send-completed-review-requests", requireAdminOrCron, asyn
     }
 
     const confirmedFinishedReservations = (reservations || []).filter(
-      (row) =>
-        (isReservationStatusConfirmed(row.status) || row.status === "completed") &&
-        isReservationFinished(row)
+      (row) => isReservationEligibleForReview(row)
     );
 
     const results = [];
