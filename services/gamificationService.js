@@ -1297,79 +1297,17 @@ async function syncGamificationForUser(userId) {
 
   await ensureMissionDefinitions();
   await ensureBadgeDefinitions();
+
   await syncUserStats(userId);
   await syncStreak(userId);
   await syncWeeklyMissions(userId);
   await refreshGamificationSummary(userId);
   await evaluateBadges(userId);
-  await syncUserStats(userId);
+
   await refreshGamificationSummary(userId);
 }
 
-export async function processReservationGamification(reservationId) {
-  if (!supabase || !reservationId) return null;
-
-  const { data: reservation, error } = await supabase
-    .from("reservations")
-    .select("*")
-    .eq("id", reservationId)
-    .maybeSingle();
-
-  if (error) throw error;
-  if (!reservation) return null;
-  if (!reservation.user_id) return null;
-  if (!qualifiesForGamification(reservation.status)) return null;
-
-  const userId = reservation.user_id;
-
-  await ensureUserRows(userId);
-
-  const eventResult = await insertGamificationEvent({
-    userId,
-    eventType: "reservation_completed",
-    referenceType: "reservation",
-    referenceId: reservation.id,
-    payload: {
-      reservation_id: reservation.id,
-      status: reservation.status,
-      start_time: reservation.start_time,
-      end_time: reservation.end_time,
-      completed_at: reservation.completed_at,
-      persons: reservation.persons,
-      is_weekend: reservation.is_weekend,
-      is_daytime: reservation.is_daytime,
-      is_group_session: reservation.is_group_session,
-      session_minutes: reservation.session_minutes,
-    },
-    processed: true,
-  });
-
-  if (!eventResult.duplicate) {
-    await creditSingcoins({
-      userId,
-      amount: BASE_RESERVATION_SINGCOINS,
-      type: "reservation_reward",
-      referenceType: "reservation",
-      referenceId: String(reservation.id),
-      label: "Session réalisée",
-    });
-
-    await creditXp({
-      userId,
-      amount: BASE_RESERVATION_XP,
-      type: "reservation_reward",
-      referenceType: "reservation",
-      referenceId: String(reservation.id),
-      label: "Session réalisée",
-    });
-  }
-
-  await syncGamificationForUser(userId);
-
-  return getUserGamificationSnapshot(userId);
-}
-
-export async function getUserGamificationSnapshot(userId) {
+async function readUserGamificationSnapshot(userId) {
   if (!supabase || !userId) {
     return {
       singcoins: { balance: 0, earned: 0, used: 0 },
@@ -1404,8 +1342,6 @@ export async function getUserGamificationSnapshot(userId) {
       badges: [],
     };
   }
-
-  await syncGamificationForUser(userId);
 
   const [
     { data: gamification, error: gamificationError },
@@ -1537,4 +1473,76 @@ export async function getUserGamificationSnapshot(userId) {
     missions,
     badges,
   };
+}
+
+export async function processReservationGamification(reservationId) {
+  if (!supabase || !reservationId) return null;
+
+  const { data: reservation, error } = await supabase
+    .from("reservations")
+    .select("*")
+    .eq("id", reservationId)
+    .maybeSingle();
+
+  if (error) throw error;
+  if (!reservation) return null;
+  if (!reservation.user_id) return null;
+  if (!qualifiesForGamification(reservation.status)) return null;
+
+  const userId = reservation.user_id;
+
+  await ensureUserRows(userId);
+
+  const eventResult = await insertGamificationEvent({
+    userId,
+    eventType: "reservation_completed",
+    referenceType: "reservation",
+    referenceId: reservation.id,
+    payload: {
+      reservation_id: reservation.id,
+      status: reservation.status,
+      start_time: reservation.start_time,
+      end_time: reservation.end_time,
+      completed_at: reservation.completed_at,
+      persons: reservation.persons,
+      is_weekend: reservation.is_weekend,
+      is_daytime: reservation.is_daytime,
+      is_group_session: reservation.is_group_session,
+      session_minutes: reservation.session_minutes,
+    },
+    processed: true,
+  });
+
+  if (!eventResult.duplicate) {
+    await creditSingcoins({
+      userId,
+      amount: BASE_RESERVATION_SINGCOINS,
+      type: "reservation_reward",
+      referenceType: "reservation",
+      referenceId: String(reservation.id),
+      label: "Session réalisée",
+    });
+
+    await creditXp({
+      userId,
+      amount: BASE_RESERVATION_XP,
+      type: "reservation_reward",
+      referenceType: "reservation",
+      referenceId: String(reservation.id),
+      label: "Session réalisée",
+    });
+  }
+
+  await syncGamificationForUser(userId);
+
+  return readUserGamificationSnapshot(userId);
+}
+
+export async function getUserGamificationSnapshot(userId) {
+  if (!supabase || !userId) {
+    return readUserGamificationSnapshot(userId);
+  }
+
+  await syncGamificationForUser(userId);
+  return readUserGamificationSnapshot(userId);
 }
