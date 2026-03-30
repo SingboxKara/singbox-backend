@@ -2,6 +2,7 @@ import express from "express";
 import { supabase } from "../config/supabase.js";
 import { authMiddleware } from "../middlewares/auth.js";
 import { listUserPasses } from "../services/passService.js";
+import { getFullAccountSnapshot } from "../services/accountReadService.js";
 
 const router = express.Router();
 
@@ -15,41 +16,14 @@ function safeText(value, maxLen = 255) {
   return String(value ?? "").trim().slice(0, maxLen);
 }
 
-function toSafeInt(value, fallback = 0) {
-  const n = Number.parseInt(value, 10);
-  return Number.isFinite(n) ? n : fallback;
-}
-
-function normalizeUserRow(user) {
-  if (!user || typeof user !== "object") {
-    return null;
-  }
-
-  return {
-    id: user.id ?? null,
-    email: safeText(user.email, 255) || null,
-    singcoins_balance: Math.max(0, toSafeInt(user.singcoins_balance, 0)),
-    prenom: safeText(user.prenom, 80),
-    nom: safeText(user.nom, 80),
-    telephone: safeText(user.telephone, 40),
-    created_at: user.created_at ?? null,
-    referral_code: safeText(user.referral_code, 80) || null,
-    referred_by_code: safeText(user.referred_by_code, 80) || null,
-    default_payment_method_id: user.default_payment_method_id ?? null,
-    card_brand: user.card_brand ?? null,
-    card_last4: user.card_last4 ?? null,
-    card_exp_month: user.card_exp_month ?? null,
-    card_exp_year: user.card_exp_year ?? null,
-  };
-}
-
-function normalizeReferralPayload(user, referrals) {
+function normalizeReferralPayload(referral, referrals) {
   const validatedCount = Array.isArray(referrals)
     ? referrals.filter((r) => String(r?.status || "").toLowerCase() === "validated").length
     : 0;
 
   return {
-    code: user?.referral_code || null,
+    code: referral?.referral_code || null,
+    referred_by_code: referral?.referred_by_code || null,
     progressCurrent: validatedCount,
     progressTarget: 4,
     rewardAvailable: validatedCount >= 4,
@@ -66,33 +40,11 @@ router.get("/api/account-dashboard", authMiddleware, async (req, res) => {
       return res.status(401).json({ error: "Utilisateur non authentifié" });
     }
 
-    const { data: userRow, error: userError } = await supabase
-      .from("users")
-      .select(`
-        id,
-        email,
-        singcoins_balance,
-        prenom,
-        nom,
-        telephone,
-        created_at,
-        referral_code,
-        referred_by_code,
-        default_payment_method_id,
-        card_brand,
-        card_last4,
-        card_exp_month,
-        card_exp_year
-      `)
-      .eq("id", userId)
-      .maybeSingle();
+    const snapshot = await getFullAccountSnapshot(userId);
 
-    if (userError) throw userError;
-    if (!userRow) {
+    if (!snapshot?.profile) {
       return res.status(404).json({ error: "Utilisateur introuvable" });
     }
-
-    const user = normalizeUserRow(userRow);
 
     const { data: reservations, error: reservationsError } = await supabase
       .from("reservations")
@@ -138,10 +90,14 @@ router.get("/api/account-dashboard", authMiddleware, async (req, res) => {
 
     return res.json({
       success: true,
-      user,
+      account: {
+        profile: snapshot.profile,
+        payment: snapshot.payment,
+        loyalty: snapshot.loyalty,
+        referral: normalizeReferralPayload(snapshot.referral, referrals),
+      },
       reservations: Array.isArray(reservations) ? reservations : [],
       passes: Array.isArray(passes) ? passes : [],
-      referral: normalizeReferralPayload(user, referrals),
     });
   } catch (error) {
     console.error("Erreur /api/account-dashboard :", error);
