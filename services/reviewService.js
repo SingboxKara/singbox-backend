@@ -11,8 +11,10 @@ import {
 
 import { safeText } from "../utils/validators.js";
 import { parseDateOrNull } from "../utils/dates.js";
-import { isReservationStatusConfirmed } from "./reservationService.js";
 import { getExpressRebookUrl } from "./emailService.js";
+import {
+  isReservationEligibleForReview,
+} from "./reservationLifecycleService.js";
 
 const FALLBACK_FRONTEND_BASE_URL = "https://site-reservation-qr.vercel.app";
 const POST_SESSION_PROMO_CODE_PREFIX = "SINGBACK";
@@ -438,12 +440,8 @@ export async function createReviewFromToken({
     throw new Error("Réservation associée introuvable");
   }
 
-  if (!isReservationStatusConfirmed(reservation.status)) {
+  if (!isReservationEligibleForReview(reservation)) {
     throw new Error("Réservation non valide pour un avis");
-  }
-
-  if (!isReservationFinished(reservation)) {
-    throw new Error("La séance n’est pas encore terminée");
   }
 
   const existingReview = await getExistingReviewForReservation(request.reservation_id);
@@ -761,9 +759,7 @@ export async function processCompletedReviewRequests(options = {}) {
   }
 
   const confirmedFinishedReservations = (reservations || []).filter(
-    (row) =>
-      (isReservationStatusConfirmed(row.status) || row.status === "completed") &&
-      isReservationFinished(row)
+    (row) => isReservationEligibleForReview(row)
   );
 
   const results = [];
