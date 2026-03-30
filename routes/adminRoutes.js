@@ -35,6 +35,11 @@ import {
   getUserGamificationSnapshot,
 } from "../services/gamificationService.js";
 
+import {
+  processReservationPostSession,
+  processFinishedReservationsPostSessionBatch,
+} from "../services/postSessionService.js";
+
 const router = express.Router();
 
 async function writeAdminAuditLog(req, payload) {
@@ -565,6 +570,69 @@ router.all("/api/admin/send-completed-review-requests", requireAdminOrCron, asyn
     console.error("Erreur /api/admin/send-completed-review-requests :", e);
     return res.status(500).json({
       error: "Erreur serveur lors de l’envoi en lot des demandes d’avis",
+    });
+  }
+});
+
+router.post("/api/admin/process-post-session", requireSupabaseAdmin, async (req, res) => {
+  try {
+    const { reservationId } = req.body || {};
+
+    if (!reservationId) {
+      return res.status(400).json({ error: "reservationId manquant" });
+    }
+
+    const result = await processReservationPostSession(reservationId);
+
+    await writeAdminAuditLog(req, {
+      action: "process_post_session",
+      target_table: "reservations",
+      target_id: reservationId,
+      metadata: {
+        success: !!result?.success,
+        skipped: !!result?.skipped,
+        reason: result?.reason || null,
+        message: result?.message || null,
+      },
+    });
+
+    return res.json({
+      success: true,
+      result,
+    });
+  } catch (e) {
+    console.error("Erreur /api/admin/process-post-session :", e);
+    return res.status(500).json({
+      error: "Erreur serveur lors du traitement post-session",
+    });
+  }
+});
+
+router.post("/api/admin/process-post-session-batch", requireAdminOrCron, async (req, res) => {
+  try {
+    const incomingLimit =
+      req.method === "GET" ? req.query?.limit : req.body?.limit;
+
+    const limit = Math.min(Math.max(Number(incomingLimit || 20), 1), 100);
+
+    const result = await processFinishedReservationsPostSessionBatch(limit);
+
+    await writeAdminAuditLog(req, {
+      action: "process_post_session_batch",
+      target_table: "reservations",
+      target_id: null,
+      metadata: {
+        mode: req.isCron ? "cron" : "admin",
+        limit,
+        totalProcessed: result?.totalProcessed || 0,
+      },
+    });
+
+    return res.json(result);
+  } catch (e) {
+    console.error("Erreur /api/admin/process-post-session-batch :", e);
+    return res.status(500).json({
+      error: "Erreur serveur lors du batch post-session",
     });
   }
 });
